@@ -1,0 +1,74 @@
+<style>
+html,
+body,
+#root {
+  min-height: 100% !important;
+  background: transparent !important;
+}
+
+body.hope-ui-light,
+body.hope-ui-dark {
+  background-color: #eef3ff !important;
+  background-image: var(--jinfeng-bg, none) !important;
+  background-position: center center !important;
+  background-size: cover !important;
+  background-repeat: no-repeat !important;
+  background-attachment: fixed !important;
+}
+
+.header,
+.footer {
+  background: transparent !important;
+}
+
+.body,
+.obj-box,
+.footer > .hope-stack,
+.header > div,
+.nav {
+  background: rgba(255, 255, 255, 0.72) !important;
+  backdrop-filter: blur(14px) saturate(1.15) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(1.15) !important;
+  border-radius: 18px !important;
+  box-shadow: 0 12px 36px rgba(31, 41, 55, 0.12) !important;
+}
+
+.obj-box {
+  overflow: hidden !important;
+}
+</style>
+
+<script>
+(function () {
+  var bgPath = "/lanzou/Photo/background.jpg";
+
+  async function setJinfengBackground() {
+    try {
+      var res = await fetch("/api/fs/get", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          path: bgPath,
+          password: ""
+        })
+      });
+      var json = await res.json();
+      var rawUrl = json && json.data && json.data.raw_url;
+
+      if (rawUrl) {
+        document.documentElement.style.setProperty(
+          "--jinfeng-bg",
+          'url("' + rawUrl.replace(/"/g, "%22") + '")'
+        );
+      }
+    } catch (err) {
+      console.warn("Jinfeng Cloud background failed to load:", err);
+    }
+  }
+
+  setJinfengBackground();
+  setInterval(setJinfengBackground, 30 * 60 * 1000);
+})();
+</script>

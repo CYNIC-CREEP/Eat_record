@@ -1,0 +1,11 @@
+﻿{
+  "name": "eat-record-cloud-api",
+  "version": "0.5.5",
+  "description": "eat record cloud API server with password authentication and account management",
+  "main": "cloud-api-server.py",
+  "scripts": {
+    "start": "python3 cloud-api-server.py",
+    "check": "python3 -m py_compile cloud-api-server.py"
+  },
+  "dependencies": {}
+}

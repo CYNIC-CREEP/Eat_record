@@ -1,0 +1,12 @@
+build/
+debug.keystore
+dist/*.apk
+dist/*.idsig
+dist/*.zip
+dist/*.png
+.lanzou-browser/
+.lanzou-uploader/
+.codex-remote-attachments/
+.playwright-cli/
+output/
+server/__pycache__/
