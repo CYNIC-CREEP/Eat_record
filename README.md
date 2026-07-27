@@ -1,6 +1,6 @@
 # 一蔬一饭
 
-一个轻量的原生 Android 一日三餐记录 App。项目不依赖 Gradle 或第三方库，使用 Android SDK 自带工具直接构建，目标是保持 APK 很小。
+一个轻量的原生 Android 一日三餐记录 App。项目不依赖 Gradle 或第三方库，使用 Android SDK 自带工具直接构建，目标是保持 APK 体积小，轻量。
 
 ## 功能
 
