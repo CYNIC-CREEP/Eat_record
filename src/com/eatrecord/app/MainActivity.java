@@ -85,11 +85,9 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.File;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -135,8 +133,9 @@ public class MainActivity extends Activity {
     private static final String CLOUD_API_SET_PASSWORD = CLOUD_API_BASE + "/api/users/set-password";
     private static final String CLOUD_API_CHECK_NICKNAME = CLOUD_API_BASE + "/api/users/check-nickname";
     private static final String CLOUD_API_DELETE_ACCOUNT = CLOUD_API_BASE + "/api/users/delete";
-    private static final String CLOUD_API_DATA_UPLOAD = CLOUD_API_BASE + "/api/users/data/upload";
-    private static final String CLOUD_API_DATA_DOWNLOAD = CLOUD_API_BASE + "/api/users/data/download";
+    private static final String CLOUD_API_DATA_UPLOAD_RAW = CLOUD_API_BASE + "/api/users/data/upload-raw";
+    private static final String CLOUD_API_DATA_DOWNLOAD_RAW = CLOUD_API_BASE + "/api/users/data/download-raw";
+    private static final int MAX_JSON_RESPONSE_CHARS = 4 * 1024 * 1024;
     private static final String OPENLIST_API_LIST_URL = "http://47.97.215.111:5244/api/fs/list";
     private static final String OPENLIST_API_GET_URL = "http://47.97.215.111:5244/api/fs/get";
     private static final String OPENLIST_APP_ROOT = "/lanzou/Myapp/eat record";
@@ -694,7 +693,22 @@ public class MainActivity extends Activity {
             {"0.5.21 (endness)",
                       "重构拍照输出通道，修复部分安卓 16 设备拍照完成后图片未加入所选餐次的问题。",
                       "兼容相机返回地址与应用输出地址，照片写入稍有延迟时会自动短暂重试。",
-                      "餐次右侧相机图标改为更浅的半透明主题色，减弱灰暗感。"}
+                      "餐次右侧相机图标改为更浅的半透明主题色，减弱灰暗感。"},
+            {"0.5.22",
+                      "降低选图、拍照、贴纸、本子和分享页面的图片内存峰值，修复使用中偶发闪退。",
+                      "云端备份改为限流式上传与下载，修复自动同步读取超大数据时可能直接退出的问题。",
+                      "底栏外边距与内部留白改为四周对称，阴影轮廓更加平衡。",
+                      "笔记字体完整移动到个性化的界面布局 > 足迹中。",
+                      "长按足迹本子可收藏当天记录，数据与安全新增收藏记录页面。"},
+            {"0.5.23",
+                      "修复隐藏贴纸后横滑餐次会让卡片变高、贴纸数量下移和意外出现输入光标的问题。",
+                      "底栏整体略微缩小，椭圆外部保持透明，阴影与页面边缘的四周留白统一。",
+                      "收藏星选中颜色调浅，收藏记录列表更加紧凑，并可切换为足迹同款展开布局。"},
+            {"0.5.24",
+                      "修复打开应用时偶发显示 UTF-8 解码技术错误的问题，自动同步兼容新旧云端接口。",
+                      "长按餐次图片或贴纸后新增向左旋转按钮，折叠与展开状态均可逐张旋转或删除。",
+                      "媒体拖动改为原尺寸插入排序，支持移动到间隙和末尾，并降低误叠放概率。",
+                      "阻止系统长按图片功能接管拖动手势，修复分享面板意外弹出；右下角添加图片按钮轻微上移。"}
     };
     private static final String[] DINING_METHOD_OPTIONS = {"食堂", "线下餐厅", "外卖", "自己做"};
     private static final String[] MEAL_HABIT_OPTIONS = {"一天1~2餐", "一天2~3餐", "一天3~4餐", "一天4餐以上"};
@@ -805,6 +819,7 @@ public class MainActivity extends Activity {
     private boolean inDataSecurityPage = false;
     private boolean inCloudSyncPage = false;
     private boolean inRecycleBinPage = false;
+    private boolean inFavoriteRecordsPage = false;
     private boolean inHiddenSettingsPage = false;
     private boolean inHomeManagerPage = false;
     private boolean inInterfaceLayoutPage = false;
@@ -875,13 +890,14 @@ public class MainActivity extends Activity {
     private float backSwipeDownY = 0f;
     private boolean backSwipeTracking = false;
     private String bookDetailDate;
+    private boolean returnToFavoriteRecordsAfterBook = false;
     private TextView bookDetailTitleView;
     private TextView bookDetailShareView;
     private BookDetailSwipeFrame bookDetailSwipeFrame;
     private final HashMap<String, Typeface> downloadedTypefaceCache = new HashMap<String, Typeface>();
     private final ExecutorService stickerGalleryExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService mediaThumbnailExecutor = Executors.newFixedThreadPool(3);
-    private final LruCache<String, Bitmap> mediaThumbnailCache = new LruCache<String, Bitmap>(12 * 1024 * 1024) {
+    private final LruCache<String, Bitmap> mediaThumbnailCache = new LruCache<String, Bitmap>(thumbnailCacheBytes()) {
         @Override
         protected int sizeOf(String key, Bitmap value) {
             return value == null ? 0 : value.getByteCount();
@@ -959,26 +975,32 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams contentLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT);
-        contentLp.bottomMargin = dp(92);
         root.addView(content, contentLp);
 
-        navHost = new FrameLayout(this);
+        LiquidGlassNavLayout glassNav = new LiquidGlassNavLayout(this);
+        glassNav.setBlurSource(content);
+        navHost = glassNav;
         disableForceDark(navHost);
-        navHost.setPadding(dp(8), dp(7), dp(8), dp(7));
-        navHost.setBackground(round(navSurfaceColor(), dp(30), navStrokeColor(), dp(1)));
-        navHost.setElevation(dp(navGlassEnabled() ? 5 : 10));
+        navHost.setPadding(dp(7), dp(7), dp(7), dp(7));
+        navHost.setBackgroundColor(Color.TRANSPARENT);
+        navHost.setElevation(0f);
         FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(spaceByLayout(70, 66, 64)));
-        navLp.leftMargin = dp(spaceByLayout(18, 16, 14));
-        navLp.rightMargin = dp(spaceByLayout(18, 16, 14));
-        navLp.bottomMargin = dp(spaceByLayout(20, 18, 16));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(spaceByLayout(76, 72, 70)));
+        int navOuterMargin = dp(spaceByLayout(22, 20, 18));
+        navLp.leftMargin = navOuterMargin;
+        navLp.rightMargin = navOuterMargin;
+        navLp.bottomMargin = navOuterMargin;
         navLp.gravity = Gravity.BOTTOM;
         root.addView(navHost, navLp);
 
         navIndicator = new View(this);
         disableForceDark(navIndicator);
         navIndicator.setBackground(round(accentSoft, dp(26), 0, 0));
-        navHost.addView(navIndicator, new FrameLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams navIndicatorLp = new FrameLayout.LayoutParams(
+                dp(1), ViewGroup.LayoutParams.MATCH_PARENT);
+        navIndicatorLp.topMargin = dp(2);
+        navIndicatorLp.bottomMargin = dp(2);
+        navHost.addView(navIndicator, navIndicatorLp);
 
         navBar = new LinearLayout(this);
         disableForceDark(navBar);
@@ -997,7 +1019,7 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams fabLp = new FrameLayout.LayoutParams(dp(spaceByLayout(62, 58, 56)), dp(spaceByLayout(62, 58, 56)));
         fabLp.gravity = Gravity.RIGHT | Gravity.BOTTOM;
         fabLp.rightMargin = dp(24);
-        fabLp.bottomMargin = dp(spaceByLayout(104, 99, 94));
+        fabLp.bottomMargin = dp(photoFabBottomMargin());
         root.addView(fab, fabLp);
         attachPressAnimation(fab);
 
@@ -1010,7 +1032,7 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams fabIconLp = new FrameLayout.LayoutParams(dp(spaceByLayout(42, 40, 38)), dp(spaceByLayout(42, 40, 38)));
         fabIconLp.gravity = Gravity.RIGHT | Gravity.BOTTOM;
         fabIconLp.rightMargin = dp(24 + spaceByLayout(10, 9, 9));
-        fabIconLp.bottomMargin = dp(spaceByLayout(104, 99, 94) + spaceByLayout(10, 9, 9));
+        fabIconLp.bottomMargin = dp(photoFabBottomMargin() + spaceByLayout(10, 9, 9));
         root.addView(fabIcon, fabIconLp);
 
         buildNav();
@@ -1046,8 +1068,11 @@ public class MainActivity extends Activity {
             disableForceDark(content);
         }
         if (navHost != null) {
-            navHost.setBackground(round(navSurfaceColor(), dp(30), navStrokeColor(), dp(1)));
-            navHost.setElevation(dp(navGlassEnabled() ? 5 : 10));
+            navHost.setBackgroundColor(Color.TRANSPARENT);
+            if (navHost instanceof LiquidGlassNavLayout) {
+                ((LiquidGlassNavLayout) navHost).refreshGlass();
+            }
+            navHost.setElevation(0f);
         }
         if (keepThemeSettingsVisible) {
             boolean wasSuppressing = suppressEntryAnimation;
@@ -1079,6 +1104,29 @@ public class MainActivity extends Activity {
         mediaThumbnailExecutor.shutdownNow();
         mediaThumbnailCache.evictAll();
         super.onDestroy();
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            mediaThumbnailCache.trimToSize(Math.max(1024 * 1024, thumbnailCacheBytes() / 4));
+        }
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            mediaThumbnailCache.evictAll();
+        }
+    }
+
+    @Override
+    public void onLowMemory() {
+        mediaThumbnailCache.evictAll();
+        super.onLowMemory();
+    }
+
+    private static int thumbnailCacheBytes() {
+        long maxMemory = Runtime.getRuntime().maxMemory();
+        return (int) Math.max(4L * 1024L * 1024L,
+                Math.min(8L * 1024L * 1024L, maxMemory / 24L));
     }
 
     private void preferSmoothDisplay() {
@@ -1293,7 +1341,7 @@ public class MainActivity extends Activity {
             item.setTag(Integer.valueOf(index));
             item.setOrientation(LinearLayout.VERTICAL);
             item.setGravity(Gravity.CENTER);
-            item.setPadding(dp(6), dp(4), dp(6), dp(3));
+            item.setPadding(dp(6), dp(3), dp(6), dp(2));
             item.setClickable(true);
             attachPressAnimation(item);
             item.setOnClickListener(new View.OnClickListener() {
@@ -1352,8 +1400,8 @@ public class MainActivity extends Activity {
             TextView title = label(TAB_TITLES[tabIndex], 13, active ? Color.rgb(32, 32, 32) : Color.rgb(145, 145, 145), true);
             title.setGravity(Gravity.CENTER);
             resetSystemTypefaceRecursive(title);
-            item.addView(icon, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
-            item.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22)));
+            item.addView(icon, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(27)));
+            item.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(21)));
             item.animate().cancel();
             item.setScaleX(1f);
             item.setScaleY(1f);
@@ -1372,7 +1420,7 @@ public class MainActivity extends Activity {
                 if (target == null || target.getWidth() == 0) {
                     return;
                 }
-                int targetWidth = Math.max(dp(74), target.getWidth() - dp(14));
+                int targetWidth = Math.max(dp(74), target.getWidth() - dp(6));
                 ViewGroup.LayoutParams lp = navIndicator.getLayoutParams();
                 if (lp.width != targetWidth) {
                     lp.width = targetWidth;
@@ -1438,6 +1486,7 @@ public class MainActivity extends Activity {
         inDataSecurityPage = false;
         inCloudSyncPage = false;
         inRecycleBinPage = false;
+        inFavoriteRecordsPage = false;
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
@@ -1451,6 +1500,7 @@ public class MainActivity extends Activity {
         inAboutSoftwarePage = false;
         inFontSourcesPage = false;
         inBookDetail = false;
+        returnToFavoriteRecordsAfterBook = false;
         inPhotoViewer = false;
         if (tab != 0) {
             mealPhotoPickAwaitingResult = false;
@@ -1693,6 +1743,7 @@ public class MainActivity extends Activity {
         inDataSecurityPage = false;
         inCloudSyncPage = false;
         inRecycleBinPage = false;
+        inFavoriteRecordsPage = false;
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
@@ -1706,6 +1757,7 @@ public class MainActivity extends Activity {
         inAboutSoftwarePage = false;
         inFontSourcesPage = false;
         inBookDetail = false;
+        returnToFavoriteRecordsAfterBook = false;
         inPhotoViewer = false;
         bookDetailSwipeFrame = null;
         aiPreviewOverlay = null;
@@ -1748,6 +1800,22 @@ public class MainActivity extends Activity {
         }
         if (inBookDetail) {
             closeBookDetail();
+            return true;
+        }
+        if (inFavoriteRecordsPage) {
+            closeFavoriteRecordsPage();
+            return true;
+        }
+        if (inCloudSyncPage) {
+            closeCloudSyncPage();
+            return true;
+        }
+        if (inRecycleBinPage) {
+            closeRecycleBinPage();
+            return true;
+        }
+        if (inDataSecurityPage) {
+            closeDataSecurityPage();
             return true;
         }
         if (closeAnyPreferencesSubPage()) {
@@ -1841,6 +1909,7 @@ public class MainActivity extends Activity {
         inDataSecurityPage = false;
         inCloudSyncPage = false;
         inRecycleBinPage = false;
+        inFavoriteRecordsPage = false;
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
@@ -1861,7 +1930,8 @@ public class MainActivity extends Activity {
     private boolean isMeSubPageVisible() {
         return inPreferencesPage || inThemeSettingsPage || inProfileSettingsPage
                 || inAboutSoftwarePage || inFontSourcesPage || inUpdateLogPage
-                || inDataSecurityPage || inCloudSyncPage || inRecycleBinPage;
+                || inDataSecurityPage || inCloudSyncPage || inRecycleBinPage
+                || inFavoriteRecordsPage;
     }
 
     private void returnToMeRoot() {
@@ -1881,6 +1951,7 @@ public class MainActivity extends Activity {
                 inDataSecurityPage = false;
                 inCloudSyncPage = false;
                 inRecycleBinPage = false;
+                inFavoriteRecordsPage = false;
                 renderCurrent();
             }
         }, -1f);
@@ -1933,6 +2004,10 @@ public class MainActivity extends Activity {
         }
     }
 
+    private int photoFabBottomMargin() {
+        return spaceByLayout(110, 105, 100);
+    }
+
     private void updatePhotoFabState(boolean expanded) {
         if (fab == null) {
             return;
@@ -1958,7 +2033,7 @@ public class MainActivity extends Activity {
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) params;
             int screen = getResources().getDisplayMetrics().widthPixels;
             lp.rightMargin = expanded ? dp(28) : dp(24);
-            lp.bottomMargin = dp(spaceByLayout(104, 99, 94));
+            lp.bottomMargin = dp(photoFabBottomMargin());
             int targetW = expanded ? Math.min(screen - dp(56), dp(382))
                     : dp(spaceByLayout(62, 58, 56));
             int targetH = expanded ? dp(spaceByLayout(66, 62, 60)) : dp(spaceByLayout(62, 58, 56));
@@ -2021,7 +2096,7 @@ public class MainActivity extends Activity {
         lp.height = iconSize;
         lp.gravity = Gravity.RIGHT | Gravity.BOTTOM;
         lp.rightMargin = dp(24) + Math.max(0, (buttonSize - iconSize) / 2);
-        lp.bottomMargin = dp(spaceByLayout(104, 99, 94)) + Math.max(0, (buttonSize - iconSize) / 2);
+        lp.bottomMargin = dp(photoFabBottomMargin()) + Math.max(0, (buttonSize - iconSize) / 2);
         fabIcon.setLayoutParams(lp);
     }
 
@@ -4656,8 +4731,10 @@ public class MainActivity extends Activity {
 
     private View stickerGalleryThumb(final StickerEntry entry, int size) {
         if (entry.stackCount > 1 && entry.stackFiles != null && entry.stackFiles.size() > 1) {
-            return mediaStackView(entry.date, entry.mealKey, new ArrayList<String>(entry.stackFiles),
+            View stack = mediaStackView(entry.date, entry.mealKey, new ArrayList<String>(entry.stackFiles),
                     "stickers", "贴纸", true, size);
+            installStandaloneMediaLongPress(stack);
+            return stack;
         }
         FrameLayout frame = new FrameLayout(this);
         frame.setClickable(true);
@@ -5343,6 +5420,10 @@ public class MainActivity extends Activity {
     }
 
     private void addBookGrid(LinearLayout page, List<String> dates) {
+        addBookGrid(page, dates, false);
+    }
+
+    private void addBookGrid(LinearLayout page, List<String> dates, boolean fromFavorites) {
         int columns = footprintColumns();
         int gapDp = footprintGap();
         int gap = dp(gapDp);
@@ -5391,7 +5472,7 @@ public class MainActivity extends Activity {
                 rowLp.bottomMargin = dp(gapDp + spaceByLayout(12, 8, 5));
                 page.addView(rowBox, rowLp);
             }
-            View book = bookGridCard(date, colors[i % colors.length], side, columns);
+            View book = bookGridCard(date, colors[i % colors.length], side, columns, fromFavorites);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(side, ViewGroup.LayoutParams.WRAP_CONTENT);
             if (sectionIndex % columns < columns - 1) {
                 lp.rightMargin = gap;
@@ -5583,7 +5664,8 @@ public class MainActivity extends Activity {
         return wrap;
     }
 
-    private View bookGridCard(final String date, int color, int width, int columns) {
+    private View bookGridCard(final String date, int color, int width, int columns,
+                              final boolean fromFavorites) {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
         wrap.setClickable(true);
@@ -5591,6 +5673,10 @@ public class MainActivity extends Activity {
         wrap.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (fromFavorites) {
+                    returnToFavoriteRecordsAfterBook = true;
+                    inFavoriteRecordsPage = false;
+                }
                 openBookDetail(date, v);
             }
         });
@@ -5738,7 +5824,39 @@ public class MainActivity extends Activity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(22), dp(20), dp(22), dp(18));
         box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        box.addView(label("记录热量与消费", 22, Color.rgb(28, 28, 30), true));
+        LinearLayout titleRow = row(Gravity.CENTER_VERTICAL);
+        titleRow.addView(label("记录热量与消费", 22, Color.rgb(28, 28, 30), true),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final FavoriteStarView favorite = new FavoriteStarView(this);
+        favorite.setFavorite(day.optBoolean("favorite", false));
+        favorite.setContentDescription(favorite.isFavorite() ? "取消收藏这一天" : "收藏这一天");
+        favorite.setClickable(true);
+        attachPressAnimation(favorite);
+        favorite.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                boolean next = !favorite.isFavorite();
+                try {
+                    day.put("favorite", next);
+                    saveDays();
+                    favorite.setFavorite(next);
+                    favorite.animate().cancel();
+                    favorite.setScaleX(0.88f);
+                    favorite.setScaleY(0.88f);
+                    favorite.animate()
+                            .scaleX(1f)
+                            .scaleY(1f)
+                            .setDuration(220)
+                            .setInterpolator(new android.view.animation.OvershootInterpolator(1.7f))
+                            .start();
+                    favorite.setContentDescription(next ? "取消收藏这一天" : "收藏这一天");
+                    showGlassToast(next ? "已收藏这一天" : "已取消收藏", Toast.LENGTH_SHORT);
+                } catch (JSONException ignored) {
+                }
+            }
+        });
+        titleRow.addView(favorite, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        box.addView(titleRow);
         TextView subtitle = label(displayDate(date) + " · 手动热量会替代当天的 AI 估算", 14,
                 Color.rgb(104, 108, 116), false);
         subtitle.setPadding(0, dp(7), 0, dp(10));
@@ -5950,7 +6068,12 @@ public class MainActivity extends Activity {
             @Override
             public void run() {
                 inBookDetail = false;
-                renderCurrent();
+                if (returnToFavoriteRecordsAfterBook) {
+                    returnToFavoriteRecordsAfterBook = false;
+                    renderFavoriteRecordsPage();
+                } else {
+                    renderCurrent();
+                }
             }
         }, -1f);
     }
@@ -6298,13 +6421,8 @@ public class MainActivity extends Activity {
             if (!file.exists()) {
                 continue;
             }
-            Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
-            if (bitmap == null) {
-                continue;
-            }
             ImageView image = new ImageView(this);
             disableForceDark(image);
-            image.setImageBitmap(bitmap);
             image.setScaleType(ImageView.ScaleType.FIT_CENTER);
             image.setBackground(notebookStickerFrameBackground());
             int pad = Math.max(0, stickerFramePadding() - dp(1));
@@ -6318,6 +6436,7 @@ public class MainActivity extends Activity {
             lp.leftMargin = dp(8) + column * columnStep;
             lp.topMargin = dp(8) + row * (size + dp(straight ? 10 : 14)) + (straight ? 0 : dp((column % 2) * 5));
             board.addView(image, lp);
+            loadMediaThumbnail(image, item.fileName, size);
         }
     }
 
@@ -8687,6 +8806,24 @@ public class MainActivity extends Activity {
         }, -1f);
     }
 
+    private void openFavoriteRecordsPage() {
+        smoothContentSwap(new Runnable() {
+            @Override
+            public void run() {
+                renderFavoriteRecordsPage();
+            }
+        }, 1f);
+    }
+
+    private void closeFavoriteRecordsPage() {
+        smoothContentSwap(new Runnable() {
+            @Override
+            public void run() {
+                renderDataSecurityPage();
+            }
+        }, -1f);
+    }
+
     private void openHiddenSettingsPage() {
         smoothContentSwap(new Runnable() {
             @Override
@@ -8831,7 +8968,7 @@ public class MainActivity extends Activity {
                 openFootprintSettingsPage();
             }
         }));
-        page.addView(settingRow("笔记页面", "纸张 · 字体 · 翻页", "@page", accent, new View.OnClickListener() {
+        page.addView(settingRow("笔记页面", "纸张 · 翻页", "@page", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 openNotebookSettingsPage();
@@ -8923,6 +9060,12 @@ public class MainActivity extends Activity {
         }));
 
         section(page, "足迹");
+        page.addView(settingRow("笔记字体", bookFontTitle(), "@font", accent, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                chooseBookFont();
+            }
+        }));
         page.addView(settingRow("页面布局", footprintLayoutTitle(), "@grid", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -9045,6 +9188,7 @@ public class MainActivity extends Activity {
             profile.put("footprintShowCalories", false);
             profile.put("footprintShowSpending", false);
             profile.put("footprintGap", 10);
+            profile.put("favoriteRecordsExpanded", false);
             profile.put("bookCoverStyle", "food");
             profile.put("bookFont", "default");
             profile.put("notebookPageStyle", "cream");
@@ -9479,7 +9623,7 @@ public class MainActivity extends Activity {
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("设置吃饭本子打开后的样式、页面、字体和贴纸摆放。", 14,
+        TextView hint = label("设置吃饭本子打开后的样式、页面和贴纸摆放。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
@@ -9508,13 +9652,6 @@ public class MainActivity extends Activity {
                 chooseNotebookPageStyle();
             }
         }));
-        page.addView(settingRow("笔记字体", bookFontTitle(), "@font", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseBookFont();
-            }
-        }));
-
         section(page, "记录");
         final View storyLayoutRow = settingRow("记录方式", bookStoryLayoutTitle(), "@writing", accent, null);
         storyLayoutRow.setOnClickListener(new View.OnClickListener() {
@@ -9560,6 +9697,7 @@ public class MainActivity extends Activity {
         inDataSecurityPage = true;
         inCloudSyncPage = false;
         inRecycleBinPage = false;
+        inFavoriteRecordsPage = false;
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inBookDetail = false;
@@ -9595,6 +9733,13 @@ public class MainActivity extends Activity {
         page.addView(hint);
 
         section(page, "数据");
+        page.addView(settingRow("收藏记录", favoriteRecordDates().size() + "天已收藏",
+                "@favorite", blendColor(accent, Color.rgb(236, 178, 72), 0.38f), new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openFavoriteRecordsPage();
+            }
+        }));
         page.addView(settingRow("备份数据", "保存记录、头像、图片和贴纸", "@backup", Color.rgb(45, 147, 214), new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -9629,6 +9774,175 @@ public class MainActivity extends Activity {
 
         page.addView(space(dp(120)));
         animateIn(page);
+    }
+
+    private void renderFavoriteRecordsPage() {
+        inPreferencesPage = false;
+        inDataSecurityPage = false;
+        inCloudSyncPage = false;
+        inRecycleBinPage = false;
+        inFavoriteRecordsPage = true;
+        inBookDetail = false;
+        inPhotoViewer = false;
+        updateFab();
+        content.removeAllViews();
+
+        ScrollView scroll = pageScroll();
+        LinearLayout page = basePage();
+        scroll.addView(page);
+        content.addView(scroll);
+
+        LinearLayout top = row(Gravity.CENTER_VERTICAL);
+        TextView back = label("‹", 38, Color.rgb(34, 34, 34), true);
+        back.setGravity(Gravity.CENTER);
+        back.setBackground(surfaceRound(dp(25)));
+        attachPressAnimation(back);
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                closeFavoriteRecordsPage();
+            }
+        });
+        top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        TextView title = label("收藏记录", 30, Color.rgb(28, 28, 30), true);
+        title.setPadding(dp(14), 0, 0, 0);
+        top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final boolean expandedLayout = favoriteRecordsExpanded();
+        FrameLayout layoutToggle = new FrameLayout(this);
+        layoutToggle.setClickable(true);
+        layoutToggle.setContentDescription(expandedLayout ? "切换为列表布局" : "切换为展开布局");
+        layoutToggle.setBackground(surfaceRound(dp(22)));
+        attachPressAnimation(layoutToggle);
+        SettingIconView layoutIcon = new SettingIconView(this,
+                expandedLayout ? "layout" : "grid", accent);
+        FrameLayout.LayoutParams layoutIconLp = new FrameLayout.LayoutParams(
+                dp(28), dp(28), Gravity.CENTER);
+        layoutToggle.addView(layoutIcon, layoutIconLp);
+        layoutToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    profile.put("favoriteRecordsExpanded", !expandedLayout);
+                    saveProfile();
+                } catch (JSONException ignored) {
+                }
+                renderFavoriteRecordsPage();
+            }
+        });
+        top.addView(layoutToggle, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        installStickyHeader(scroll, page, top);
+
+        TextView hint = label("长按足迹里的本子，再点右上角星星，就能把喜欢的一天留在这里。",
+                14, nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
+        hint.setPadding(0, dp(12), 0, dp(14));
+        hint.setLineSpacing(dp(2), 1.05f);
+        page.addView(hint);
+
+        List<String> favorites = favoriteRecordDates();
+        if (favorites.isEmpty()) {
+            LinearLayout empty = new LinearLayout(this);
+            empty.setOrientation(LinearLayout.VERTICAL);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(20), dp(36), dp(20), dp(36));
+            empty.setBackground(surfaceRound(dp(20)));
+            FavoriteStarView star = new FavoriteStarView(this);
+            empty.addView(star, new LinearLayout.LayoutParams(dp(58), dp(58)));
+            TextView message = label("还没有收藏记录", 17, Color.rgb(92, 96, 104), true);
+            message.setGravity(Gravity.CENTER);
+            message.setPadding(0, dp(10), 0, 0);
+            empty.addView(message);
+            page.addView(empty);
+        } else {
+            if (expandedLayout) {
+                addBookGrid(page, favorites, true);
+            } else {
+                for (String date : favorites) {
+                    page.addView(favoriteRecordCard(date));
+                }
+            }
+        }
+        page.addView(space(dp(120)));
+        animateIn(page);
+    }
+
+    private List<String> favoriteRecordDates() {
+        List<String> result = new ArrayList<String>();
+        if (days == null) {
+            return result;
+        }
+        JSONArray names = days.names();
+        if (names == null) {
+            return result;
+        }
+        for (int i = 0; i < names.length(); i++) {
+            String date = names.optString(i, "");
+            JSONObject day = days.optJSONObject(date);
+            if (date.matches("\\d{4}-\\d{2}-\\d{2}") && day != null
+                    && day.optBoolean("favorite", false)) {
+                result.add(date);
+            }
+        }
+        Collections.sort(result, Collections.reverseOrder());
+        return result;
+    }
+
+    private boolean favoriteRecordsExpanded() {
+        return profile != null && profile.optBoolean("favoriteRecordsExpanded", false);
+    }
+
+    private View favoriteRecordCard(final String date) {
+        final JSONObject day = days.optJSONObject(date);
+        LinearLayout row = row(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(8), dp(12), dp(8));
+        row.setBackground(surfaceRound(dp(18)));
+        row.setClickable(true);
+        attachPressAnimation(row);
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rowLp.bottomMargin = dp(8);
+        row.setLayoutParams(rowLp);
+
+        FrameLayout cover = new FrameLayout(this);
+        cover.setBackground(new BookCoverDrawable(date, bookPalette(date, accent), bookCoverStyle()));
+        FavoriteStarView star = new FavoriteStarView(this);
+        star.setFavorite(true);
+        FrameLayout.LayoutParams starLp = new FrameLayout.LayoutParams(dp(30), dp(30), Gravity.RIGHT | Gravity.TOP);
+        starLp.topMargin = dp(5);
+        starLp.rightMargin = dp(5);
+        cover.addView(star, starLp);
+        row.addView(cover, new LinearLayout.LayoutParams(dp(60), dp(76)));
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.setPadding(dp(14), 0, dp(8), 0);
+        TextView dateView = label(displayDate(date), 17, Color.rgb(36, 38, 42), true);
+        TextView summary = label(daySummary(date), 13,
+                nightDecoration() ? Color.rgb(154, 158, 166) : Color.rgb(112, 116, 124), false);
+        summary.setMaxLines(1);
+        summary.setEllipsize(TextUtils.TruncateAt.END);
+        summary.setPadding(0, dp(4), 0, 0);
+        int calories = dayTotalCalories(day);
+        int cost = dayTotalCostCents(day);
+        String stats = (calories > 0 ? calories + " kcal" : "热量未记录")
+                + " · " + (cost > 0 ? "¥" + formatCostCents(cost) : "消费未记录");
+        TextView statsView = label(stats, 12, adjustAlpha(accent, 196), true);
+        statsView.setPadding(0, dp(4), 0, 0);
+        texts.addView(dateView);
+        texts.addView(summary);
+        texts.addView(statsView);
+        row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView arrow = label("›", 28, Color.rgb(136, 140, 148), true);
+        arrow.setGravity(Gravity.CENTER);
+        row.addView(arrow, new LinearLayout.LayoutParams(dp(28), dp(44)));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                returnToFavoriteRecordsAfterBook = true;
+                inFavoriteRecordsPage = false;
+                openBookDetail(date, v);
+            }
+        });
+        return row;
     }
 
     private void renderCloudSyncPage() {
@@ -9814,10 +10128,7 @@ public class MainActivity extends Activity {
                 surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
         File file = new File(getFilesDir(), item.optString("file", ""));
         if (file.exists()) {
-            Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
-            if (bitmap != null) {
-                thumb.setImageBitmap(bitmap);
-            }
+            loadMediaThumbnail(thumb, item.optString("file", ""), dp(56));
         }
         row.addView(thumb, new LinearLayout.LayoutParams(dp(56), dp(56)));
 
@@ -10999,21 +11310,26 @@ public class MainActivity extends Activity {
         if (file == null || !file.exists()) {
             return "";
         }
-        Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
+        Bitmap bitmap = decodeFileSampled(file, 720);
         if (bitmap == null) {
             return "";
         }
         Bitmap scaled = scaleInside(bitmap, 640);
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        String mime;
-        if (file.getName().toLowerCase(Locale.US).endsWith(".png")) {
-            scaled.compress(Bitmap.CompressFormat.PNG, 100, baos);
-            mime = "image/png";
-        } else {
-            scaled.compress(Bitmap.CompressFormat.JPEG, 74, baos);
-            mime = "image/jpeg";
+        try {
+            String mime;
+            if (file.getName().toLowerCase(Locale.US).endsWith(".png")) {
+                scaled.compress(Bitmap.CompressFormat.PNG, 100, baos);
+                mime = "image/png";
+            } else {
+                scaled.compress(Bitmap.CompressFormat.JPEG, 74, baos);
+                mime = "image/jpeg";
+            }
+            return "data:" + mime + ";base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+        } finally {
+            recycleBitmapUnless(scaled, bitmap);
+            recycleBitmapUnless(bitmap, null);
         }
-        return "data:" + mime + ";base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
     }
 
     private void renderHintManagerPage() {
@@ -12185,57 +12501,30 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
             try {
-                Bitmap src = decodeBitmap(uri, dp(420));
+                Bitmap src = decodeBitmap(uri, 640);
                 if (src == null) {
                     showGlassToast("头像读取失败", Toast.LENGTH_SHORT);
                     return;
                 }
                 Bitmap cropped = centerCrop(src, 360, 360);
                 saveBitmap(cropped, new File(getFilesDir(), "avatar.bin"), 88);
+                recycleBitmapUnless(src, cropped);
+                recycleBitmapUnless(cropped, null);
                 showGlassToast("头像已更新", Toast.LENGTH_SHORT);
                 renderCurrent();
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                releaseThumbnailMemory();
                 showGlassToast("头像保存失败", Toast.LENGTH_SHORT);
             }
         } else if (requestCode == REQ_PICK_MEAL_PHOTO) {
             if (resultCode == RESULT_OK && data != null) {
-                List<Uri> uris = selectedImageUris(data);
-                int saved = 0;
-                for (Uri uri : uris) {
-                    Bitmap bitmap = decodeBitmap(uri, dp(900));
-                    if (bitmap != null && saveMealBitmap(bitmap, false, false)) {
-                        saved++;
-                    }
-                }
-                if (saved > 0) {
-                    showGlassToast(saved == 1 ? "图片已添加" : "已添加" + saved + "张图片", Toast.LENGTH_SHORT);
-                    finishMealPhotoPickMode(true);
-                } else {
-                    showGlassToast("图片读取失败", Toast.LENGTH_SHORT);
-                    finishMealPhotoPickMode(false);
-                }
+                importSelectedMealMediaAsync(selectedImageUris(data), false);
             } else {
                 finishMealPhotoPickMode(false);
             }
         } else if (requestCode == REQ_PICK_MEAL_STICKER) {
             if (resultCode == RESULT_OK && data != null) {
-                List<Uri> uris = selectedImageUris(data);
-                int saved = 0;
-                if (pendingPhotoDate != null && pendingPhotoMeal != null) {
-                    for (Uri uri : uris) {
-                        Bitmap bitmap = decodeBitmap(uri, dp(900));
-                        if (bitmap != null && saveImportedMealSticker(pendingPhotoDate, pendingPhotoMeal, bitmap, false)) {
-                            saved++;
-                        }
-                    }
-                }
-                if (saved > 0) {
-                    showGlassToast(saved == 1 ? "贴纸已添加" : "已添加" + saved + "张贴纸", Toast.LENGTH_SHORT);
-                    finishMealPhotoPickMode(true);
-                } else {
-                    showGlassToast("贴纸读取失败", Toast.LENGTH_SHORT);
-                    finishMealPhotoPickMode(false);
-                }
+                importSelectedMealMediaAsync(selectedImageUris(data), true);
             } else {
                 finishMealPhotoPickMode(false);
             }
@@ -12253,6 +12542,8 @@ public class MainActivity extends Activity {
 
     private void handleMealCameraResult(final int resultCode, Intent data) {
         final Uri outputUri = pendingMealCameraUri;
+        final String targetDate = pendingPhotoDate;
+        final String targetMeal = pendingPhotoMeal;
         final List<Uri> candidateUris = new ArrayList<Uri>();
         if (outputUri != null) {
             candidateUris.add(outputUri);
@@ -12274,7 +12565,7 @@ public class MainActivity extends Activity {
             preview = (Bitmap) data.getExtras().get("data");
         }
         final Bitmap fallbackPreview = preview;
-        final int target = dp(1200);
+        final int target = 1600;
         Log.i(LOG_TAG, "camera result code=" + resultCode + " output=" + outputUri
                 + " candidates=" + candidateUris.size() + " preview=" + (preview != null));
         mealPhotoPickAwaitingResult = true;
@@ -12311,16 +12602,22 @@ public class MainActivity extends Activity {
                 final Bitmap photo = fullPhoto != null ? fullPhoto : fallbackPreview;
                 final boolean accepted = resultCode == RESULT_OK
                         || (outputUri != null && photo != null);
+                final boolean saved = accepted && photo != null
+                        && saveMealBitmap(targetDate, targetMeal, photo, false, false);
+                recycleBitmapUnless(photo, null);
+                if (fallbackPreview != photo) {
+                    recycleBitmapUnless(fallbackPreview, null);
+                }
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (accepted && photo != null) {
-                            clearPendingMealCameraOutput();
-                            handleMealBitmapPicked(photo);
+                        clearPendingMealCameraOutput();
+                        if (saved) {
+                            showGlassToast("图片已添加", Toast.LENGTH_SHORT);
+                            finishMealPhotoPickMode(true);
                         } else {
-                            clearPendingMealCameraOutput();
                             if (resultCode == RESULT_OK) {
-                                showGlassToast("照片还没有保存成功，请重新拍摄", Toast.LENGTH_SHORT);
+                                showGlassToast("照片保存失败，请重新拍摄", Toast.LENGTH_SHORT);
                             }
                             finishMealPhotoPickMode(false);
                         }
@@ -12330,14 +12627,57 @@ public class MainActivity extends Activity {
         }, "meal-camera-result").start();
     }
 
-    private void handleMealBitmapPicked(Bitmap bitmap) {
-        if (saveMealBitmap(bitmap, false, false)) {
-            showGlassToast("图片已添加", Toast.LENGTH_SHORT);
-            finishMealPhotoPickMode(true);
-        } else {
-            showGlassToast("图片保存失败", Toast.LENGTH_SHORT);
+    private void importSelectedMealMediaAsync(final List<Uri> uris, final boolean stickers) {
+        final String targetDate = pendingPhotoDate;
+        final String targetMeal = pendingPhotoMeal;
+        if (targetDate == null || targetMeal == null || uris == null || uris.isEmpty()) {
+            showGlassToast(stickers ? "贴纸读取失败" : "图片读取失败", Toast.LENGTH_SHORT);
             finishMealPhotoPickMode(false);
+            return;
         }
+        mealPhotoPickAwaitingResult = true;
+        releaseThumbnailMemory();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                int saved = 0;
+                for (Uri uri : uris) {
+                    Bitmap bitmap = decodeBitmap(uri, stickers ? 1024 : 1440);
+                    if (bitmap == null) {
+                        continue;
+                    }
+                    try {
+                        boolean success = stickers
+                                ? saveImportedMealSticker(targetDate, targetMeal, bitmap, false)
+                                : saveMealBitmap(targetDate, targetMeal, bitmap, false, false);
+                        if (success) {
+                            saved++;
+                        }
+                    } catch (OutOfMemoryError error) {
+                        Log.e(LOG_TAG, "Out of memory while importing meal media", error);
+                        releaseThumbnailMemory();
+                    } finally {
+                        recycleBitmapUnless(bitmap, null);
+                    }
+                }
+                final int savedCount = saved;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (savedCount > 0) {
+                            String message = savedCount == 1
+                                    ? (stickers ? "贴纸已添加" : "图片已添加")
+                                    : "已添加" + savedCount + (stickers ? "张贴纸" : "张图片");
+                            showGlassToast(message, Toast.LENGTH_SHORT);
+                            finishMealPhotoPickMode(true);
+                        } else {
+                            showGlassToast(stickers ? "贴纸读取失败" : "图片读取失败", Toast.LENGTH_SHORT);
+                            finishMealPhotoPickMode(false);
+                        }
+                    }
+                });
+            }
+        }, stickers ? "meal-sticker-import" : "meal-photo-import").start();
     }
 
     private void finishMealPhotoPickMode(boolean renderAfter) {
@@ -12400,31 +12740,44 @@ public class MainActivity extends Activity {
     }
 
     private Bitmap decodeBitmap(Uri uri, int target) {
+        InputStream first = null;
+        InputStream second = null;
         try {
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
-            InputStream first = getContentResolver().openInputStream(uri);
+            first = getContentResolver().openInputStream(uri);
             if (first == null) {
                 return null;
             }
             BitmapFactory.decodeStream(first, null, bounds);
             first.close();
+            first = null;
+            int safeTarget = Math.max(128, target);
             int sample = 1;
-            while (bounds.outWidth / sample > target || bounds.outHeight / sample > target) {
+            while (bounds.outWidth / sample > safeTarget || bounds.outHeight / sample > safeTarget) {
                 sample *= 2;
             }
             BitmapFactory.Options opts = new BitmapFactory.Options();
             opts.inSampleSize = Math.max(1, sample);
-            InputStream second = getContentResolver().openInputStream(uri);
+            opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            second = getContentResolver().openInputStream(uri);
             if (second == null) {
                 return null;
             }
             Bitmap bitmap = BitmapFactory.decodeStream(second, null, opts);
             second.close();
+            second = null;
             return bitmap;
+        } catch (OutOfMemoryError error) {
+            releaseThumbnailMemory();
+            Log.e(LOG_TAG, "Out of memory decoding " + uri, error);
+            return null;
         } catch (Exception e) {
             Log.w(LOG_TAG, "Unable to decode " + uri, e);
             return null;
+        } finally {
+            closeQuietly(first);
+            closeQuietly(second);
         }
     }
 
@@ -12433,14 +12786,41 @@ public class MainActivity extends Activity {
         int x = Math.max(0, (src.getWidth() - side) / 2);
         int y = Math.max(0, (src.getHeight() - side) / 2);
         Bitmap square = Bitmap.createBitmap(src, x, y, side, side);
-        return Bitmap.createScaledBitmap(square, width, height, true);
+        Bitmap result = Bitmap.createScaledBitmap(square, width, height, true);
+        recycleBitmapUnless(square, result);
+        return result;
+    }
+
+    private void closeQuietly(InputStream stream) {
+        if (stream == null) {
+            return;
+        }
+        try {
+            stream.close();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void recycleBitmapUnless(Bitmap bitmap, Bitmap keep) {
+        if (bitmap != null && bitmap != keep && !bitmap.isRecycled()) {
+            bitmap.recycle();
+        }
+    }
+
+    private void releaseThumbnailMemory() {
+        mediaThumbnailCache.evictAll();
     }
 
     private void saveBitmap(Bitmap bitmap, File out, int quality) throws Exception {
         FileOutputStream fos = new FileOutputStream(out);
-        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, fos);
-        fos.flush();
-        fos.close();
+        try {
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, fos)) {
+                throw new Exception("JPEG encode failed");
+            }
+            fos.flush();
+        } finally {
+            fos.close();
+        }
     }
 
     private List<MealOption> activeMeals() {
@@ -13333,44 +13713,57 @@ public class MainActivity extends Activity {
             return;
         }
         view.setImageDrawable(null);
-        mediaThumbnailExecutor.execute(new Runnable() {
-            @Override
-            public void run() {
-                final Bitmap bitmap = decodeFileSampled(file, Math.max(dp(96), target * 2));
-                if (bitmap != null) {
-                    mediaThumbnailCache.put(key, bitmap);
-                }
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (bitmap != null && key.equals(view.getTag()) && view.getParent() != null) {
-                            view.setImageBitmap(bitmap);
-                        }
+        try {
+            mediaThumbnailExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final Bitmap bitmap = decodeFileSampled(file, Math.max(128, target * 2));
+                    if (bitmap != null) {
+                        mediaThumbnailCache.put(key, bitmap);
                     }
-                });
-            }
-        });
+                    if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) {
+                        return;
+                    }
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (bitmap != null && key.equals(view.getTag()) && view.getParent() != null) {
+                                view.setImageBitmap(bitmap);
+                            }
+                        }
+                    });
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+        }
     }
 
     private Bitmap decodeFileSampled(File file, int target) {
         if (file == null || !file.isFile()) {
             return null;
         }
-        BitmapFactory.Options bounds = new BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return null;
+            }
+            int safeTarget = Math.max(128, target);
+            int sample = 1;
+            while (bounds.outWidth / (sample * 2) >= safeTarget
+                    && bounds.outHeight / (sample * 2) >= safeTarget) {
+                sample *= 2;
+            }
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = Math.max(1, sample);
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+        } catch (OutOfMemoryError error) {
+            releaseThumbnailMemory();
+            Log.e(LOG_TAG, "Out of memory decoding " + file.getName(), error);
             return null;
         }
-        int sample = 1;
-        while (bounds.outWidth / (sample * 2) >= target
-                && bounds.outHeight / (sample * 2) >= target) {
-            sample *= 2;
-        }
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inSampleSize = Math.max(1, sample);
-        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-        return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
     }
 
     private void beginThemeModeTransition() {
@@ -15028,7 +15421,7 @@ public class MainActivity extends Activity {
                     rerenderPreservingScroll(new Runnable() {
                         @Override
                         public void run() {
-                            renderNotebookSettingsPage();
+                            renderInterfaceLayoutPage();
                         }
                     });
                 } catch (JSONException ignored) {
@@ -16005,11 +16398,15 @@ public class MainActivity extends Activity {
     }
 
     private String readAll(InputStream in) throws Exception {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
-        StringBuilder out = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            out.append(line);
+        InputStreamReader reader = new InputStreamReader(in, "UTF-8");
+        StringBuilder out = new StringBuilder(Math.min(16 * 1024, MAX_JSON_RESPONSE_CHARS));
+        char[] buffer = new char[8192];
+        int count;
+        while ((count = reader.read(buffer)) >= 0) {
+            if (out.length() + count > MAX_JSON_RESPONSE_CHARS) {
+                throw new Exception("云端响应过大，请更新服务器后重试");
+            }
+            out.append(buffer, 0, count);
         }
         return out.toString();
     }
@@ -16754,7 +17151,7 @@ public class MainActivity extends Activity {
             if (!file.exists()) {
                 continue;
             }
-            Bitmap sticker = BitmapFactory.decodeFile(file.getAbsolutePath());
+            Bitmap sticker = decodeFileSampled(file, 512);
             if (sticker == null) {
                 continue;
             }
@@ -16784,6 +17181,7 @@ public class MainActivity extends Activity {
             canvas.drawRoundRect(dst, 18, 18, stroke);
             drawBitmapContain(canvas, sticker, new RectF(dst.left + 7, dst.top + 7, dst.right - 7, dst.bottom - 7), 14);
             canvas.restoreToCount(save);
+            recycleBitmapUnless(sticker, null);
         }
     }
 
@@ -17493,15 +17891,21 @@ public class MainActivity extends Activity {
     }
 
     private boolean saveMealBitmap(Bitmap bitmap, boolean renderAfter, boolean showToast) {
-        if (pendingPhotoDate == null || pendingPhotoMeal == null) {
+        return saveMealBitmap(pendingPhotoDate, pendingPhotoMeal, bitmap, renderAfter, showToast);
+    }
+
+    private boolean saveMealBitmap(String date, String mealKey, Bitmap bitmap,
+                                   boolean renderAfter, boolean showToast) {
+        if (date == null || mealKey == null || bitmap == null || bitmap.isRecycled()) {
             return false;
         }
+        Bitmap scaled = null;
         try {
-            Bitmap scaled = scaleInside(bitmap, 900);
-            String fileName = "meal_" + pendingPhotoDate.replace("-", "") + "_" + pendingPhotoMeal
+            scaled = scaleInside(bitmap, 900);
+            String fileName = "meal_" + date.replace("-", "") + "_" + mealKey
                     + "_" + System.currentTimeMillis() + ".jpg";
             saveBitmap(scaled, new File(getFilesDir(), fileName), 84);
-            JSONObject meal = optObj(ensureDay(pendingPhotoDate), pendingPhotoMeal);
+            JSONObject meal = optObj(ensureDay(date), mealKey);
             JSONArray photos = meal.optJSONArray("photos");
             if (photos == null) {
                 photos = new JSONArray();
@@ -17516,11 +17920,21 @@ public class MainActivity extends Activity {
                 renderCurrent();
             }
             return true;
+        } catch (OutOfMemoryError error) {
+            releaseThumbnailMemory();
+            Log.e(LOG_TAG, "Out of memory saving meal photo", error);
+            if (showToast) {
+                showGlassToast("图片过大，保存失败", Toast.LENGTH_SHORT);
+            }
+            return false;
         } catch (Exception e) {
+            Log.w(LOG_TAG, "Unable to save meal photo", e);
             if (showToast) {
                 showGlassToast("图片保存失败", Toast.LENGTH_SHORT);
             }
             return false;
+        } finally {
+            recycleBitmapUnless(scaled, bitmap);
         }
     }
 
@@ -17566,9 +17980,25 @@ public class MainActivity extends Activity {
     }
 
     private boolean saveImportedMealSticker(String date, String mealKey, Bitmap sticker, boolean showToast) {
-        Bitmap prepared = prepareImportedSticker(sticker);
-        Bitmap scaled = scaleInside(prepared, 720);
-        return saveMealSticker(date, mealKey, scaled, showToast);
+        Bitmap prepared = null;
+        Bitmap scaled = null;
+        try {
+            prepared = prepareImportedSticker(sticker);
+            if (prepared == null) {
+                return false;
+            }
+            scaled = scaleInside(prepared, 720);
+            return saveMealSticker(date, mealKey, scaled, showToast);
+        } catch (OutOfMemoryError error) {
+            releaseThumbnailMemory();
+            Log.e(LOG_TAG, "Out of memory importing meal sticker", error);
+            return false;
+        } finally {
+            recycleBitmapUnless(scaled, sticker);
+            if (prepared != scaled) {
+                recycleBitmapUnless(prepared, sticker);
+            }
+        }
     }
 
     private Bitmap prepareImportedSticker(Bitmap sticker) {
@@ -17582,7 +18012,13 @@ public class MainActivity extends Activity {
             return sticker;
         }
         Bitmap cleared = hasTransparentPixels(argb) ? argb : removeEdgeBackground(argb);
+        if (cleared != argb) {
+            recycleBitmapUnless(argb, sticker);
+        }
         Bitmap trimmed = trimTransparentSticker(cleared);
+        if (trimmed != null && trimmed != cleared) {
+            recycleBitmapUnless(cleared, sticker);
+        }
         return trimmed == null ? cleared : trimmed;
     }
 
@@ -17708,9 +18144,14 @@ public class MainActivity extends Activity {
 
     private void savePng(Bitmap bitmap, File out) throws Exception {
         FileOutputStream fos = new FileOutputStream(out);
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos);
-        fos.flush();
-        fos.close();
+        try {
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)) {
+                throw new Exception("PNG encode failed");
+            }
+            fos.flush();
+        } finally {
+            fos.close();
+        }
     }
 
     private Bitmap scaleInside(Bitmap src, int maxSide) {
@@ -18057,22 +18498,38 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    private TextView mediaEditControl(String symbol) {
+        TextView control = label(symbol, 14, Color.WHITE, true);
+        control.setTypeface(Typeface.DEFAULT_BOLD);
+        control.setGravity(Gravity.CENTER);
+        control.setVisibility(View.GONE);
+        control.setBackground(round(Color.argb(232, 48, 50, 54), dp(10),
+                Color.argb(236, 255, 255, 255), dp(1)));
+        attachPressAnimation(control);
+        return control;
+    }
+
     private View mediaThumbView(final String date, final String mealKey, final String fileName,
                                 final String arrayKey, final String title, boolean sticker, int size) {
         final FrameLayout frame = mediaImageFrame(fileName, sticker, size);
         frame.setClickable(true);
 
-        final TextView close = label("×", 12, Color.WHITE, true);
-        close.setGravity(Gravity.CENTER);
-        close.setVisibility(View.GONE);
-        close.setBackground(round(Color.rgb(48, 50, 54), dp(10), Color.WHITE, dp(1)));
+        final TextView rotate = mediaEditControl("↺");
+        FrameLayout.LayoutParams rotateLp = new FrameLayout.LayoutParams(dp(20), dp(20));
+        rotateLp.gravity = Gravity.LEFT | Gravity.TOP;
+        rotateLp.topMargin = -dp(1);
+        rotateLp.leftMargin = -dp(1);
+        frame.addView(rotate, rotateLp);
+
+        final TextView close = mediaEditControl("×");
         FrameLayout.LayoutParams closeLp = new FrameLayout.LayoutParams(dp(20), dp(20));
         closeLp.gravity = Gravity.RIGHT | Gravity.TOP;
         closeLp.topMargin = -dp(1);
         closeLp.rightMargin = -dp(1);
         frame.addView(close, closeLp);
 
-        final PhotoAction action = new PhotoAction(date, mealKey, fileName, arrayKey, title, close);
+        final PhotoAction action = new PhotoAction(date, mealKey, fileName, arrayKey, title, close, rotate);
+        action.itemView = frame;
         frame.setTag(action);
         frame.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -18089,7 +18546,44 @@ public class MainActivity extends Activity {
                 confirmDeleteMedia(action);
             }
         });
+        rotate.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                rotateMealMediaLeft(action);
+            }
+        });
         return frame;
+    }
+
+    private void installStandaloneMediaLongPress(final View item) {
+        if (item == null || !(item.getTag() instanceof PhotoAction)) {
+            return;
+        }
+        item.setLongClickable(true);
+        item.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                if (!(v.getTag() instanceof PhotoAction)) {
+                    return false;
+                }
+                exitMediaEditMode(false);
+                editingMediaItems.clear();
+                PhotoAction action = (PhotoAction) v.getTag();
+                if (action.usesExpandedChildren()) {
+                    playMediaEditFeedback();
+                    for (View child : action.stackChildViews) {
+                        if (child != null && child.getTag() instanceof PhotoAction) {
+                            editingMediaItems.add(child);
+                            ((PhotoAction) child.getTag()).enterEdit(child, false);
+                        }
+                    }
+                } else {
+                    editingMediaItems.add(v);
+                    action.enterEdit(v);
+                }
+                return true;
+            }
+        });
     }
 
     private FrameLayout mediaImageFrame(String fileName, boolean sticker, int size) {
@@ -18123,7 +18617,7 @@ public class MainActivity extends Activity {
 
         for (int i = count - 2; i >= 0; i--) {
             final String childName = group.get(i);
-            View child = mediaImageFrame(childName, sticker, size);
+            View child = mediaThumbView(date, mealKey, childName, arrayKey, title, sticker, size);
             child.setVisibility(View.INVISIBLE);
             child.setAlpha(0f);
             child.setScaleX(0.86f);
@@ -18131,8 +18625,9 @@ public class MainActivity extends Activity {
             child.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    PhotoAction action = (PhotoAction) stack.getTag();
-                    if (action != null && action.editing) {
+                    PhotoAction childAction = v.getTag() instanceof PhotoAction
+                            ? (PhotoAction) v.getTag() : null;
+                    if (childAction != null && childAction.editing) {
                         return;
                     }
                     showPhotoViewer(date, mealKey, childName);
@@ -18142,7 +18637,9 @@ public class MainActivity extends Activity {
             stack.addView(child, new FrameLayout.LayoutParams(size, size));
         }
 
-        View top = mediaImageFrame(topName, sticker, size);
+        View top = mediaThumbView(date, mealKey, topName, arrayKey, title, sticker, size);
+        top.setOnClickListener(null);
+        top.setClickable(false);
         stack.addView(top, new FrameLayout.LayoutParams(size, size));
 
         final TextView badge = label("×" + count, 13, Color.WHITE, true);
@@ -18157,18 +18654,26 @@ public class MainActivity extends Activity {
         badgeLp.bottomMargin = -dp(1);
         stack.addView(badge, badgeLp);
 
-        final TextView close = label("×", 12, Color.WHITE, true);
-        close.setGravity(Gravity.CENTER);
-        close.setVisibility(View.GONE);
-        close.setBackground(round(Color.rgb(48, 50, 54), dp(10), Color.WHITE, dp(1)));
+        final TextView rotate = mediaEditControl("↺");
+        FrameLayout.LayoutParams rotateLp = new FrameLayout.LayoutParams(dp(20), dp(20));
+        rotateLp.gravity = Gravity.LEFT | Gravity.TOP;
+        rotateLp.topMargin = -dp(1);
+        rotateLp.leftMargin = -dp(1);
+        stack.addView(rotate, rotateLp);
+
+        final TextView close = mediaEditControl("×");
         FrameLayout.LayoutParams closeLp = new FrameLayout.LayoutParams(dp(20), dp(20));
         closeLp.gravity = Gravity.RIGHT | Gravity.TOP;
         closeLp.topMargin = -dp(1);
         closeLp.rightMargin = -dp(1);
         stack.addView(close, closeLp);
 
-        final PhotoAction action = new PhotoAction(date, mealKey, topName, arrayKey, title, close);
+        final PhotoAction action = new PhotoAction(date, mealKey, topName, arrayKey, title, close, rotate);
+        action.itemView = stack;
         action.stackNames = new ArrayList<String>(group);
+        action.stackChildViews = new ArrayList<View>(popped);
+        action.stackChildViews.add(top);
+        action.stackExpandedState = expanded;
         stack.setTag(action);
 
         View.OnClickListener toggle = new View.OnClickListener() {
@@ -18200,6 +18705,12 @@ public class MainActivity extends Activity {
                 if (action.unstackGroup()) {
                     showGlassToast("已取消叠放", Toast.LENGTH_SHORT);
                 }
+            }
+        });
+        rotate.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                rotateMealMediaLeft(action);
             }
         });
         return stack;
@@ -18298,8 +18809,8 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private boolean moveMealMedia(String date, String mealKey, String arrayKey, String fileName,
-                                  String targetName, boolean stack) {
+    private boolean stackMealMedia(String date, String mealKey, String arrayKey, String fileName,
+                                   String targetName) {
         if (fileName == null || targetName == null || fileName.equals(targetName)) {
             return false;
         }
@@ -18321,30 +18832,69 @@ public class MainActivity extends Activity {
             return false;
         }
         clearMediaStackRefs(meal, arrayKey, fileName);
-        if (stack) {
-            names.remove(sourceIndex);
-            if (sourceIndex < targetIndex) {
-                targetIndex--;
-            }
-            names.add(targetIndex + 1, fileName);
-        } else {
-            Collections.swap(names, sourceIndex, targetIndex);
-            clearMediaStackRefs(meal, arrayKey, targetName);
+        names.remove(sourceIndex);
+        if (sourceIndex < targetIndex) {
+            targetIndex--;
         }
+        names.add(targetIndex + 1, fileName);
         JSONArray next = new JSONArray();
         for (String name : names) {
             next.put(name);
         }
         try {
             meal.put(arrayKey, next);
-            if (stack) {
-                JSONObject stacks = meal.optJSONObject(mediaStackKey(arrayKey));
-                if (stacks == null) {
-                    stacks = new JSONObject();
-                    meal.put(mediaStackKey(arrayKey), stacks);
-                }
-                stacks.put(fileName, targetName);
+            JSONObject stacks = meal.optJSONObject(mediaStackKey(arrayKey));
+            if (stacks == null) {
+                stacks = new JSONObject();
+                meal.put(mediaStackKey(arrayKey), stacks);
             }
+            stacks.put(fileName, targetName);
+            saveDays();
+        } catch (JSONException ignored) {
+            return false;
+        }
+        scheduleMediaRender(date);
+        return true;
+    }
+
+    private boolean reorderMealMedia(String date, String mealKey, String arrayKey, String fileName,
+                                     String targetName, boolean insertAfter) {
+        if (fileName == null || targetName == null || fileName.equals(targetName)) {
+            return false;
+        }
+        JSONObject meal = optObj(ensureDay(date), mealKey);
+        JSONArray old = meal.optJSONArray(arrayKey);
+        if (old == null) {
+            return false;
+        }
+        List<String> names = new ArrayList<String>();
+        for (int i = 0; i < old.length(); i++) {
+            String name = old.optString(i);
+            if (name.length() > 0) {
+                names.add(name);
+            }
+        }
+        List<String> original = new ArrayList<String>(names);
+        int sourceIndex = names.indexOf(fileName);
+        if (sourceIndex < 0 || !names.remove(fileName)) {
+            return false;
+        }
+        int targetIndex = names.indexOf(targetName);
+        if (targetIndex < 0) {
+            return false;
+        }
+        int insertIndex = targetIndex + (insertAfter ? 1 : 0);
+        names.add(Math.max(0, Math.min(insertIndex, names.size())), fileName);
+        if (names.equals(original)) {
+            return false;
+        }
+        clearMediaStackRefs(meal, arrayKey, fileName);
+        JSONArray next = new JSONArray();
+        for (String name : names) {
+            next.put(name);
+        }
+        try {
+            meal.put(arrayKey, next);
             saveDays();
         } catch (JSONException ignored) {
             return false;
@@ -18530,6 +19080,115 @@ public class MainActivity extends Activity {
         addMediaGroupToRow(row, date, mealKey, group, "stickers", "贴纸", true, dp(spaceByLayout(64, 58, 54)));
         card.addView(scroller, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return scroller;
+    }
+
+    private void rotateMealMediaLeft(final PhotoAction action) {
+        if (action == null || action.rotating) {
+            return;
+        }
+        final File file = new File(getFilesDir(), action.fileName);
+        if (!file.isFile()) {
+            showGlassToast("图片不见了", Toast.LENGTH_SHORT);
+            return;
+        }
+        action.rotating = true;
+        if (action.rotateButton != null) {
+            action.rotateButton.setEnabled(false);
+            action.rotateButton.setAlpha(0.55f);
+        }
+        try {
+            mediaThumbnailExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final boolean rotated = rotateMediaFileLeft(file);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            action.rotating = false;
+                            if (action.rotateButton != null) {
+                                action.rotateButton.setEnabled(true);
+                                action.rotateButton.setAlpha(1f);
+                            }
+                            if (!rotated) {
+                                showGlassToast("旋转失败，请稍后重试", Toast.LENGTH_SHORT);
+                                return;
+                            }
+                            refreshRotatedMediaPreview(action);
+                        }
+                    });
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            action.rotating = false;
+            if (action.rotateButton != null) {
+                action.rotateButton.setEnabled(true);
+                action.rotateButton.setAlpha(1f);
+            }
+            showGlassToast("旋转失败，请稍后重试", Toast.LENGTH_SHORT);
+        }
+    }
+
+    private void refreshRotatedMediaPreview(PhotoAction action) {
+        if (action == null || action.itemView == null) {
+            return;
+        }
+        refreshRotatedMediaPreview(action.itemView, action.fileName,
+                new File(getFilesDir(), action.fileName).getAbsolutePath() + "@");
+    }
+
+    private void refreshRotatedMediaPreview(View view, String fileName, String cachePrefix) {
+        if (view instanceof ImageView) {
+            Object tag = view.getTag();
+            if (tag instanceof String && ((String) tag).startsWith(cachePrefix)) {
+                mediaThumbnailCache.remove((String) tag);
+                int target = Math.max(dp(64), Math.max(view.getWidth(), view.getHeight()));
+                loadMediaThumbnail((ImageView) view, fileName, target);
+            }
+            return;
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                refreshRotatedMediaPreview(group.getChildAt(i), fileName, cachePrefix);
+            }
+        }
+    }
+
+    private boolean rotateMediaFileLeft(File file) {
+        Bitmap source = null;
+        Bitmap rotated = null;
+        File temp = new File(file.getParentFile(), file.getName() + ".rotate-tmp");
+        try {
+            source = decodeFileSampled(file, 2048);
+            if (source == null) {
+                return false;
+            }
+            Matrix matrix = new Matrix();
+            matrix.postRotate(-90f);
+            rotated = Bitmap.createBitmap(source, 0, 0,
+                    source.getWidth(), source.getHeight(), matrix, true);
+            if (file.getName().toLowerCase(Locale.US).endsWith(".png")) {
+                savePng(rotated, temp);
+            } else {
+                saveBitmap(rotated, temp, 90);
+            }
+            java.nio.file.Files.move(temp.toPath(), file.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            return true;
+        } catch (Exception error) {
+            Log.e(LOG_TAG, "Unable to rotate media " + file.getName(), error);
+            return false;
+        } finally {
+            if (temp.exists()) {
+                temp.delete();
+            }
+            if (rotated != null && rotated != source && !rotated.isRecycled()) {
+                rotated.recycle();
+            }
+            if (source != null && !source.isRecycled()) {
+                source.recycle();
+            }
+        }
     }
 
     private void confirmDeleteMealPhoto(final String date, final String mealKey, final String fileName) {
@@ -18742,7 +19401,7 @@ public class MainActivity extends Activity {
     }
 
     private void switchViewerPhoto(final ZoomImageView image, final String fileName, final int direction) {
-        final Bitmap bitmap = BitmapFactory.decodeFile(new File(getFilesDir(), fileName).getAbsolutePath());
+        final Bitmap bitmap = decodeFileSampled(new File(getFilesDir(), fileName), 1920);
         if (bitmap == null) {
             showGlassToast("图片读取失败", Toast.LENGTH_SHORT);
             return;
@@ -18818,6 +19477,9 @@ public class MainActivity extends Activity {
             public boolean onTouch(View v, MotionEvent event) {
                 if (event.getAction() == MotionEvent.ACTION_DOWN) {
                     clearCurrentTextFocus();
+                    if (v instanceof EditText) {
+                        ((EditText) v).setCursorVisible(true);
+                    }
                     downX[0] = event.getRawX();
                     downY[0] = event.getRawY();
                     horizontal[0] = false;
@@ -18843,6 +19505,7 @@ public class MainActivity extends Activity {
                     if (!vertical[0] && absX > dp(12) && absX > absY * 0.7f) {
                         if (!horizontal[0]) {
                             horizontal[0] = true;
+                            suppressMealSwipeTextFocus(v);
                             card.animate().scaleX(0.985f).scaleY(0.985f).setDuration(90).start();
                         }
                         ViewParent parent = v.getParent();
@@ -18851,6 +19514,9 @@ public class MainActivity extends Activity {
                         }
                     }
                     if (vertical[0]) {
+                        return true;
+                    }
+                    if (horizontal[0]) {
                         return true;
                     }
                 } else if (event.getAction() == MotionEvent.ACTION_UP
@@ -18871,22 +19537,24 @@ public class MainActivity extends Activity {
                         return true;
                     }
                     if (dx > dp(44) && !panelVisible[0]) {
-                        if (showMealSwipePanel(leftActionPanel, panelVisible, panelMode, date, mealKey, mealTitle(mealKey), 1)) {
+                        if (showMealSwipePanel(leftActionPanel, card, v, panelVisible, panelMode,
+                                date, mealKey, mealTitle(mealKey), 1)) {
                             activePanel[0] = leftActionPanel;
-                            return true;
                         }
                     }
                     if (dx < -dp(34) && !panelVisible[0]) {
-                        if (showMealSwipePanel(rightActionPanel, panelVisible, panelMode, date, mealKey, mealTitle(mealKey), -1)) {
+                        if (showMealSwipePanel(rightActionPanel, card, v, panelVisible, panelMode,
+                                date, mealKey, mealTitle(mealKey), -1)) {
                             activePanel[0] = rightActionPanel;
                         }
                     } else if (((dx > dp(20) && panelMode[0] < 0) || (dx < -dp(20) && panelMode[0] > 0))
                             && panelVisible[0]) {
-                        hideMealSwipePanel(activePanel[0], panelVisible, panelMode);
+                        hideMealSwipePanel(activePanel[0], card, v, panelVisible, panelMode);
                         activePanel[0] = null;
                     }
                     if (horizontal[0]) {
                         card.animate().scaleX(1f).scaleY(1f).setDuration(170).start();
+                        return true;
                     }
                 }
                 return false;
@@ -18903,14 +19571,24 @@ public class MainActivity extends Activity {
         }
     }
 
-    private boolean showMealSwipePanel(final LinearLayout actionPanel, final boolean[] panelVisible,
-                                       final int[] panelMode, String date, String mealKey, String title, int mode) {
+    private boolean showMealSwipePanel(final LinearLayout actionPanel, final View card,
+                                       final View stableHeightTarget,
+                                       final boolean[] panelVisible, final int[] panelMode,
+                                       String date, String mealKey, String title, int mode) {
         if (actionPanel == null) {
             return false;
         }
         if (!populateMealActionPanel(actionPanel, date, mealKey, title, mode)) {
             return false;
         }
+        lockMealSwipeContentHeight(stableHeightTarget);
+        int cardHeight = Math.max(card.getHeight(), card.getMeasuredHeight());
+        if (cardHeight > 0) {
+            ViewGroup.LayoutParams panelLp = actionPanel.getLayoutParams();
+            panelLp.height = cardHeight;
+            actionPanel.setLayoutParams(panelLp);
+        }
+        actionPanel.setMinimumHeight(0);
         panelVisible[0] = true;
         panelMode[0] = mode;
         actionPanel.animate().cancel();
@@ -18918,10 +19596,19 @@ public class MainActivity extends Activity {
         actionPanel.setAlpha(0f);
         actionPanel.setTranslationX(mode > 0 ? -dp(18) : dp(18));
         actionPanel.animate().alpha(1f).translationX(0f).setDuration(180).start();
+        suppressMealSwipeTextFocus(stableHeightTarget);
+        stableHeightTarget.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                suppressMealSwipeTextFocus(stableHeightTarget);
+            }
+        }, 48L);
         return true;
     }
 
-    private void hideMealSwipePanel(final LinearLayout actionPanel, final boolean[] panelVisible, final int[] panelMode) {
+    private void hideMealSwipePanel(final LinearLayout actionPanel, final View card,
+                                    final View stableHeightTarget, final boolean[] panelVisible,
+                                    final int[] panelMode) {
         if (actionPanel == null) {
             panelVisible[0] = false;
             panelMode[0] = 0;
@@ -18936,8 +19623,42 @@ public class MainActivity extends Activity {
             public void run() {
                 actionPanel.setVisibility(View.GONE);
                 actionPanel.removeAllViews();
+                unlockMealSwipeContentHeight(stableHeightTarget);
+                suppressMealSwipeTextFocus(stableHeightTarget);
+                card.requestLayout();
             }
         }).start();
+    }
+
+    private void lockMealSwipeContentHeight(View target) {
+        if (target == null || target.getHeight() <= 0) {
+            return;
+        }
+        ViewGroup.LayoutParams lp = target.getLayoutParams();
+        if (lp != null) {
+            lp.height = target.getHeight();
+            target.setLayoutParams(lp);
+        }
+    }
+
+    private void unlockMealSwipeContentHeight(View target) {
+        if (target == null) {
+            return;
+        }
+        ViewGroup.LayoutParams lp = target.getLayoutParams();
+        if (lp != null) {
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            target.setLayoutParams(lp);
+        }
+    }
+
+    private void suppressMealSwipeTextFocus(View target) {
+        if (!(target instanceof EditText)) {
+            return;
+        }
+        ((EditText) target).setCursorVisible(false);
+        target.clearFocus();
+        hideKeyboard();
     }
 
     private String quickExtraMealKey(String date, String sourceMealKey) {
@@ -19061,6 +19782,25 @@ public class MainActivity extends Activity {
                     photosView.setLayoutParams(lp);
                 }
             }
+            status.setLongClickable(true);
+            status.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    if (!collapsed || !(PhotoCollapseController.this.photosView instanceof PhotoStripScrollView)) {
+                        return false;
+                    }
+                    expand();
+                    PhotoCollapseController.this.photosView.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (PhotoCollapseController.this.photosView.getVisibility() == View.VISIBLE) {
+                                ((PhotoStripScrollView) PhotoCollapseController.this.photosView).enterEditMode();
+                            }
+                        }
+                    }, 260L);
+                    return true;
+                }
+            });
             photosView.post(new Runnable() {
                 @Override
                 public void run() {
@@ -19672,6 +20412,131 @@ public class MainActivity extends Activity {
         }
     }
 
+    private JSONObject uploadCloudBackupRaw(byte[] backup, String dataHash,
+                                            String clientKnownHash) throws Exception {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(CLOUD_API_DATA_UPLOAD_RAW).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(60000);
+            conn.setUseCaches(false);
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(backup.length);
+            conn.setRequestProperty("Content-Type", "application/octet-stream");
+            conn.setRequestProperty("Authorization", "Bearer " + profile.optString("cloudToken", ""));
+            conn.setRequestProperty("X-User-Id", profile.optString("userId", ""));
+            conn.setRequestProperty("X-Data-Hash", dataHash == null ? "" : dataHash);
+            conn.setRequestProperty("X-Client-Known-Data-Hash",
+                    clientKnownHash == null ? "" : clientKnownHash);
+            OutputStream out = conn.getOutputStream();
+            try {
+                int offset = 0;
+                while (offset < backup.length) {
+                    int count = Math.min(64 * 1024, backup.length - offset);
+                    out.write(backup, offset, count);
+                    offset += count;
+                }
+                out.flush();
+            } finally {
+                out.close();
+            }
+            int code = conn.getResponseCode();
+            InputStream in = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            String text = in == null ? "" : readAll(in);
+            closeQuietly(in);
+            if (text.length() == 0) {
+                if (code >= 200 && code < 300) {
+                    return new JSONObject().put("ok", true);
+                }
+                return uploadCloudBackupLegacy(backup, dataHash, clientKnownHash);
+            }
+            JSONObject result = new JSONObject(text);
+            if (!result.optBoolean("ok", false)
+                    && isLegacyRawUploadFailure(code, result.optString("error", ""))) {
+                return uploadCloudBackupLegacy(backup, dataHash, clientKnownHash);
+            }
+            return result;
+        } finally {
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    private boolean isLegacyRawUploadFailure(int statusCode, String message) {
+        String value = message == null ? "" : message.toLowerCase(Locale.US);
+        return statusCode == HttpURLConnection.HTTP_NOT_FOUND
+                || statusCode == HttpURLConnection.HTTP_BAD_METHOD
+                || statusCode >= 500
+                || value.contains("codec can't decode")
+                || value.contains("unicodedecodeerror")
+                || value.contains("invalid start byte");
+    }
+
+    private JSONObject uploadCloudBackupLegacy(byte[] backup, String dataHash,
+                                               String clientKnownHash) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("id", parseIntSafe(profile.optString("userId", "")));
+        body.put("token", profile.optString("cloudToken", ""));
+        body.put("backupData", Base64.encodeToString(backup, Base64.NO_WRAP));
+        body.put("dataHash", dataHash == null ? "" : dataHash);
+        body.put("clientKnownDataHash", clientKnownHash == null ? "" : clientKnownHash);
+        return postJson(CLOUD_API_BASE + "/api/users/data/upload", body,
+                profile.optString("cloudToken", ""), 15000, 90000);
+    }
+
+    private JSONObject downloadCloudBackupRaw() throws Exception {
+        HttpURLConnection conn = null;
+        InputStream in = null;
+        try {
+            conn = (HttpURLConnection) new URL(CLOUD_API_DATA_DOWNLOAD_RAW).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(90000);
+            conn.setUseCaches(false);
+            conn.setDoOutput(true);
+            conn.setFixedLengthStreamingMode(0);
+            conn.setRequestProperty("Content-Type", "application/octet-stream");
+            conn.setRequestProperty("Authorization", "Bearer " + profile.optString("cloudToken", ""));
+            conn.setRequestProperty("X-User-Id", profile.optString("userId", ""));
+            OutputStream out = conn.getOutputStream();
+            out.close();
+
+            int code = conn.getResponseCode();
+            String contentType = conn.getContentType();
+            if (code == HttpURLConnection.HTTP_NO_CONTENT) {
+                return new JSONObject().put("ok", true).put("hasData", false);
+            }
+            in = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            if (code >= 200 && code < 300
+                    && contentType != null && contentType.toLowerCase(Locale.US).contains("application/octet-stream")) {
+                restoreBackupFromStream(in, true);
+                JSONObject result = new JSONObject();
+                result.put("ok", true);
+                result.put("hasData", true);
+                result.put("dataHash", headerValue(conn, "X-Data-Hash"));
+                result.put("dataUpdatedAt", headerValue(conn, "X-Data-Updated-At"));
+                return result;
+            }
+            String text = in == null ? "" : readAll(in);
+            if (text.length() == 0) {
+                return new JSONObject().put("ok", false).put("error", "云端接口尚未更新");
+            }
+            return new JSONObject(text);
+        } finally {
+            closeQuietly(in);
+            if (conn != null) {
+                conn.disconnect();
+            }
+        }
+    }
+
+    private String headerValue(HttpURLConnection conn, String name) {
+        String value = conn == null ? null : conn.getHeaderField(name);
+        return value == null ? "" : value;
+    }
+
     private CloudResult parseCloudResponse(JSONObject root) {
         if (root == null || !root.optBoolean("ok", false)) {
             return CloudResult.fail(root == null ? "云端返回异常" : root.optString("error", "云端返回异常"));
@@ -19908,47 +20773,22 @@ public class MainActivity extends Activity {
                         skipped = true;
                         message = "本机数据已经是最新，不需要重复上传";
                     } else {
-                        if (showResult) updateCloudSyncProgress(38, "正在检测云端是否已有新内容...");
-                        JSONObject downloadBody = new JSONObject();
-                        downloadBody.put("id", parseIntSafe(profile.optString("userId", "")));
-                        downloadBody.put("metadataOnly", true);
-                        JSONObject remote = postJson(CLOUD_API_DATA_DOWNLOAD, downloadBody,
-                                profile.optString("cloudToken", ""), 10000, 30000);
-                        if (!remote.optBoolean("ok", false)) {
-                            message = remote.optString("error", "云端同步失败");
-                            authExpired = isCloudAuthExpiredMessage(message);
-                        } else {
-                            String remoteHash = remote.optString("dataHash", "");
-                            boolean remoteHasData = remote.optBoolean("hasData", false)
-                                    || remote.optString("backupData", "").length() > 0;
-                            if (remoteHasData && remoteHash.length() > 0
-                                    && !remoteHash.equals(backupHash)
-                                    && (knownCloudHash.length() == 0 || !knownCloudHash.equals(remoteHash))) {
-                                staleCloud = true;
-                                message = "云端已有其他设备的新数据，请先同步云端数据到本地";
-                            } else {
-                                if (showResult) updateCloudSyncProgress(58, "正在上传新增内容...");
-                                JSONObject body = new JSONObject();
-                                body.put("id", parseIntSafe(profile.optString("userId", "")));
-                                body.put("backupData", Base64.encodeToString(backup, Base64.NO_WRAP));
-                                body.put("dataHash", backupHash);
-                                body.put("clientKnownDataHash", knownCloudHash);
-                                body.put("clientUpdatedAt", new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(new Date()));
-                                JSONObject root = postJson(CLOUD_API_DATA_UPLOAD, body, profile.optString("cloudToken", ""), 10000, 60000);
-                                ok = root.optBoolean("ok", false);
-                                message = ok ? root.optString("message", "数据已同步到云端") : root.optString("error", "云端同步失败");
-                                authExpired = !ok && isCloudAuthExpiredMessage(message);
-                                if (ok) {
-                                    try {
-                                        profile.put("cloudDataUpdatedAt", root.optString("dataUpdatedAt", ""));
-                                        profile.put("cloudDataHash", root.optString("dataHash", backupHash));
-                                        profile.put("lastCloudBackupHash", root.optString("dataHash", backupHash));
-                                        profile.put("cloudSyncStatus", "synced");
-                                        profile.put("cloudSyncMessage", "");
-                                        saveProfile();
-                                    } catch (JSONException ignored) {
-                                    }
-                                }
+                        if (showResult) updateCloudSyncProgress(58, "正在流式上传新增内容...");
+                        JSONObject root = uploadCloudBackupRaw(backup, backupHash, knownCloudHash);
+                        ok = root.optBoolean("ok", false);
+                        message = ok ? root.optString("message", "数据已同步到云端")
+                                : root.optString("error", "云端同步失败");
+                        authExpired = !ok && isCloudAuthExpiredMessage(message);
+                        staleCloud = !ok && message.contains("云端已有其他设备的新数据");
+                        if (ok) {
+                            try {
+                                profile.put("cloudDataUpdatedAt", root.optString("dataUpdatedAt", ""));
+                                profile.put("cloudDataHash", root.optString("dataHash", backupHash));
+                                profile.put("lastCloudBackupHash", root.optString("dataHash", backupHash));
+                                profile.put("cloudSyncStatus", "synced");
+                                profile.put("cloudSyncMessage", "");
+                                saveProfile();
+                            } catch (JSONException ignored) {
                             }
                         }
                     }
@@ -19961,8 +20801,12 @@ public class MainActivity extends Activity {
                         } catch (JSONException ignored) {
                         }
                     }
+                } catch (OutOfMemoryError error) {
+                    releaseThumbnailMemory();
+                    message = "本机数据较大，暂时无法整理，请清理无用图片后重试";
                 } catch (Exception e) {
-                    message = "无法连接云端";
+                    message = e.getMessage() != null && e.getMessage().contains("服务器")
+                            ? e.getMessage() : "无法连接云端";
                 }
                 final boolean done = ok;
                 final boolean expired = authExpired;
@@ -19983,8 +20827,10 @@ public class MainActivity extends Activity {
                         }
                         if (showResult) {
                             finishCloudSyncProgress(toast, done);
-                        } else if (!done || conflict) {
+                        } else if (conflict) {
                             showGlassToast(toast, Toast.LENGTH_LONG);
+                        } else if (!done) {
+                            Log.w(LOG_TAG, "Background cloud sync failed: " + toast);
                         }
                     }
                 });
@@ -20056,36 +20902,34 @@ public class MainActivity extends Activity {
                 boolean authExpired = false;
                 try {
                     if (showResult) updateCloudSyncProgress(22, "正在连接云端...");
-                    JSONObject body = new JSONObject();
-                    body.put("id", parseIntSafe(profile.optString("userId", "")));
-                    JSONObject root = postJson(CLOUD_API_DATA_DOWNLOAD, body, profile.optString("cloudToken", ""), 10000, 60000);
+                    JSONObject root = downloadCloudBackupRaw();
                     if (!root.optBoolean("ok", false)) {
                         message = root.optString("error", "云端同步失败");
                         authExpired = isCloudAuthExpiredMessage(message);
+                    } else if (!root.optBoolean("hasData", false)) {
+                        message = "云端暂时没有可同步的数据";
+                        ok = true;
                     } else {
-                        String encoded = root.optString("backupData", "");
-                        if (encoded.length() == 0) {
-                            message = root.optString("message", "云端暂时没有可同步的数据");
-                        } else {
-                            if (showResult) updateCloudSyncProgress(58, "正在写入本机...");
-                            byte[] data = Base64.decode(encoded, Base64.DEFAULT);
-                            restoreBackupFromStream(new ByteArrayInputStream(data), true);
-                            try {
-                                profile.put("cloudDataUpdatedAt", root.optString("dataUpdatedAt", ""));
-                                profile.put("cloudDataHash", root.optString("dataHash", ""));
-                                if (root.optString("dataHash", "").length() > 0) {
-                                    profile.put("lastCloudBackupHash", root.optString("dataHash", ""));
-                                }
-                                saveProfile();
-                            } catch (JSONException ignored) {
+                        if (showResult) updateCloudSyncProgress(78, "正在写入本机...");
+                        try {
+                            profile.put("cloudDataUpdatedAt", root.optString("dataUpdatedAt", ""));
+                            profile.put("cloudDataHash", root.optString("dataHash", ""));
+                            if (root.optString("dataHash", "").length() > 0) {
+                                profile.put("lastCloudBackupHash", root.optString("dataHash", ""));
                             }
-                            ok = true;
-                            hasData = true;
-                            message = "云端数据已同步到本机";
+                            saveProfile();
+                        } catch (JSONException ignored) {
                         }
+                        ok = true;
+                        hasData = true;
+                        message = "云端数据已同步到本机";
                     }
+                } catch (OutOfMemoryError error) {
+                    releaseThumbnailMemory();
+                    message = "云端数据较大，内存不足，请稍后重试";
                 } catch (Exception e) {
-                    message = "云端同步失败，请稍后再试";
+                    message = e.getMessage() != null && e.getMessage().contains("服务器")
+                            ? e.getMessage() : "云端同步失败，请稍后再试";
                 }
                 final boolean done = ok;
                 final boolean downloaded = hasData;
@@ -21618,14 +22462,18 @@ public class MainActivity extends Activity {
     private void refreshChrome() {
         if (navHost != null) {
             FrameLayout.LayoutParams navLp = (FrameLayout.LayoutParams) navHost.getLayoutParams();
-            navLp.height = dp(spaceByLayout(70, 66, 64));
-            navLp.leftMargin = dp(spaceByLayout(18, 16, 14));
-            navLp.rightMargin = dp(spaceByLayout(18, 16, 14));
-            navLp.bottomMargin = dp(spaceByLayout(20, 18, 16));
+            navLp.height = dp(spaceByLayout(76, 72, 70));
+            int navOuterMargin = dp(spaceByLayout(22, 20, 18));
+            navLp.leftMargin = navOuterMargin;
+            navLp.rightMargin = navOuterMargin;
+            navLp.bottomMargin = navOuterMargin;
             navHost.setLayoutParams(navLp);
-            navHost.setPadding(dp(8), dp(7), dp(8), dp(7));
-            navHost.setBackground(round(navSurfaceColor(), dp(spaceByLayout(30, 29, 28)), navStrokeColor(), dp(1)));
-            navHost.setElevation(dp(navGlassEnabled() ? 5 : 10));
+            navHost.setPadding(dp(7), dp(7), dp(7), dp(7));
+            navHost.setBackgroundColor(Color.TRANSPARENT);
+            if (navHost instanceof LiquidGlassNavLayout) {
+                ((LiquidGlassNavLayout) navHost).refreshGlass();
+            }
+            navHost.setElevation(0f);
             updateNavIndicator(false);
         }
         if (fab != null) {
@@ -21633,7 +22481,7 @@ public class MainActivity extends Activity {
             int size = dp(spaceByLayout(62, 58, 56));
             fabLp.width = size;
             fabLp.height = size;
-            fabLp.bottomMargin = dp(spaceByLayout(104, 99, 94));
+            fabLp.bottomMargin = dp(photoFabBottomMargin());
             fab.setLayoutParams(fabLp);
         }
     }
@@ -21956,9 +22804,9 @@ public class MainActivity extends Activity {
 
     private int navSurfaceColor() {
         if (navGlassEnabled()) {
-            return nightDecoration() ? Color.argb(92, 34, 36, 42) : Color.argb(62, 255, 255, 255);
+            return nightDecoration() ? Color.argb(164, 34, 36, 42) : Color.argb(172, 255, 255, 255);
         }
-        return nightDecoration() ? Color.argb(242, 28, 29, 32) : Color.argb(235, 255, 255, 255);
+        return nightDecoration() ? Color.rgb(28, 29, 32) : Color.WHITE;
     }
 
     private int navStrokeColor() {
@@ -22531,8 +23379,10 @@ public class MainActivity extends Activity {
                 if (photoLongPressed && pressedPhoto != null) {
                     dragDx = event.getRawX() - downX;
                     dragDy = event.getRawY() - downY;
-                    pressedPhoto.bringToFront();
-                    pressedPhoto.setElevation(dp(32));
+                    if (pressedPhoto.getTag() instanceof PhotoAction) {
+                        PhotoAction actionTag = (PhotoAction) pressedPhoto.getTag();
+                        pressedPhoto.setElevation(actionTag.baseElevation + dp(2));
+                    }
                     if (pressedPhoto.getTag() instanceof PhotoAction) {
                         PhotoAction actionTag = (PhotoAction) pressedPhoto.getTag();
                         pressedPhoto.setTranslationX(actionTag.baseTranslationX + dragDx);
@@ -22542,8 +23392,6 @@ public class MainActivity extends Activity {
                         pressedPhoto.setTranslationX(dragDx);
                         pressedPhoto.setTranslationY(Math.max(-dp(14), Math.min(dp(14), dragDy)));
                     }
-                    pressedPhoto.setScaleX(1.04f);
-                    pressedPhoto.setScaleY(1.04f);
                     return true;
                 }
                 float dx = Math.abs(event.getRawX() - downX);
@@ -22594,30 +23442,33 @@ public class MainActivity extends Activity {
             if (pressedPhoto == null || !(pressedPhoto.getTag() instanceof PhotoAction)) {
                 return;
             }
-            final PhotoAction action = (PhotoAction) pressedPhoto.getTag();
-            pressedPhoto.animate().scaleX(0.985f).scaleY(0.985f).setDuration(115).start();
             pendingPhotoLongPress = new Runnable() {
                 @Override
                 public void run() {
                     if (photoMoved || verticalDrag || pressedPhoto == null) {
                         return;
                     }
+                    cancelChildMediaTouch();
                     photoLongPressed = true;
                     dragDx = 0f;
                     dragDy = 0f;
                     enterEditMode();
                 }
             };
-            photoLongPressHandler.postDelayed(pendingPhotoLongPress, 760);
+            photoLongPressHandler.postDelayed(pendingPhotoLongPress, 520);
+        }
+
+        private void cancelChildMediaTouch() {
+            long now = android.os.SystemClock.uptimeMillis();
+            MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 0f, 0f, 0);
+            super.dispatchTouchEvent(cancel);
+            cancel.recycle();
         }
 
         private void cancelPhotoLongPressCheck() {
             if (pendingPhotoLongPress != null) {
                 photoLongPressHandler.removeCallbacks(pendingPhotoLongPress);
                 pendingPhotoLongPress = null;
-            }
-            if (!photoLongPressed && pressedPhoto != null) {
-                pressedPhoto.animate().scaleX(1f).scaleY(1f).setDuration(160).start();
             }
         }
 
@@ -22652,14 +23503,71 @@ public class MainActivity extends Activity {
             View target = findPhotoActionTarget(this, event.getRawX(), event.getRawY(), pressedPhoto);
             if (target != null && target.getTag() instanceof PhotoAction) {
                 PhotoAction dest = (PhotoAction) target.getTag();
-                if (source.canMoveTo(dest)) {
-                    boolean stack = mediaStackingEnabled() && !source.isStacked();
-                    return source.moveTo(dest, stack);
+                if (source.canMoveTo(dest)
+                        && mediaStackingEnabled()
+                        && !source.isStacked()
+                        && deliberateStackDrop(target, event)) {
+                    return source.stackWith(dest);
                 }
-            } else if (source.isStacked() && Math.abs(dragDx) > dp(24)) {
+            }
+            View reorderTarget = target != null
+                    ? target
+                    : findClosestPhotoActionTarget(source, event.getRawX(), event.getRawY(), pressedPhoto);
+            if (reorderTarget != null && reorderTarget.getTag() instanceof PhotoAction) {
+                PhotoAction dest = (PhotoAction) reorderTarget.getTag();
+                if (source.canMoveTo(dest)) {
+                    int[] location = new int[2];
+                    reorderTarget.getLocationOnScreen(location);
+                    boolean insertAfter = event.getRawX() >= location[0] + reorderTarget.getWidth() / 2f;
+                    return source.reorderTo(dest, insertAfter);
+                }
+            }
+            if (source.isStacked() && Math.abs(dragDx) > dp(24)) {
                 return source.unstack();
             }
             return false;
+        }
+
+        private boolean deliberateStackDrop(View target, MotionEvent event) {
+            if (target == null || event == null || Math.abs(dragDy) < dp(12)) {
+                return false;
+            }
+            int[] location = new int[2];
+            target.getLocationOnScreen(location);
+            float centerX = location[0] + target.getWidth() / 2f;
+            float centerY = location[1] + target.getHeight() / 2f;
+            return Math.abs(event.getRawX() - centerX) <= target.getWidth() * 0.28f
+                    && Math.abs(event.getRawY() - centerY) <= target.getHeight() * 0.32f;
+        }
+
+        private View findClosestPhotoActionTarget(PhotoAction source, float rawX, float rawY, View skip) {
+            List<View> targets = new ArrayList<View>();
+            collectPhotoActionTargets(this, targets);
+            View closest = null;
+            float bestScore = Float.MAX_VALUE;
+            for (View candidate : targets) {
+                if (candidate == null || candidate == skip || !(candidate.getTag() instanceof PhotoAction)) {
+                    continue;
+                }
+                PhotoAction action = (PhotoAction) candidate.getTag();
+                if (!source.canMoveTo(action)) {
+                    continue;
+                }
+                int[] location = new int[2];
+                candidate.getLocationOnScreen(location);
+                float centerX = location[0] + candidate.getWidth() / 2f;
+                float centerY = location[1] + candidate.getHeight() / 2f;
+                float verticalDistance = Math.abs(rawY - centerY);
+                if (verticalDistance > Math.max(candidate.getHeight() * 0.85f, dp(46))) {
+                    continue;
+                }
+                float score = Math.abs(rawX - centerX) + verticalDistance * 1.7f;
+                if (score < bestScore) {
+                    bestScore = score;
+                    closest = candidate;
+                }
+            }
+            return closest;
         }
 
         private void enterEditMode() {
@@ -22684,7 +23592,14 @@ public class MainActivity extends Activity {
                 return;
             }
             if (view.getTag() instanceof PhotoAction) {
-                out.add(view);
+                PhotoAction action = (PhotoAction) view.getTag();
+                if (action.usesExpandedChildren()) {
+                    for (View child : action.stackChildViews) {
+                        collectPhotoActionTargets(child, out);
+                    }
+                } else {
+                    out.add(view);
+                }
                 return;
             }
             if (view instanceof ViewGroup) {
@@ -22707,6 +23622,15 @@ public class MainActivity extends Activity {
                 return null;
             }
             if (view.getTag() instanceof PhotoAction) {
+                PhotoAction action = (PhotoAction) view.getTag();
+                if (action.usesExpandedChildren()) {
+                    for (int i = action.stackChildViews.size() - 1; i >= 0; i--) {
+                        View found = findPhotoActionTarget(action.stackChildViews.get(i), rawX, rawY, skip);
+                        if (found != null) {
+                            return found;
+                        }
+                    }
+                }
                 return view;
             }
             if (view instanceof ViewGroup) {
@@ -24419,6 +25343,259 @@ public class MainActivity extends Activity {
 
     }
 
+    private class LiquidGlassNavLayout extends FrameLayout {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Path glassPath = new Path();
+        private final RectF glassRect = new RectF();
+        private View blurSource;
+        private Bitmap blurBitmap;
+        private int[] blurInput;
+        private int[] blurMiddle;
+        private int[] blurOutput;
+        private long lastBlurAt;
+
+        LiquidGlassNavLayout(Context context) {
+            super(context);
+            setWillNotDraw(false);
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        }
+
+        void setBlurSource(View source) {
+            blurSource = source;
+            refreshGlass();
+        }
+
+        void refreshGlass() {
+            lastBlurAt = 0L;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            int width = getWidth();
+            int height = getHeight();
+            if (width <= 0 || height <= 0) {
+                return;
+            }
+            float inset = dp(6);
+            glassRect.set(inset, inset, width - inset, height - inset);
+            float radius = glassRect.height() / 2f;
+            glassPath.reset();
+            glassPath.addRoundRect(glassRect, radius, radius, Path.Direction.CW);
+
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(nightDecoration() ? Color.argb(28, 40, 42, 48) : Color.argb(20, 255, 255, 255));
+            paint.setShadowLayer(dp(5), 0f, 0f,
+                    nightDecoration() ? Color.argb(70, 0, 0, 0) : Color.argb(44, 72, 82, 96));
+            canvas.drawRoundRect(glassRect, radius, radius, paint);
+            paint.clearShadowLayer();
+
+            int save = canvas.save();
+            canvas.clipPath(glassPath);
+            if (navGlassEnabled()) {
+                Bitmap backdrop = captureBlurredBackdrop(width, height);
+                if (backdrop != null && !backdrop.isRecycled()) {
+                    paint.setAlpha(255);
+                    canvas.drawBitmap(backdrop, null, new RectF(0, 0, width, height), paint);
+                }
+                paint.setAlpha(255);
+                paint.setColor(navSurfaceColor());
+                canvas.drawRoundRect(glassRect, radius, radius, paint);
+                paint.setShader(new LinearGradient(0, glassRect.top, 0,
+                        glassRect.top + glassRect.height() * 0.56f,
+                        nightDecoration() ? Color.argb(46, 255, 255, 255) : Color.argb(92, 255, 255, 255),
+                        Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                canvas.drawRoundRect(glassRect, radius, radius, paint);
+                paint.setShader(null);
+            } else {
+                paint.setAlpha(255);
+                paint.setShader(null);
+                paint.setColor(navSurfaceColor());
+                canvas.drawRoundRect(glassRect, radius, radius, paint);
+            }
+            canvas.restoreToCount(save);
+
+            int strokeColor = navStrokeColor();
+            if (Color.alpha(strokeColor) > 0) {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(1));
+                paint.setColor(strokeColor);
+                canvas.drawRoundRect(glassRect, radius, radius, paint);
+                paint.setStyle(Paint.Style.FILL);
+            }
+            if (navGlassEnabled()) {
+                postInvalidateDelayed(84L);
+            }
+        }
+
+        private Bitmap captureBlurredBackdrop(int width, int height) {
+            if (blurSource == null || blurSource.getWidth() <= 0 || blurSource.getHeight() <= 0) {
+                return null;
+            }
+            long now = System.currentTimeMillis();
+            if (blurBitmap != null && !blurBitmap.isRecycled() && now - lastBlurAt < 72L) {
+                return blurBitmap;
+            }
+            int sample = 8;
+            int bitmapWidth = Math.max(1, width / sample);
+            int bitmapHeight = Math.max(1, height / sample);
+            if (blurBitmap == null || blurBitmap.isRecycled()
+                    || blurBitmap.getWidth() != bitmapWidth || blurBitmap.getHeight() != bitmapHeight) {
+                if (blurBitmap != null && !blurBitmap.isRecycled()) {
+                    blurBitmap.recycle();
+                }
+                blurBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
+                blurInput = null;
+                blurMiddle = null;
+                blurOutput = null;
+            }
+            blurBitmap.eraseColor(Color.TRANSPARENT);
+            Canvas capture = new Canvas(blurBitmap);
+            int[] sourcePosition = new int[2];
+            int[] ownPosition = new int[2];
+            blurSource.getLocationInWindow(sourcePosition);
+            getLocationInWindow(ownPosition);
+            capture.scale(1f / sample, 1f / sample);
+            capture.translate(-(ownPosition[0] - sourcePosition[0]),
+                    -(ownPosition[1] - sourcePosition[1]));
+            blurSource.draw(capture);
+            blurNavBitmap(blurBitmap, 5);
+            lastBlurAt = now;
+            return blurBitmap;
+        }
+
+        private void blurNavBitmap(Bitmap bitmap, int radius) {
+            int width = bitmap.getWidth();
+            int height = bitmap.getHeight();
+            int pixelCount = width * height;
+            if (pixelCount <= 1) {
+                return;
+            }
+            if (blurInput == null || blurInput.length != pixelCount) {
+                blurInput = new int[pixelCount];
+                blurMiddle = new int[pixelCount];
+                blurOutput = new int[pixelCount];
+            }
+            bitmap.getPixels(blurInput, 0, width, 0, 0, width, height);
+            int window = radius * 2 + 1;
+            for (int y = 0; y < height; y++) {
+                int row = y * width;
+                for (int x = 0; x < width; x++) {
+                    int a = 0, r = 0, g = 0, b = 0;
+                    for (int offset = -radius; offset <= radius; offset++) {
+                        int px = Math.max(0, Math.min(width - 1, x + offset));
+                        int color = blurInput[row + px];
+                        a += Color.alpha(color);
+                        r += Color.red(color);
+                        g += Color.green(color);
+                        b += Color.blue(color);
+                    }
+                    blurMiddle[row + x] = Color.argb(a / window, r / window, g / window, b / window);
+                }
+            }
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int a = 0, r = 0, g = 0, b = 0;
+                    for (int offset = -radius; offset <= radius; offset++) {
+                        int py = Math.max(0, Math.min(height - 1, y + offset));
+                        int color = blurMiddle[py * width + x];
+                        a += Color.alpha(color);
+                        r += Color.red(color);
+                        g += Color.green(color);
+                        b += Color.blue(color);
+                    }
+                    blurOutput[y * width + x] = Color.argb(a / window, r / window, g / window, b / window);
+                }
+            }
+            bitmap.setPixels(blurOutput, 0, width, 0, 0, width, height);
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            if (blurBitmap != null && !blurBitmap.isRecycled()) {
+                blurBitmap.recycle();
+            }
+            blurBitmap = null;
+            blurInput = null;
+            blurMiddle = null;
+            blurOutput = null;
+            blurSource = null;
+            super.onDetachedFromWindow();
+        }
+    }
+
+    private class FavoriteStarView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path star = new Path();
+        private boolean favorite;
+
+        FavoriteStarView(Context context) {
+            super(context);
+            setWillNotDraw(false);
+        }
+
+        boolean isFavorite() {
+            return favorite;
+        }
+
+        void setFavorite(boolean value) {
+            favorite = value;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float size = Math.min(getWidth(), getHeight());
+            float cx = getWidth() / 2f;
+            float cy = getHeight() / 2f;
+            buildStarPath(star, cx, cy, size * 0.30f, size * 0.15f);
+            paint.setStrokeJoin(Paint.Join.ROUND);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStyle(Paint.Style.FILL);
+            if (favorite) {
+                int starTop = adjustAlpha(blendColor(accent, Color.WHITE,
+                        nightDecoration() ? 0.38f : 0.68f), nightDecoration() ? 228 : 234);
+                int starMiddle = adjustAlpha(blendColor(accent, Color.WHITE,
+                        nightDecoration() ? 0.24f : 0.52f), nightDecoration() ? 220 : 224);
+                int starBottom = adjustAlpha(blendColor(accent, Color.WHITE,
+                        nightDecoration() ? 0.12f : 0.38f), nightDecoration() ? 210 : 214);
+                paint.setShader(new LinearGradient(cx, cy - size * 0.30f, cx, cy + size * 0.30f,
+                        new int[]{starTop, starMiddle, starBottom},
+                        new float[]{0f, 0.50f, 1f}, Shader.TileMode.CLAMP));
+            } else {
+                int hollowTop = adjustAlpha(blendColor(accent, Color.WHITE, 0.76f),
+                        nightDecoration() ? 20 : 10);
+                int hollowBottom = adjustAlpha(accent, nightDecoration() ? 28 : 14);
+                paint.setShader(new LinearGradient(cx, cy - size * 0.28f, cx, cy + size * 0.28f,
+                        hollowTop, hollowBottom, Shader.TileMode.CLAMP));
+            }
+            canvas.drawPath(star, paint);
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1.8f));
+            paint.setColor(adjustAlpha(accent, nightDecoration() ? 190 : 166));
+            canvas.drawPath(star, paint);
+        }
+    }
+
+    private void buildStarPath(Path path, float cx, float cy, float outer, float inner) {
+        path.reset();
+        for (int i = 0; i < 10; i++) {
+            double angle = -Math.PI / 2.0 + i * Math.PI / 5.0;
+            float radius = (i % 2 == 0) ? outer : inner;
+            float x = cx + (float) Math.cos(angle) * radius;
+            float y = cy + (float) Math.sin(angle) * radius;
+            if (i == 0) {
+                path.moveTo(x, y);
+            } else {
+                path.lineTo(x, y);
+            }
+        }
+        path.close();
+    }
+
     private class SettingIconView extends View {
         private final String type;
         private final int color;
@@ -24516,6 +25693,8 @@ public class MainActivity extends Activity {
                 drawFont(canvas, cx, cy, s);
             } else if ("share".equals(type)) {
                 drawShare(canvas, cx, cy, s);
+            } else if ("favorite".equals(type)) {
+                drawFavorite(canvas, cx, cy, s);
             } else {
                 drawSpark(canvas, cx, cy, s);
             }
@@ -24704,6 +25883,11 @@ public class MainActivity extends Activity {
             path.lineTo(cx - s * 0.26f, cy);
             path.lineTo(cx - s * 0.08f, cy - s * 0.06f);
             path.close();
+            canvas.drawPath(path, paint);
+        }
+
+        private void drawFavorite(Canvas canvas, float cx, float cy, float s) {
+            buildStarPath(path, cx, cy, s * 0.25f, s * 0.12f);
             canvas.drawPath(path, paint);
         }
 
@@ -27287,20 +28471,31 @@ public class MainActivity extends Activity {
         String arrayKey;
         String title;
         View closeButton;
+        View rotateButton;
+        View itemView;
         List<String> stackNames;
+        List<View> stackChildViews;
+        boolean[] stackExpandedState;
         boolean editing;
+        boolean rotating;
         float baseRotation;
         float baseTranslationX;
         float baseTranslationY;
         float baseElevation;
 
         PhotoAction(String date, String mealKey, String fileName, String arrayKey, String title, View closeButton) {
+            this(date, mealKey, fileName, arrayKey, title, closeButton, null);
+        }
+
+        PhotoAction(String date, String mealKey, String fileName, String arrayKey, String title,
+                    View closeButton, View rotateButton) {
             this.date = date;
             this.mealKey = mealKey;
             this.fileName = fileName;
             this.arrayKey = arrayKey;
             this.title = title;
             this.closeButton = closeButton;
+            this.rotateButton = rotateButton;
         }
 
         void enterEdit(View item) {
@@ -27317,6 +28512,10 @@ public class MainActivity extends Activity {
                 closeButton.setVisibility(View.VISIBLE);
                 closeButton.bringToFront();
             }
+            if (rotateButton != null) {
+                rotateButton.setVisibility(View.VISIBLE);
+                rotateButton.bringToFront();
+            }
             if (feedback) {
                 playMediaEditFeedback();
             }
@@ -27327,6 +28526,9 @@ public class MainActivity extends Activity {
             editing = false;
             if (closeButton != null) {
                 closeButton.setVisibility(View.GONE);
+            }
+            if (rotateButton != null) {
+                rotateButton.setVisibility(View.GONE);
             }
         }
 
@@ -27343,9 +28545,24 @@ public class MainActivity extends Activity {
             return isMediaStacked(meal, arrayKey, fileName);
         }
 
-        boolean moveTo(PhotoAction other, boolean stack) {
+        boolean usesExpandedChildren() {
+            return stackExpandedState != null
+                    && stackExpandedState.length > 0
+                    && stackExpandedState[0]
+                    && stackChildViews != null
+                    && !stackChildViews.isEmpty();
+        }
+
+        boolean stackWith(PhotoAction other) {
             if (canMoveTo(other)) {
-                return moveMealMedia(date, mealKey, arrayKey, fileName, other.fileName, stack);
+                return stackMealMedia(date, mealKey, arrayKey, fileName, other.fileName);
+            }
+            return false;
+        }
+
+        boolean reorderTo(PhotoAction other, boolean insertAfter) {
+            if (canMoveTo(other)) {
+                return reorderMealMedia(date, mealKey, arrayKey, fileName, other.fileName, insertAfter);
             }
             return false;
         }

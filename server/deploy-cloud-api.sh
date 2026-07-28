@@ -5,7 +5,7 @@ APP_DIR="/opt/eat-record-cloud"
 APP_PATH="$APP_DIR/app.py"
 BACKUP_PATH="$APP_DIR/app.py.bak.$(date +%Y%m%d%H%M%S)"
 OPENLIST_API="http://47.97.215.111:5244/api/fs/get"
-REMOTE_APP="/lanzou/Myapp/eat record/0.5.21 (endness)/server/cloud-api-server.py"
+REMOTE_APP="/lanzou/Myapp/eat record/0.5.24/server/cloud-api-server.py"
 
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
@@ -20,7 +20,7 @@ import json
 import urllib.request
 
 api = "http://47.97.215.111:5244/api/fs/get"
-remote = "/lanzou/Myapp/eat record/0.5.21 (endness)/server/cloud-api-server.py"
+remote = "/lanzou/Myapp/eat record/0.5.24/server/cloud-api-server.py"
 req = urllib.request.Request(
     api,
     data=json.dumps({"path": remote}).encode("utf-8"),

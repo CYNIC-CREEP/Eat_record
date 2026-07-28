@@ -1,13 +1,12 @@
 {
-    "versionCode":  143,
-    "versionName":  "0.5.21 (endness)",
-    "apkUrl":  "http://47.97.215.111:5244/lanzou/Myapp/eat%20record/0.5.21%20(endness)/apk/EatRecord-0.5.21%20(endness)-debug.apk",
-    "apkPath":  "/lanzou/Myapp/eat record/0.5.21 (endness)/apk/EatRecord-0.5.21 (endness)-debug.apk",
+    "versionCode":  146,
+    "versionName":  "0.5.24",
+    "apkUrl":  "http://47.97.215.111:5244/lanzou/Myapp/eat%20record/0.5.24/apk/EatRecord-0.5.24-debug.apk",
+    "apkPath":  "/lanzou/Myapp/eat record/0.5.24/apk/EatRecord-0.5.24-debug.apk",
     "notes":  [
-                  "• 重构拍照输出通道，修复部分安卓 16 设备拍照后图片没有加入餐次的问题",
-                  "• 同时兼容应用输出地址、相机返回地址与缩略图结果",
-                  "• 照片写入稍有延迟时自动短暂重试，不再等待两秒后无结果退出",
-                  "• 相机图标改为更浅的半透明主题色",
-                  "• 保留字体来源、跨年标题、返回位置和页面过渡等本版优化"
+                  "• 修复打开应用时偶发显示 UTF-8 解码技术错误的问题，自动同步兼容新旧云端接口",
+                  "• 长按餐次图片或贴纸后新增向左旋转按钮，折叠与展开状态均可逐张旋转或删除",
+                  "• 媒体拖动改为原尺寸插入排序，支持移动到间隙和末尾，并降低误叠放概率",
+                  "• 阻止系统长按图片功能接管拖动手势，修复分享面板意外弹出；右下角添加图片按钮轻微上移"
               ]
 }

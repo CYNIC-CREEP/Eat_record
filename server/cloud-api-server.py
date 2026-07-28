@@ -230,7 +230,7 @@ def fail(message):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "EatRecordCloud/0.5.11"
+    server_version = "EatRecordCloud/0.5.24"
 
     def log_message(self, fmt, *args):
         print(f"[{utc_now()}] {fmt % args}")
@@ -241,7 +241,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, Authorization, X-User-Id, X-Data-Hash, X-Client-Known-Data-Hash")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
         self.wfile.write(raw)
@@ -266,6 +267,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
+            if path == "/api/users/data/upload-raw":
+                self.data_upload_raw()
+                return
+            if path == "/api/users/data/download-raw":
+                self.data_download_raw()
+                return
             body = self._read_json()
             if path == "/api/users/check-nickname":
                 self.check_nickname(body)
@@ -459,6 +466,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 data_hash = hashlib.sha256(backup_data.encode("utf-8")).hexdigest()
         client_known_hash = str(body.get("clientKnownDataHash", "")).strip().lower()
+        self._store_cloud_backup(user, backup_data, data_hash, client_known_hash)
+
+    def _store_cloud_backup(self, user, backup_data, data_hash, client_known_hash):
         updated = utc_now()
         with conn() as c:
             current = c.execute("select * from users where id=?", (user["id"],)).fetchone()
@@ -487,6 +497,33 @@ class Handler(BaseHTTPRequestHandler):
             user=user_json(row, request_token(self.headers)),
         ))
 
+    def data_upload_raw(self):
+        user = token_user(self.headers)
+        if not user:
+            self._send(fail("未登录或登录已过期"), 401)
+            return
+        header_id = str(self.headers.get("X-User-Id", "")).strip()
+        if header_id and header_id != str(user["id"]):
+            self._send(fail("无权限操作"), 403)
+            return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            self._send(fail("同步数据为空"), 400)
+            return
+        if length > 72 * 1024 * 1024:
+            self._send(fail("同步数据太大，请先清理无用图片后再试"), 413)
+            return
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._send(fail("同步数据接收不完整"), 400)
+            return
+        data_hash = str(self.headers.get("X-Data-Hash", "")).strip().lower()
+        if not data_hash:
+            data_hash = hashlib.sha256(raw).hexdigest()
+        client_known_hash = str(self.headers.get("X-Client-Known-Data-Hash", "")).strip().lower()
+        backup_data = base64.b64encode(raw).decode("ascii")
+        self._store_cloud_backup(user, backup_data, data_hash, client_known_hash)
+
     def data_download(self, body):
         user = token_user(self.headers)
         if not user:
@@ -507,6 +544,39 @@ class Handler(BaseHTTPRequestHandler):
             message="云端暂时没有可同步的数据" if not data else "云端数据已读取",
             user=user_json(row, request_token(self.headers)),
         ))
+
+    def data_download_raw(self):
+        user = token_user(self.headers)
+        if not user:
+            self._send(fail("未登录或登录已过期"), 401)
+            return
+        header_id = str(self.headers.get("X-User-Id", "")).strip()
+        if header_id and header_id != str(user["id"]):
+            self._send(fail("无权限操作"), 403)
+            return
+        with conn() as c:
+            row = c.execute("select * from users where id=?", (user["id"],)).fetchone()
+        data = row["cloud_data"] or ""
+        self.send_response(200 if data else 204)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("X-Data-Hash", row["cloud_data_hash"] or "")
+        self.send_header("X-Data-Updated-At", row["cloud_data_updated_at"] or "")
+        self.send_header("X-Has-Data", "1" if data else "0")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        if data:
+            padding = 2 if data.endswith("==") else (1 if data.endswith("=") else 0)
+            decoded_length = len(data) * 3 // 4 - padding
+            self.send_header("Content-Length", str(decoded_length))
+        else:
+            self.send_header("Content-Length", "0")
+        self.end_headers()
+        if not data:
+            return
+        chunk_size = 1024 * 1024
+        chunk_size -= chunk_size % 4
+        for offset in range(0, len(data), chunk_size):
+            chunk = data[offset:offset + chunk_size]
+            self.wfile.write(base64.b64decode(chunk.encode("ascii")))
 
 
 if __name__ == "__main__":
