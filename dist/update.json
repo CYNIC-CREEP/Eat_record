@@ -1,7 +1,7 @@
 {
     "versionCode":  146,
     "versionName":  "0.5.24",
-    "apkUrl":  "http://47.97.215.111:5244/lanzou/Myapp/eat%20record/0.5.24/apk/EatRecord-0.5.24-debug.apk",
+    "apkUrl":  "https://pan.freefeng.icu/lanzou/Myapp/eat%20record/0.5.24/apk/EatRecord-0.5.24-debug.apk",
     "apkPath":  "/lanzou/Myapp/eat record/0.5.24/apk/EatRecord-0.5.24-debug.apk",
     "notes":  [
                   "• 修复打开应用时偶发显示 UTF-8 解码技术错误的问题，自动同步兼容新旧云端接口",
