@@ -1,12 +1,11 @@
 {
-    "versionCode":  146,
-    "versionName":  "0.5.24",
-    "apkUrl":  "https://pan.freefeng.icu/lanzou/Myapp/eat%20record/0.5.24/apk/EatRecord-0.5.24-debug.apk",
-    "apkPath":  "/lanzou/Myapp/eat record/0.5.24/apk/EatRecord-0.5.24-debug.apk",
+    "versionCode":  147,
+    "versionName":  "0.5.25",
+    "apkUrl":  "https://pan.freefeng.icu/lanzou/Myapp/eat%20record/0.5.25/apk/EatRecord-0.5.25-debug.apk",
+    "apkPath":  "/lanzou/Myapp/eat record/0.5.25/apk/EatRecord-0.5.25-debug.apk",
     "notes":  [
-                  "• 修复打开应用时偶发显示 UTF-8 解码技术错误的问题，自动同步兼容新旧云端接口",
-                  "• 长按餐次图片或贴纸后新增向左旋转按钮，折叠与展开状态均可逐张旋转或删除",
-                  "• 媒体拖动改为原尺寸插入排序，支持移动到间隙和末尾，并降低误叠放概率",
-                  "• 阻止系统长按图片功能接管拖动手势，修复分享面板意外弹出；右下角添加图片按钮轻微上移"
+                  "• 修复 API 配置中无法稳定切换并保存其他模型的问题",
+                  "• 模型列表改为可滚动界面，模型较多时也能完整选择",
+                  "• 新增手动填写模型入口，API Key、接口和模型在检测通过后一次性保存到本机"
               ]
 }

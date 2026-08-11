@@ -708,7 +708,11 @@ public class MainActivity extends Activity {
                       "修复打开应用时偶发显示 UTF-8 解码技术错误的问题，自动同步兼容新旧云端接口。",
                       "长按餐次图片或贴纸后新增向左旋转按钮，折叠与展开状态均可逐张旋转或删除。",
                       "媒体拖动改为原尺寸插入排序，支持移动到间隙和末尾，并降低误叠放概率。",
-                      "阻止系统长按图片功能接管拖动手势，修复分享面板意外弹出；右下角添加图片按钮轻微上移。"}
+                      "阻止系统长按图片功能接管拖动手势，修复分享面板意外弹出；右下角添加图片按钮轻微上移。"},
+            {"0.5.25",
+                      "修复 API 配置中无法稳定切换并保存其他模型的问题。",
+                      "模型列表改为可滚动界面，模型较多时也能完整选择。",
+                      "新增手动填写模型入口，API Key、接口和模型会在检测通过后一次性保存到本机。"}
     };
     private static final String[] DINING_METHOD_OPTIONS = {"食堂", "线下餐厅", "外卖", "自己做"};
     private static final String[] MEAL_HABIT_OPTIONS = {"一天1~2餐", "一天2~3餐", "一天3~4餐", "一天4餐以上"};
@@ -10714,9 +10718,10 @@ public class MainActivity extends Activity {
         modelSelect.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                List<String> models = apiModelChoices(profile.optJSONArray("apiModels"));
+                List<String> models = apiModelChoicesWithCurrent(
+                        profile.optJSONArray("apiModels"), selectedModel[0]);
                 if (models.isEmpty()) {
-                    showGlassToast("先点检测模型，读取可选模型", Toast.LENGTH_SHORT);
+                    promptManualApiModel(selectedModel, modelSelect);
                     return;
                 }
                 showStoredApiModelChoices(models, selectedModel, modelSelect);
@@ -10730,7 +10735,7 @@ public class MainActivity extends Activity {
         actions.setPadding(0, dp(14), 0, 0);
         TextView official = dialogButton("API 官网", adjustAlpha(accentSoft, 126), accent);
         TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        TextView test = dialogButton("检测模型", accent, Color.WHITE);
+        TextView test = dialogButton("检测并保存", accent, Color.WHITE);
         official.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -10793,13 +10798,13 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(70), dp(42));
         cancelLp.rightMargin = dp(10);
         actions.addView(cancel, cancelLp);
-        actions.addView(test, new LinearLayout.LayoutParams(dp(82), dp(42)));
+        actions.addView(test, new LinearLayout.LayoutParams(dp(96), dp(42)));
         box.addView(actions);
         showRoundedDialog(dialog, box);
     }
 
     private void chooseDetectedApiModel(final ApiProbeResult probe) {
-        final List<String> models = apiModelChoices(probe.models);
+        final List<String> models = apiModelChoicesWithCurrent(probe.models, probe.selectedModel);
         if (models.isEmpty()) {
             showGlassToast("API 调用有效，已保存", Toast.LENGTH_SHORT);
             rerenderPreservingScroll(new Runnable() {
@@ -10810,16 +10815,7 @@ public class MainActivity extends Activity {
             });
             return;
         }
-        String[] names = new String[models.size()];
-        int selected = 0;
-        String current = apiModelName();
-        for (int i = 0; i < models.size(); i++) {
-            names[i] = models.get(i) + (looksLikeVisionModel(models.get(i)) ? " · 可识图" : "");
-            if (models.get(i).equals(current)) {
-                selected = i;
-            }
-        }
-        showChoiceDialog("选择 AI 模型", names, selected, new ChoiceHandler() {
+        showApiModelChoiceDialog(models, apiModelName(), false, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 if (which < 0 || which >= models.size()) {
@@ -10833,7 +10829,7 @@ public class MainActivity extends Activity {
                     if (!vision) {
                         profile.put("aiVisionEnabled", false);
                     }
-                    saveCloudProfileFields();
+                    saveProfile();
                 } catch (JSONException ignored) {
                 }
                 showGlassToast("已选择模型：" + chosen, Toast.LENGTH_SHORT);
@@ -10849,16 +10845,7 @@ public class MainActivity extends Activity {
 
     private void showStoredApiModelChoices(final List<String> models, final String[] selectedModel,
                                            final TextView modelSelect) {
-        String[] names = new String[models.size()];
-        int selected = 0;
-        String current = selectedModel[0];
-        for (int i = 0; i < models.size(); i++) {
-            names[i] = models.get(i) + (looksLikeVisionModel(models.get(i)) ? " · 可识图" : "");
-            if (models.get(i).equals(current)) {
-                selected = i;
-            }
-        }
-        showChoiceDialog("选择 AI 模型", names, selected, new ChoiceHandler() {
+        showApiModelChoiceDialog(models, selectedModel[0], true, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 if (which < 0 || which >= models.size()) {
@@ -10867,22 +10854,87 @@ public class MainActivity extends Activity {
                 String chosen = models.get(which);
                 selectedModel[0] = chosen;
                 modelSelect.setText(chosen + (looksLikeVisionModel(chosen) ? " · 可识图" : ""));
-                try {
-                    profile.put("apiModel", chosen);
-                    boolean vision = looksLikeVisionModel(chosen);
-                    profile.put("apiVisionSupported", vision);
-                    if (!vision) {
-                        profile.put("aiVisionEnabled", false);
-                    }
-                    saveProfile();
-                } catch (JSONException ignored) {
-                }
-                showGlassToast("已选择模型：" + chosen, Toast.LENGTH_SHORT);
+                showGlassToast("已选择，点击检测并保存后生效", Toast.LENGTH_SHORT);
+            }
+        }, new Runnable() {
+            @Override
+            public void run() {
+                promptManualApiModel(selectedModel, modelSelect);
             }
         });
     }
 
-    private void promptManualApiModel() {
+    private void showApiModelChoiceDialog(final List<String> models, String current,
+                                          boolean allowManual, final ChoiceHandler handler) {
+        showApiModelChoiceDialog(models, current, allowManual, handler, null);
+    }
+
+    private void showApiModelChoiceDialog(final List<String> models, String current,
+                                          boolean allowManual, final ChoiceHandler handler,
+                                          final Runnable manualHandler) {
+        final AlertDialog dialog = new AlertDialog.Builder(this).create();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(20), dp(22), dp(18));
+        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
+        TextView title = label("选择 AI 模型", 22, Color.rgb(28, 28, 30), true);
+        title.setPadding(0, 0, 0, dp(10));
+        box.addView(title);
+
+        ScrollView scroll = new ScrollView(this);
+        disableForceDark(scroll);
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(list);
+        for (int i = 0; i < models.size(); i++) {
+            final int index = i;
+            String model = models.get(i);
+            TextView item = label(model + (looksLikeVisionModel(model) ? " · 可识图" : ""),
+                    16, Color.rgb(35, 35, 35), false);
+            item.setGravity(Gravity.CENTER_VERTICAL);
+            item.setPadding(dp(14), 0, dp(14), 0);
+            item.setBackground(round(model.equals(current) ? accentSoft : Color.TRANSPARENT, dp(16), 0, 0));
+            attachPressAnimation(item);
+            item.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    dialog.dismiss();
+                    handler.onChoice(index);
+                }
+            });
+            LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+            itemLp.topMargin = dp(5);
+            list.addView(item, itemLp);
+        }
+        if (allowManual) {
+            TextView manual = label("手动填写模型…", 16, accent, true);
+            manual.setGravity(Gravity.CENTER_VERTICAL);
+            manual.setPadding(dp(14), 0, dp(14), 0);
+            manual.setBackground(round(adjustAlpha(accentSoft, 118), dp(16), 0, 0));
+            attachPressAnimation(manual);
+            manual.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    dialog.dismiss();
+                    if (manualHandler != null) {
+                        manualHandler.run();
+                    }
+                }
+            });
+            LinearLayout.LayoutParams manualLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+            manualLp.topMargin = dp(8);
+            list.addView(manual, manualLp);
+        }
+        int rows = models.size() + (allowManual ? 1 : 0);
+        int listHeight = Math.min(420, Math.max(58, rows * 55));
+        box.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(listHeight)));
+        showRoundedDialog(dialog, box);
+    }
+
+    private void promptManualApiModel(final String[] selectedModel, final TextView modelSelect) {
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -10890,7 +10942,7 @@ public class MainActivity extends Activity {
         box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
         box.addView(label("手动填写模型", 22, Color.rgb(28, 28, 30), true));
         final EditText input = apiInput("例如 deepseek-chat / mimo-v2-flash / MiniMax-M2.1");
-        input.setText(apiModelName());
+        input.setText(selectedModel[0]);
         box.addView(input);
         LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         actions.setPadding(0, dp(14), 0, 0);
@@ -10910,23 +10962,10 @@ public class MainActivity extends Activity {
                     showGlassToast("模型名不能为空", Toast.LENGTH_SHORT);
                     return;
                 }
-                try {
-                    profile.put("apiModel", model);
-                    profile.put("apiVisionSupported", looksLikeVisionModel(model));
-                    if (!looksLikeVisionModel(model)) {
-                        profile.put("aiVisionEnabled", false);
-                    }
-                    saveProfile();
-                } catch (JSONException ignored) {
-                }
+                selectedModel[0] = model;
+                modelSelect.setText(model + (looksLikeVisionModel(model) ? " · 可识图" : ""));
                 dialog.dismiss();
-                showGlassToast("已保存模型", Toast.LENGTH_SHORT);
-                rerenderPreservingScroll(new Runnable() {
-                    @Override
-                    public void run() {
-                        renderExperimentalPage();
-                    }
-                });
+                showGlassToast("已填写，点击检测并保存后生效", Toast.LENGTH_SHORT);
             }
         });
         LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(78), dp(42));
@@ -11146,6 +11185,15 @@ public class MainActivity extends Activity {
                     list.add(model);
                 }
             }
+        }
+        return list;
+    }
+
+    private List<String> apiModelChoicesWithCurrent(JSONArray array, String current) {
+        List<String> list = apiModelChoices(array);
+        String selected = current == null ? "" : current.trim();
+        if (selected.length() > 0 && !list.contains(selected)) {
+            list.add(0, selected);
         }
         return list;
     }
