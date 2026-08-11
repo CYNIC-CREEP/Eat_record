@@ -107,8 +107,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -710,9 +714,9 @@ public class MainActivity extends Activity {
                       "媒体拖动改为原尺寸插入排序，支持移动到间隙和末尾，并降低误叠放概率。",
                       "阻止系统长按图片功能接管拖动手势，修复分享面板意外弹出；右下角添加图片按钮轻微上移。"},
             {"0.5.25",
-                      "修复 API 配置中无法稳定切换并保存其他模型的问题。",
-                      "模型列表改为可滚动界面，模型较多时也能完整选择。",
-                      "新增手动填写模型入口，API Key、接口和模型会在检测通过后一次性保存到本机。"}
+                      "修复 API 配置无法自动识别正确接入地址、检测时间过长或检测失败的问题。",
+                      "检测后仅展示当前 API Key 实际可用的模型，避免混入其他服务商模型。",
+                      "检测与保存改为两个清晰步骤，选择模型后可稳定保存接入地址、模型与模式。"}
     };
     private static final String[] DINING_METHOD_OPTIONS = {"食堂", "线下餐厅", "外卖", "自己做"};
     private static final String[] MEAL_HABIT_OPTIONS = {"一天1~2餐", "一天2~3餐", "一天3~4餐", "一天4餐以上"};
@@ -10710,16 +10714,22 @@ public class MainActivity extends Activity {
         final EditText keyInput = apiInput("API Key");
         keyInput.setText(profile.optString("apiKey", ""));
         box.addView(keyInput);
-        final EditText endpointInput = apiInput("接口地址");
+        final EditText endpointInput = apiInput("接口地址（可自动识别）");
         endpointInput.setText(apiEndpoint());
         box.addView(endpointInput);
         final String[] selectedModel = new String[]{apiModelName()};
+        final boolean[] probeReady = new boolean[]{false};
+        final JSONArray[] detectedModels = new JSONArray[]{new JSONArray()};
+        final String[] detectedKey = new String[]{""};
+        final String[] detectedEndpoint = new String[]{""};
+        final boolean[] applyingDetectedEndpoint = new boolean[]{false};
+        final TextView[] primaryAction = new TextView[1];
         final TextView modelSelect = apiSelectBox(apiModelName().length() > 0 ? apiModelName() : "检测后选择模型");
         modelSelect.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 List<String> models = apiModelChoicesWithCurrent(
-                        profile.optJSONArray("apiModels"), selectedModel[0]);
+                        probeReady[0] ? detectedModels[0] : profile.optJSONArray("apiModels"), selectedModel[0]);
                 if (models.isEmpty()) {
                     promptManualApiModel(selectedModel, modelSelect);
                     return;
@@ -10728,6 +10738,47 @@ public class MainActivity extends Activity {
             }
         });
         box.addView(modelSelect);
+        final TextView apiStatus = label("", 13, accent, false);
+        apiStatus.setPadding(dp(4), dp(7), dp(4), 0);
+        apiStatus.setVisibility(View.GONE);
+        box.addView(apiStatus);
+        keyInput.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                probeReady[0] = false;
+                if (primaryAction[0] != null) {
+                    primaryAction[0].setText("检测模型");
+                }
+            }
+        });
+        endpointInput.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                if (applyingDetectedEndpoint[0]) {
+                    return;
+                }
+                probeReady[0] = false;
+                if (primaryAction[0] != null) {
+                    primaryAction[0].setText("检测模型");
+                }
+            }
+        });
         final String[] selectedMode = new String[]{apiModelMode()};
         box.addView(apiModeChoiceRow(selectedMode));
 
@@ -10735,7 +10786,8 @@ public class MainActivity extends Activity {
         actions.setPadding(0, dp(14), 0, 0);
         TextView official = dialogButton("API 官网", adjustAlpha(accentSoft, 126), accent);
         TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        TextView test = dialogButton("检测并保存", accent, Color.WHITE);
+        final TextView test = dialogButton("检测模型", accent, Color.WHITE);
+        primaryAction[0] = test;
         official.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -10753,40 +10805,93 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 final String key = keyInput.getText().toString().trim();
-                final String endpoint = endpointInput.getText().toString().trim();
-                final String model = selectedModel[0].trim();
-                if (key.length() == 0 || endpoint.length() == 0) {
-                    showGlassToast("API Key 和接口地址都要填写", Toast.LENGTH_SHORT);
+                if (key.length() == 0) {
+                    showApiInlineMessage(apiStatus, "请输入 API Key", true);
+                    keyInput.requestFocus();
                     return;
                 }
-                showGlassToast("正在检测 API...", Toast.LENGTH_SHORT);
+                final String endpoint = endpointInput.getText().toString().trim();
+                final String model = selectedModel[0].trim();
+                if (probeReady[0] && key.equals(detectedKey[0]) && endpoint.equals(detectedEndpoint[0])) {
+                    String chosen = selectedModel[0].trim();
+                    if (chosen.length() == 0) {
+                        showApiInlineMessage(apiStatus, "请先选择一个模型", true);
+                        return;
+                    }
+                    try {
+                        boolean vision = looksLikeVisionModel(chosen);
+                        profile.put("apiKey", key);
+                        profile.put("apiEndpoint", endpoint);
+                        profile.put("apiModel", chosen);
+                        profile.put("apiModelMode", selectedMode[0]);
+                        profile.put("apiModels", detectedModels[0]);
+                        profile.put("apiVisionSupported", vision);
+                        if (!vision) {
+                            profile.put("aiVisionEnabled", false);
+                        }
+                        profile.put("apiEnabled", true);
+                        saveProfile();
+                    } catch (JSONException ignored) {
+                    }
+                    dialog.dismiss();
+                    showGlassToast("API 配置已保存", Toast.LENGTH_SHORT);
+                    rerenderPreservingScroll(new Runnable() {
+                        @Override
+                        public void run() {
+                            renderExperimentalPage();
+                        }
+                    });
+                    return;
+                }
+                showApiInlineMessage(apiStatus, "正在检测接入地址和可用模型...", false);
+                test.setEnabled(false);
+                test.setAlpha(0.62f);
+                keyInput.setEnabled(false);
+                endpointInput.setEnabled(false);
+                modelSelect.setEnabled(false);
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        final ApiProbeResult probe = probeApi(endpoint, key, model);
+                        final ApiProbeResult probe = detectApiConfiguration(key, endpoint, model);
                         runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
-                                if (!probe.valid) {
-                                    showApiInvalidDialog();
+                                if (!dialog.isShowing()) {
                                     return;
                                 }
-                                try {
-                                    profile.put("apiKey", key);
-                                    profile.put("apiEndpoint", endpoint);
-                                    profile.put("apiModel", probe.selectedModel.length() > 0 ? probe.selectedModel : model);
-                                    profile.put("apiModelMode", selectedMode[0]);
-                                    profile.put("apiModels", probe.models);
-                                    profile.put("apiVisionSupported", probe.visionSupported);
-                                    if (!probe.visionSupported) {
-                                        profile.put("aiVisionEnabled", false);
-                                    }
-                                    profile.put("apiEnabled", true);
-                                    saveProfile();
-                                } catch (JSONException ignored) {
+                                if (!probe.valid) {
+                                    test.setEnabled(true);
+                                    test.setAlpha(1f);
+                                    keyInput.setEnabled(true);
+                                    endpointInput.setEnabled(true);
+                                    modelSelect.setEnabled(true);
+                                    showApiInlineMessage(apiStatus,
+                                            "未识别到该密钥对应的接入地址，请检查密钥或网络", true);
+                                    return;
                                 }
-                                dialog.dismiss();
-                                chooseDetectedApiModel(probe);
+                                keyInput.setEnabled(true);
+                                endpointInput.setEnabled(true);
+                                modelSelect.setEnabled(true);
+                                test.setEnabled(true);
+                                test.setAlpha(1f);
+                                detectedModels[0] = probe.models;
+                                detectedKey[0] = key;
+                                detectedEndpoint[0] = probe.endpoint;
+                                applyingDetectedEndpoint[0] = true;
+                                endpointInput.setText(probe.endpoint);
+                                endpointInput.setSelection(probe.endpoint.length());
+                                applyingDetectedEndpoint[0] = false;
+                                selectedModel[0] = probe.selectedModel;
+                                modelSelect.setText(probe.selectedModel
+                                        + (looksLikeVisionModel(probe.selectedModel) ? " · 可识图" : ""));
+                                probeReady[0] = true;
+                                test.setText("保存");
+                                showApiInlineMessage(apiStatus,
+                                        "已识别 " + apiProviderName(probe.endpoint) + "，请选择模型后保存", false);
+                                List<String> choices = apiModelChoicesWithCurrent(probe.models, probe.selectedModel);
+                                if (choices.size() > 1) {
+                                    showStoredApiModelChoices(choices, selectedModel, modelSelect);
+                                }
                             }
                         });
                     }
@@ -10803,46 +10908,6 @@ public class MainActivity extends Activity {
         showRoundedDialog(dialog, box);
     }
 
-    private void chooseDetectedApiModel(final ApiProbeResult probe) {
-        final List<String> models = apiModelChoicesWithCurrent(probe.models, probe.selectedModel);
-        if (models.isEmpty()) {
-            showGlassToast("API 调用有效，已保存", Toast.LENGTH_SHORT);
-            rerenderPreservingScroll(new Runnable() {
-                @Override
-                public void run() {
-                    renderExperimentalPage();
-                }
-            });
-            return;
-        }
-        showApiModelChoiceDialog(models, apiModelName(), false, new ChoiceHandler() {
-            @Override
-            public void onChoice(int which) {
-                if (which < 0 || which >= models.size()) {
-                    return;
-                }
-                String chosen = models.get(which);
-                try {
-                    profile.put("apiModel", chosen);
-                    boolean vision = looksLikeVisionModel(chosen);
-                    profile.put("apiVisionSupported", vision);
-                    if (!vision) {
-                        profile.put("aiVisionEnabled", false);
-                    }
-                    saveProfile();
-                } catch (JSONException ignored) {
-                }
-                showGlassToast("已选择模型：" + chosen, Toast.LENGTH_SHORT);
-                rerenderPreservingScroll(new Runnable() {
-                    @Override
-                    public void run() {
-                        renderExperimentalPage();
-                    }
-                });
-            }
-        });
-    }
-
     private void showStoredApiModelChoices(final List<String> models, final String[] selectedModel,
                                            final TextView modelSelect) {
         showApiModelChoiceDialog(models, selectedModel[0], true, new ChoiceHandler() {
@@ -10854,7 +10919,6 @@ public class MainActivity extends Activity {
                 String chosen = models.get(which);
                 selectedModel[0] = chosen;
                 modelSelect.setText(chosen + (looksLikeVisionModel(chosen) ? " · 可识图" : ""));
-                showGlassToast("已选择，点击检测并保存后生效", Toast.LENGTH_SHORT);
             }
         }, new Runnable() {
             @Override
@@ -10965,7 +11029,6 @@ public class MainActivity extends Activity {
                 selectedModel[0] = model;
                 modelSelect.setText(model + (looksLikeVisionModel(model) ? " · 可识图" : ""));
                 dialog.dismiss();
-                showGlassToast("已填写，点击检测并保存后生效", Toast.LENGTH_SHORT);
             }
         });
         LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(78), dp(42));
@@ -11041,38 +11104,74 @@ public class MainActivity extends Activity {
         return input;
     }
 
-    private boolean testChatApi(String endpoint, String key, String model) {
-        String response = callChatApi(endpoint, key, model, "只回复两个字：有效");
-        return response.length() > 0;
-    }
-
-    private ApiProbeResult probeApi(String endpoint, String key, String model) {
+    private ApiProbeResult detectApiConfiguration(final String key, String currentEndpoint, String currentModel) {
         ApiProbeResult result = new ApiProbeResult();
-        result.models = fetchApiModels(endpoint, key);
-        List<String> choices = apiModelChoices(result.models);
-        String selected = model;
-        if (selected.length() == 0 && !choices.isEmpty()) {
-            selected = choices.get(0);
-        }
-        result.selectedModel = selected;
-        result.valid = testChatApi(endpoint, key, selected);
-        if (!result.valid && !choices.isEmpty()) {
-            for (String candidate : choices) {
-                if (candidate.equals(selected)) {
-                    continue;
-                }
-                if (testChatApi(endpoint, key, candidate)) {
-                    result.valid = true;
-                    result.selectedModel = candidate;
+        final List<String> endpoints = apiEndpointCandidates(currentEndpoint);
+        ExecutorService executor = Executors.newFixedThreadPool(endpoints.size());
+        ExecutorCompletionService<ApiEndpointMatch> completion =
+                new ExecutorCompletionService<ApiEndpointMatch>(executor);
+        try {
+            for (final String endpoint : endpoints) {
+                completion.submit(new Callable<ApiEndpointMatch>() {
+                    @Override
+                    public ApiEndpointMatch call() {
+                        JSONArray models = fetchAuthorizedApiModels(endpoint, key);
+                        return new ApiEndpointMatch(endpoint, models);
+                    }
+                });
+            }
+            long deadline = System.currentTimeMillis() + 7500L;
+            for (int i = 0; i < endpoints.size(); i++) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0L) {
                     break;
                 }
+                Future<ApiEndpointMatch> future = completion.poll(remaining, TimeUnit.MILLISECONDS);
+                if (future == null) {
+                    break;
+                }
+                ApiEndpointMatch match = future.get();
+                if (match != null && match.models.length() > 0) {
+                    result.valid = true;
+                    result.endpoint = match.endpoint;
+                    result.models = match.models;
+                    List<String> choices = apiModelChoices(match.models);
+                    String selected = currentModel == null ? "" : currentModel.trim();
+                    if (!choices.contains(selected)) {
+                        String preferred = defaultApiModelForEndpoint(match.endpoint);
+                        selected = choices.contains(preferred) ? preferred : choices.get(0);
+                    }
+                    result.selectedModel = selected;
+                    result.visionSupported = looksLikeVisionModel(selected);
+                    return result;
+                }
             }
+        } catch (Exception ignored) {
+        } finally {
+            executor.shutdownNow();
         }
-        result.visionSupported = looksLikeVisionModel(result.selectedModel);
         return result;
     }
 
-    private JSONArray fetchApiModels(String endpoint, String key) {
+    private List<String> apiEndpointCandidates(String currentEndpoint) {
+        List<String> endpoints = new ArrayList<String>();
+        addApiEndpointCandidate(endpoints, currentEndpoint);
+        addApiEndpointCandidate(endpoints, "https://api.longcat.chat/openai/v1/chat/completions");
+        addApiEndpointCandidate(endpoints, "https://api.deepseek.com/chat/completions");
+        addApiEndpointCandidate(endpoints, "https://api.xiaomimimo.com/v1/chat/completions");
+        addApiEndpointCandidate(endpoints, "https://api.minimaxi.com/v1/chat/completions");
+        addApiEndpointCandidate(endpoints, "https://api.openai.com/v1/chat/completions");
+        return endpoints;
+    }
+
+    private void addApiEndpointCandidate(List<String> endpoints, String endpoint) {
+        String value = endpoint == null ? "" : endpoint.trim();
+        if (value.length() > 0 && !endpoints.contains(value)) {
+            endpoints.add(value);
+        }
+    }
+
+    private JSONArray fetchAuthorizedApiModels(String endpoint, String key) {
         JSONArray result = new JSONArray();
         String modelsUrl = modelsEndpointFromChatEndpoint(endpoint);
         if (modelsUrl.length() > 0) {
@@ -11081,10 +11180,12 @@ public class MainActivity extends Activity {
                 URL url = new URL(modelsUrl);
                 conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
-                conn.setConnectTimeout(9000);
-                conn.setReadTimeout(12000);
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(4500);
                 conn.setUseCaches(false);
                 conn.setRequestProperty("Authorization", "Bearer " + key);
+                conn.setRequestProperty("api-key", key);
+                conn.setRequestProperty("Accept", "application/json");
                 int code = conn.getResponseCode();
                 InputStream in = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
                 String text = in == null ? "" : readAll(in);
@@ -11094,10 +11195,16 @@ public class MainActivity extends Activity {
                 if (code >= 200 && code < 300) {
                     JSONObject root = new JSONObject(text);
                     JSONArray data = root.optJSONArray("data");
+                    if (data == null) {
+                        data = root.optJSONArray("models");
+                    }
                     if (data != null) {
                         for (int i = 0; i < data.length(); i++) {
                             JSONObject item = data.optJSONObject(i);
                             String id = item == null ? data.optString(i, "") : item.optString("id", "");
+                            if (id.length() == 0 && item != null) {
+                                id = item.optString("model", item.optString("name", ""));
+                            }
                             if (id.length() > 0 && !jsonArrayContains(result, id)) {
                                 result.put(id);
                             }
@@ -11111,7 +11218,6 @@ public class MainActivity extends Activity {
                 }
             }
         }
-        addDefaultModelCandidates(result, endpoint);
         return result;
     }
 
@@ -11134,34 +11240,49 @@ public class MainActivity extends Activity {
         return "";
     }
 
-    private void addDefaultModelCandidates(JSONArray array, String endpoint) {
+    private String defaultApiModelForEndpoint(String endpoint) {
         String lower = endpoint == null ? "" : endpoint.toLowerCase(Locale.US);
-        if (lower.contains("deepseek")) {
-            addModelCandidate(array, "deepseek-chat");
-            addModelCandidate(array, "deepseek-reasoner");
-            addModelCandidate(array, "v4flash");
-            addModelCandidate(array, "v4pro");
-        } else if (lower.contains("openai") || lower.contains("chatgpt")) {
-            addModelCandidate(array, "gpt-5.5");
-            addModelCandidate(array, "gpt-5.4");
-            addModelCandidate(array, "o3");
-            addModelCandidate(array, "o4-mini");
-            addModelCandidate(array, "gpt-4o-mini");
-            addModelCandidate(array, "gpt-4o");
-            addModelCandidate(array, "gpt-4.1-mini");
-            addModelCandidate(array, "gpt-4.1");
-        } else {
-            addModelCandidate(array, "deepseek-chat");
-            addModelCandidate(array, "gpt-4o-mini");
-            addModelCandidate(array, "v4flash");
-            addModelCandidate(array, "v4pro");
+        if (lower.contains("xiaomimimo")) {
+            return "mimo-v2.5-pro";
         }
+        if (lower.contains("minimaxi")) {
+            return "MiniMax-M2.7";
+        }
+        if (lower.contains("deepseek")) {
+            return "deepseek-chat";
+        }
+        if (lower.contains("openai")) {
+            return "gpt-4o-mini";
+        }
+        return "";
     }
 
-    private void addModelCandidate(JSONArray array, String model) {
-        if (model != null && model.length() > 0 && !jsonArrayContains(array, model)) {
-            array.put(model);
+    private String apiProviderName(String endpoint) {
+        String lower = endpoint == null ? "" : endpoint.toLowerCase(Locale.US);
+        if (lower.contains("longcat")) {
+            return "LongCat";
         }
+        if (lower.contains("xiaomimimo")) {
+            return "Xiaomi MiMo";
+        }
+        if (lower.contains("minimaxi")) {
+            return "MiniMax";
+        }
+        if (lower.contains("deepseek")) {
+            return "DeepSeek";
+        }
+        if (lower.contains("openai")) {
+            return "OpenAI";
+        }
+        return "OpenAI 格式";
+    }
+
+    private void showApiInlineMessage(TextView status, String message, boolean error) {
+        status.setText(message == null ? "" : message);
+        status.setTextColor(error
+                ? (nightDecoration() ? Color.rgb(244, 164, 148) : Color.rgb(186, 76, 62))
+                : accent);
+        status.setVisibility(message == null || message.length() == 0 ? View.GONE : View.VISIBLE);
     }
 
     private boolean jsonArrayContains(JSONArray array, String value) {
@@ -28652,8 +28773,19 @@ public class MainActivity extends Activity {
     private class ApiProbeResult {
         boolean valid;
         boolean visionSupported;
+        String endpoint = "";
         String selectedModel = "";
         JSONArray models = new JSONArray();
+    }
+
+    private class ApiEndpointMatch {
+        final String endpoint;
+        final JSONArray models;
+
+        ApiEndpointMatch(String endpoint, JSONArray models) {
+            this.endpoint = endpoint == null ? "" : endpoint;
+            this.models = models == null ? new JSONArray() : models;
+        }
     }
 
     private static class CloudResult {

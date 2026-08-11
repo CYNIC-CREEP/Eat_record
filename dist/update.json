@@ -4,8 +4,8 @@
     "apkUrl":  "https://pan.freefeng.icu/lanzou/Myapp/eat%20record/0.5.25/apk/EatRecord-0.5.25-debug.apk",
     "apkPath":  "/lanzou/Myapp/eat record/0.5.25/apk/EatRecord-0.5.25-debug.apk",
     "notes":  [
-                  "• 修复 API 配置中无法稳定切换并保存其他模型的问题",
-                  "• 模型列表改为可滚动界面，模型较多时也能完整选择",
-                  "• 新增手动填写模型入口，API Key、接口和模型在检测通过后一次性保存到本机"
+                  "• 修复 API 配置无法自动识别正确接入地址、检测时间过长或检测失败的问题",
+                  "• 检测后仅展示当前 API Key 实际可用的模型，避免混入其他服务商模型",
+                  "• 检测与保存改为两个清晰步骤，选择模型后可稳定保存接入地址、模型与模式"
               ]
 }
