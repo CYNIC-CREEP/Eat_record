@@ -230,7 +230,7 @@ def fail(message):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "EatRecordCloud/0.5.25"
+        server_version = "EatRecordCloud/0.5.26"
 
     def log_message(self, fmt, *args):
         print(f"[{utc_now()}] {fmt % args}")

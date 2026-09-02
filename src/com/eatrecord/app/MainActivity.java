@@ -1,8 +1,10 @@
 package com.eatrecord.app;
 
 import android.animation.ValueAnimator;
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.TimePickerDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
@@ -124,6 +126,7 @@ public class MainActivity extends Activity {
     private static final int REQ_TAKE_MEAL_PHOTO = 20;
     private static final int REQ_PICK_MEAL_STICKER = 22;
     private static final int REQ_RESTORE_BACKUP = 23;
+    private static final int REQ_POST_NOTIFICATIONS = 24;
     private static final String PREFS = "eat_record_prefs";
     private static final String DATA_KEY = "days_json";
     private static final String PROFILE_KEY = "profile_json";
@@ -714,9 +717,14 @@ public class MainActivity extends Activity {
                       "媒体拖动改为原尺寸插入排序，支持移动到间隙和末尾，并降低误叠放概率。",
                       "阻止系统长按图片功能接管拖动手势，修复分享面板意外弹出；右下角添加图片按钮轻微上移。"},
             {"0.5.25",
-                      "修复 API 配置无法自动识别正确接入地址、检测时间过长或检测失败的问题。",
-                      "检测后仅展示当前 API Key 实际可用的模型，避免混入其他服务商模型。",
-                      "检测与保存改为两个清晰步骤，选择模型后可稳定保存接入地址、模型与模式。"}
+                       "修复 API 配置无法自动识别正确接入地址、检测时间过长或检测失败的问题。",
+                       "检测后仅展示当前 API Key 实际可用的模型，避免混入其他服务商模型。",
+                       "检测与保存改为两个清晰步骤，选择模型后可稳定保存接入地址、模型与模式。"},
+            {"0.5.26",
+                       "检测更新结果弹窗按内容自适应高度，不再留下大块空白。",
+                       "个性化新增更多设置，集中管理三餐通知、自定义提醒时间与可用 AI 功能。",
+                       "首页只能切换到今天或更早日期，滑动和日期选择均不会进入未来。",
+                       "加固荣耀与华为设备的启动兼容性，系统特效不兼容时会自动使用稳定样式。"}
     };
     private static final String[] DINING_METHOD_OPTIONS = {"食堂", "线下餐厅", "外卖", "自己做"};
     private static final String[] MEAL_HABIT_OPTIONS = {"一天1~2餐", "一天2~3餐", "一天3~4餐", "一天4餐以上"};
@@ -831,6 +839,7 @@ public class MainActivity extends Activity {
     private boolean inHiddenSettingsPage = false;
     private boolean inHomeManagerPage = false;
     private boolean inInterfaceLayoutPage = false;
+    private boolean inMoreSettingsPage = false;
     private boolean inExperimentalPage = false;
     private boolean inApiOfficialSitesPage = false;
     private boolean inStickerGalleryPage = false;
@@ -913,6 +922,7 @@ public class MainActivity extends Activity {
     };
     private volatile int stickerGalleryLoadGeneration = 0;
     private StickyGlassHeader activeStickyHeader;
+    private boolean pendingMealNotificationEnable = false;
 
     private static Context configuredNightContext(Context base) {
         boolean followSystem = false;
@@ -922,31 +932,43 @@ public class MainActivity extends Activity {
             followSystem = savedProfile.optBoolean("followSystemNight", false);
         } catch (JSONException ignored) {
         }
-        if (Build.VERSION.SDK_INT >= 31) {
-            android.app.UiModeManager manager = base.getSystemService(android.app.UiModeManager.class);
-            if (manager != null) {
-                int mode = followSystem ? manager.getNightMode() : android.app.UiModeManager.MODE_NIGHT_NO;
-                if (mode < android.app.UiModeManager.MODE_NIGHT_AUTO
-                        || mode > android.app.UiModeManager.MODE_NIGHT_CUSTOM) {
-                    mode = android.app.UiModeManager.MODE_NIGHT_NO;
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                android.app.UiModeManager manager = base.getSystemService(android.app.UiModeManager.class);
+                if (manager != null) {
+                    int mode = followSystem ? manager.getNightMode() : android.app.UiModeManager.MODE_NIGHT_NO;
+                    if (mode < android.app.UiModeManager.MODE_NIGHT_AUTO
+                            || mode > android.app.UiModeManager.MODE_NIGHT_CUSTOM) {
+                        mode = android.app.UiModeManager.MODE_NIGHT_NO;
+                    }
+                    manager.setApplicationNightMode(mode);
                 }
-                manager.setApplicationNightMode(mode);
             }
+        } catch (Throwable ignored) {
         }
         if (followSystem) {
             return base;
         }
-        android.content.res.Configuration configuration =
-                new android.content.res.Configuration(base.getResources().getConfiguration());
-        configuration.uiMode = (configuration.uiMode
-                & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK)
-                | android.content.res.Configuration.UI_MODE_NIGHT_NO;
-        return base.createConfigurationContext(configuration);
+        try {
+            android.content.res.Configuration configuration =
+                    new android.content.res.Configuration(base.getResources().getConfiguration());
+            configuration.uiMode = (configuration.uiMode
+                    & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                    | android.content.res.Configuration.UI_MODE_NIGHT_NO;
+            return base.createConfigurationContext(configuration);
+        } catch (Throwable ignored) {
+            return base;
+        }
     }
 
     @Override
     protected void attachBaseContext(Context newBase) {
-        super.attachBaseContext(configuredNightContext(newBase));
+        Context configured = newBase;
+        try {
+            configured = configuredNightContext(newBase);
+        } catch (Throwable ignored) {
+        }
+        super.attachBaseContext(configured);
     }
 
     @Override
@@ -1045,6 +1067,12 @@ public class MainActivity extends Activity {
 
         buildNav();
         int startTab = Math.max(0, Math.min(TAB_TITLES.length - 1, profile.optInt("startTab", 0)));
+        boolean openedFromMealReminder = getIntent() != null
+                && getIntent().getBooleanExtra(MealReminderReceiver.EXTRA_OPEN_FROM_REMINDER, false);
+        if (openedFromMealReminder) {
+            startTab = 0;
+            getIntent().removeExtra(MealReminderReceiver.EXTRA_OPEN_FROM_REMINDER);
+        }
         if (pendingPhotoDate != null && pendingPhotoMeal != null) {
             startTab = 0;
         }
@@ -1055,6 +1083,7 @@ public class MainActivity extends Activity {
             startTab = 0;
         }
         showTab(startTab, false);
+        MealReminderReceiver.ensureScheduled(this);
         maybeShowStartupAnnouncement();
         handleIncomingShare(getIntent());
         maybeAutoCloudSync(false);
@@ -1173,7 +1202,27 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (handleMealReminderIntent(intent)) {
+            return;
+        }
         handleIncomingShare(intent);
+    }
+
+    private boolean handleMealReminderIntent(Intent intent) {
+        if (intent == null || !intent.getBooleanExtra(MealReminderReceiver.EXTRA_OPEN_FROM_REMINDER, false)) {
+            return false;
+        }
+        homeDateKey = dateKey(Calendar.getInstance());
+        intent.removeExtra(MealReminderReceiver.EXTRA_OPEN_FROM_REMINDER);
+        if (root != null) {
+            if (currentTab == 0) {
+                renderCurrent();
+                updateFab();
+            } else {
+                showTab(0, true);
+            }
+        }
+        return true;
     }
 
     private void installSystemBackCallback() {
@@ -1498,6 +1547,7 @@ public class MainActivity extends Activity {
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
+        inMoreSettingsPage = false;
         inExperimentalPage = false;
         inApiOfficialSitesPage = false;
         inStickerGalleryPage = false;
@@ -1755,6 +1805,7 @@ public class MainActivity extends Activity {
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
+        inMoreSettingsPage = false;
         inExperimentalPage = false;
         inApiOfficialSitesPage = false;
         inStickerGalleryPage = false;
@@ -1885,7 +1936,7 @@ public class MainActivity extends Activity {
                 @Override
                 public void run() {
                     inApiOfficialSitesPage = false;
-                    renderExperimentalPage();
+                    renderMoreSettingsPage();
                 }
             }, -1f);
             return true;
@@ -1893,7 +1944,7 @@ public class MainActivity extends Activity {
         if (inHintManagerPage || inVibrationPage || inStickerSettingsPage || inStackSettingsPage
                 || inFootprintSettingsPage || inNotebookSettingsPage || inDataSecurityPage
                 || inCloudSyncPage || inRecycleBinPage || inHiddenSettingsPage || inHomeManagerPage
-                || inInterfaceLayoutPage || inExperimentalPage) {
+                || inInterfaceLayoutPage || inMoreSettingsPage || inExperimentalPage) {
             content.animate().cancel();
             smoothContentSwap(new Runnable() {
                 @Override
@@ -1921,6 +1972,7 @@ public class MainActivity extends Activity {
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
+        inMoreSettingsPage = false;
         inExperimentalPage = false;
         inApiOfficialSitesPage = false;
     }
@@ -1931,7 +1983,7 @@ public class MainActivity extends Activity {
                 && !inFootprintSettingsPage && !inNotebookSettingsPage
                 && !inDataSecurityPage && !inCloudSyncPage && !inRecycleBinPage
                 && !inHiddenSettingsPage && !inHomeManagerPage
-                && !inInterfaceLayoutPage && !inExperimentalPage
+                && !inInterfaceLayoutPage && !inMoreSettingsPage && !inExperimentalPage
                 && !inApiOfficialSitesPage;
     }
 
@@ -3433,7 +3485,7 @@ public class MainActivity extends Activity {
 
     private void requestAiAnalysis(final String date, boolean force) {
         if (!apiEnabled()) {
-            showGlassToast("请先在实验性功能里配置 API", Toast.LENGTH_LONG);
+            showGlassToast("请先在更多设置里配置 API", Toast.LENGTH_LONG);
             configureApi();
             return;
         }
@@ -4324,10 +4376,7 @@ public class MainActivity extends Activity {
         overlay.setBackgroundColor(Color.argb(nightDecoration() ? 118 : 92, 18, 20, 24));
         overlay.setClickable(true);
         activeOverlay = overlay;
-        if (Build.VERSION.SDK_INT >= 31) {
-            content.setRenderEffect(RenderEffect.createBlurEffect(dp(5), dp(5), android.graphics.Shader.TileMode.CLAMP));
-            navHost.setRenderEffect(RenderEffect.createBlurEffect(dp(4), dp(4), android.graphics.Shader.TileMode.CLAMP));
-        }
+        setOverlayBackgroundBlur(true);
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -4439,10 +4488,7 @@ public class MainActivity extends Activity {
         overlay.setBackgroundColor(Color.argb(nightDecoration() ? 118 : 92, 18, 20, 24));
         overlay.setClickable(true);
         activeOverlay = overlay;
-        if (Build.VERSION.SDK_INT >= 31) {
-            content.setRenderEffect(RenderEffect.createBlurEffect(dp(5), dp(5), android.graphics.Shader.TileMode.CLAMP));
-            navHost.setRenderEffect(RenderEffect.createBlurEffect(dp(4), dp(4), android.graphics.Shader.TileMode.CLAMP));
-        }
+        setOverlayBackgroundBlur(true);
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -7834,6 +7880,9 @@ public class MainActivity extends Activity {
 
     private void chooseHomeDate() {
         final Calendar[] picked = new Calendar[]{calendarFromKey(homeDate())};
+        if (dateKey(picked[0]).compareTo(dateKey(Calendar.getInstance())) > 0) {
+            picked[0] = Calendar.getInstance();
+        }
 
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
         LinearLayout box = new LinearLayout(this);
@@ -7877,6 +7926,9 @@ public class MainActivity extends Activity {
         save.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (dateKey(picked[0]).compareTo(dateKey(Calendar.getInstance())) > 0) {
+                    picked[0] = Calendar.getInstance();
+                }
                 homeDateKey = dateKey(picked[0]);
                 playCalendarFeedback();
                 dialog.dismiss();
@@ -7944,6 +7996,10 @@ public class MainActivity extends Activity {
     private void changeHomeDateBy(final int offset) {
         Calendar cal = calendarFromKey(homeDate());
         cal.add(Calendar.DAY_OF_MONTH, offset);
+        if (dateKey(cal).compareTo(dateKey(Calendar.getInstance())) > 0) {
+            showGlassToast("还不能记录未来的饭饭", Toast.LENGTH_SHORT);
+            return;
+        }
         homeDateKey = dateKey(cal);
         playCalendarFeedback();
         if (currentTab == 0 && !inStickerGalleryPage && !inBookDetail && !inPhotoViewer) {
@@ -7991,10 +8047,13 @@ public class MainActivity extends Activity {
                     float dy = event.getRawY() - downY[0];
                     if (Math.abs(dy) > dp(16)) {
                         final String oldText = target instanceof TextView ? ((TextView) target).getText().toString() : "";
-                        changeDatePart(picked[0], field, dy < 0 ? 1 : -1);
-                        updateDatePartLabels(picked[0], yearText, monthText, dayText);
-                        animateDatePartChange(target, oldText, dy < 0 ? 1 : -1);
-                        playCalendarFeedback();
+                        if (changeDatePart(picked[0], field, dy < 0 ? 1 : -1)) {
+                            updateDatePartLabels(picked[0], yearText, monthText, dayText);
+                            animateDatePartChange(target, oldText, dy < 0 ? 1 : -1);
+                            playCalendarFeedback();
+                        } else {
+                            showGlassToast("还不能选择未来日期", Toast.LENGTH_SHORT);
+                        }
                         v.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
                         return true;
                     }
@@ -8048,15 +8107,21 @@ public class MainActivity extends Activity {
                 .start();
     }
 
-    private void changeDatePart(Calendar cal, int field, int amount) {
+    private boolean changeDatePart(Calendar cal, int field, int amount) {
+        Calendar candidate = (Calendar) cal.clone();
         if (field == Calendar.DAY_OF_MONTH) {
-            cal.add(Calendar.DAY_OF_MONTH, amount);
-            return;
+            candidate.add(Calendar.DAY_OF_MONTH, amount);
+        } else {
+            int day = candidate.get(Calendar.DAY_OF_MONTH);
+            candidate.set(Calendar.DAY_OF_MONTH, 1);
+            candidate.add(field, amount);
+            candidate.set(Calendar.DAY_OF_MONTH, Math.min(day, candidate.getActualMaximum(Calendar.DAY_OF_MONTH)));
         }
-        int day = cal.get(Calendar.DAY_OF_MONTH);
-        cal.set(Calendar.DAY_OF_MONTH, 1);
-        cal.add(field, amount);
-        cal.set(Calendar.DAY_OF_MONTH, Math.min(day, cal.getActualMaximum(Calendar.DAY_OF_MONTH)));
+        if (dateKey(candidate).compareTo(dateKey(Calendar.getInstance())) > 0) {
+            return false;
+        }
+        cal.setTimeInMillis(candidate.getTimeInMillis());
+        return true;
     }
 
     private void updateDatePartLabels(Calendar cal, TextView yearText, TextView monthText, TextView dayText) {
@@ -8742,6 +8807,24 @@ public class MainActivity extends Activity {
         }, -1f);
     }
 
+    private void openMoreSettingsPage() {
+        smoothContentSwap(new Runnable() {
+            @Override
+            public void run() {
+                renderMoreSettingsPage();
+            }
+        }, 1f);
+    }
+
+    private void closeMoreSettingsPage() {
+        smoothContentSwap(new Runnable() {
+            @Override
+            public void run() {
+                renderPreferencesPage();
+            }
+        }, -1f);
+    }
+
     private void openExperimentalPage() {
         smoothContentSwap(new Runnable() {
             @Override
@@ -8902,6 +8985,9 @@ public class MainActivity extends Activity {
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
+        inMoreSettingsPage = false;
+        inExperimentalPage = false;
+        inApiOfficialSitesPage = false;
         inUpdateLogPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
@@ -8984,6 +9070,12 @@ public class MainActivity extends Activity {
         }));
 
         section(page, "其他");
+        page.addView(settingRow("更多设置", "通知与 AI 功能", "@spark", accent, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openMoreSettingsPage();
+            }
+        }));
         page.addView(settingRow("隐藏设置", settingsHidden() ? "开" : "关", "@hide", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -9991,7 +10083,7 @@ public class MainActivity extends Activity {
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("同步会包含头像、昵称、个性签名、三餐记录、日历、小本本、图片贴纸和 AI 记录，但不会同步实验性功能里的 API Key。", 14,
+        TextView hint = label("同步会包含头像、昵称、个性签名、三餐记录、日历、小本本、图片贴纸和 AI 记录，但不会同步更多设置里的 API Key。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
@@ -10566,7 +10658,7 @@ public class MainActivity extends Activity {
         animateIn(page);
     }
 
-    private void renderExperimentalPage() {
+    private void renderMoreSettingsPage() {
         inPreferencesPage = true;
         inHintManagerPage = false;
         inVibrationPage = false;
@@ -10578,7 +10670,8 @@ public class MainActivity extends Activity {
         inHiddenSettingsPage = false;
         inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
-        inExperimentalPage = true;
+        inMoreSettingsPage = true;
+        inExperimentalPage = false;
         inApiOfficialSitesPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
@@ -10597,22 +10690,39 @@ public class MainActivity extends Activity {
         back.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                closeExperimentalPage();
+                closeMoreSettingsPage();
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("实验性功能", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("AI功能", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("待开发中... 即使下列选项可启动，不保证功能正常稳定使用。云同步不会同步这里的 API Key、接口地址和模型配置。", 14,
+        TextView hint = label("可以在这里安排三餐提醒并管理 AI 能力。云同步不会同步 API Key、接口地址和模型配置。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
         page.addView(hint);
 
-        section(page, "可用功能");
+        section(page, "通知功能");
+        page.addView(settingsToggleRow("三餐通知", mealNotificationsEnabled(), new ToggleHandler() {
+            @Override
+            public boolean onToggle() {
+                return setMealNotificationsEnabled(!mealNotificationsEnabled());
+            }
+        }));
+        page.addView(notificationTimeRow("早餐提醒", "breakfastNotificationTime", "08:00", "早"));
+        page.addView(notificationTimeRow("午餐提醒", "lunchNotificationTime", "12:00", "午"));
+        page.addView(notificationTimeRow("晚餐提醒", "dinnerNotificationTime", "18:30", "晚"));
+
+        section(page, "AI 设置");
+        addUsableAiSettings(page);
+        page.addView(space(dp(120)));
+        animateIn(page);
+    }
+
+    private void addUsableAiSettings(LinearLayout page) {
         page.addView(settingRow("调用 API", apiEnabled() ? "已启用 · " + apiModelName() + " · " + apiModelModeTitle() : "未启用", "API", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -10689,6 +10799,53 @@ public class MainActivity extends Activity {
                 return setProfileBoolean("calorieRecognition", next);
             }
         }));
+    }
+
+    private void renderExperimentalPage() {
+        inPreferencesPage = true;
+        inHintManagerPage = false;
+        inVibrationPage = false;
+        inStickerSettingsPage = false;
+        inStackSettingsPage = false;
+        inFootprintSettingsPage = false;
+        inNotebookSettingsPage = false;
+        inDataSecurityPage = false;
+        inHiddenSettingsPage = false;
+        inHomeManagerPage = false;
+        inInterfaceLayoutPage = false;
+        inMoreSettingsPage = false;
+        inExperimentalPage = true;
+        inApiOfficialSitesPage = false;
+        inBookDetail = false;
+        inPhotoViewer = false;
+        updateFab();
+        content.removeAllViews();
+        ScrollView scroll = pageScroll();
+        LinearLayout page = basePage();
+        scroll.addView(page);
+        content.addView(scroll);
+
+        LinearLayout top = row(Gravity.CENTER_VERTICAL);
+        TextView back = label("‹", 38, Color.rgb(34, 34, 34), true);
+        back.setGravity(Gravity.CENTER);
+        back.setBackground(surfaceRound(dp(25)));
+        attachPressAnimation(back);
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                closeExperimentalPage();
+            }
+        });
+        top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        TextView title = label("实验性功能", 30, Color.rgb(28, 28, 30), true);
+        title.setPadding(dp(14), 0, 0, 0);
+        top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        installStickyHeader(scroll, page, top);
+
+        TextView hint = label("这些功能还在准备中，开放后会在这里出现。", 14,
+                nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
+        hint.setPadding(0, dp(12), 0, dp(12));
+        page.addView(hint);
 
         section(page, "未来功能");
         page.addView(disabledSettingRow("智能餐单", "敬请期待"));
@@ -10838,7 +10995,7 @@ public class MainActivity extends Activity {
                     rerenderPreservingScroll(new Runnable() {
                         @Override
                         public void run() {
-                            renderExperimentalPage();
+                            renderMoreSettingsPage();
                         }
                     });
                     return;
@@ -12065,6 +12222,7 @@ public class MainActivity extends Activity {
 
     private void renderApiOfficialSitesPage() {
         inPreferencesPage = true;
+        inMoreSettingsPage = false;
         inExperimentalPage = false;
         inApiOfficialSitesPage = true;
         inBookDetail = false;
@@ -12086,7 +12244,7 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 inApiOfficialSitesPage = false;
-                renderExperimentalPage();
+                renderMoreSettingsPage();
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
@@ -12178,6 +12336,91 @@ public class MainActivity extends Activity {
         } catch (JSONException ignored) {
             return false;
         }
+    }
+
+    private boolean mealNotificationsEnabled() {
+        return profile != null && profile.optBoolean("mealNotificationsEnabled", false);
+    }
+
+    private String mealNotificationTime(String key, String fallback) {
+        String value = profile == null ? "" : profile.optString(key, fallback).trim();
+        if (!value.matches("\\d{1,2}:\\d{2}")) {
+            return fallback;
+        }
+        try {
+            String[] parts = value.split(":");
+            int hour = Integer.parseInt(parts[0]);
+            int minute = Integer.parseInt(parts[1]);
+            if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                return fallback;
+            }
+            return String.format(Locale.CHINA, "%02d:%02d", hour, minute);
+        } catch (Throwable ignored) {
+            return fallback;
+        }
+    }
+
+    private View notificationTimeRow(final String title, final String key, final String fallback, String icon) {
+        return settingRow(title, mealNotificationTime(key, fallback), icon, accent, new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showNotificationTimePicker(title, key, fallback);
+            }
+        });
+    }
+
+    private void showNotificationTimePicker(String title, final String key, String fallback) {
+        String value = mealNotificationTime(key, fallback);
+        String[] parts = value.split(":");
+        int hour = Integer.parseInt(parts[0]);
+        int minute = Integer.parseInt(parts[1]);
+        TimePickerDialog picker = new TimePickerDialog(this, new TimePickerDialog.OnTimeSetListener() {
+            @Override
+            public void onTimeSet(android.widget.TimePicker view, int selectedHour, int selectedMinute) {
+                try {
+                    profile.put(key, String.format(Locale.CHINA, "%02d:%02d", selectedHour, selectedMinute));
+                    saveProfile();
+                    if (mealNotificationsEnabled()) {
+                        MealReminderReceiver.ensureScheduled(MainActivity.this);
+                    }
+                    rerenderPreservingScroll(new Runnable() {
+                        @Override
+                        public void run() {
+                            renderMoreSettingsPage();
+                        }
+                    });
+                } catch (JSONException ignored) {
+                }
+            }
+        }, hour, minute, true);
+        picker.setTitle(title);
+        picker.show();
+    }
+
+    private boolean setMealNotificationsEnabled(boolean enabled) {
+        if (!enabled) {
+            if (setProfileBoolean("mealNotificationsEnabled", false)) {
+                MealReminderReceiver.cancelAll(this);
+                return true;
+            }
+            return false;
+        }
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            pendingMealNotificationEnable = true;
+            try {
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_POST_NOTIFICATIONS);
+            } catch (Throwable ignored) {
+                pendingMealNotificationEnable = false;
+                showSimpleInfoDialog("需要通知权限", "请在系统设置中允许一蔬一饭发送通知。");
+            }
+            return false;
+        }
+        if (setProfileBoolean("mealNotificationsEnabled", true)) {
+            MealReminderReceiver.ensureScheduled(this);
+            return true;
+        }
+        return false;
     }
 
     private String vibrationSummary() {
@@ -12404,10 +12647,7 @@ public class MainActivity extends Activity {
         overlay.setBackgroundColor(Color.argb(nightDecoration() ? 118 : 92, 18, 20, 24));
         overlay.setClickable(true);
         activeOverlay = overlay;
-        if (Build.VERSION.SDK_INT >= 31) {
-            content.setRenderEffect(RenderEffect.createBlurEffect(dp(5), dp(5), android.graphics.Shader.TileMode.CLAMP));
-            navHost.setRenderEffect(RenderEffect.createBlurEffect(dp(4), dp(4), android.graphics.Shader.TileMode.CLAMP));
-        }
+        setOverlayBackgroundBlur(true);
 
         final EditText nameInput = profileEditInput("你的名字", true);
         nameInput.setText(profile.optString("name", ""));
@@ -12636,9 +12876,38 @@ public class MainActivity extends Activity {
     }
 
     private void clearOverlayEffects() {
-        if (Build.VERSION.SDK_INT >= 31) {
-            content.setRenderEffect(null);
-            navHost.setRenderEffect(null);
+        setOverlayBackgroundBlur(false);
+    }
+
+    private boolean platformBlurSupported() {
+        if (Build.VERSION.SDK_INT < 31) {
+            return false;
+        }
+        String manufacturer = ((Build.MANUFACTURER == null ? "" : Build.MANUFACTURER) + " "
+                + (Build.BRAND == null ? "" : Build.BRAND)).toLowerCase(Locale.ROOT);
+        return !manufacturer.contains("honor") && !manufacturer.contains("huawei");
+    }
+
+    private void setOverlayBackgroundBlur(boolean enabled) {
+        if (!platformBlurSupported() || content == null || navHost == null) {
+            return;
+        }
+        try {
+            if (enabled) {
+                content.setRenderEffect(RenderEffect.createBlurEffect(
+                        dp(5), dp(5), Shader.TileMode.CLAMP));
+                navHost.setRenderEffect(RenderEffect.createBlurEffect(
+                        dp(4), dp(4), Shader.TileMode.CLAMP));
+            } else {
+                content.setRenderEffect(null);
+                navHost.setRenderEffect(null);
+            }
+        } catch (Throwable ignored) {
+            try {
+                content.setRenderEffect(null);
+                navHost.setRenderEffect(null);
+            } catch (Throwable ignoredAgain) {
+            }
         }
     }
 
@@ -12706,6 +12975,31 @@ public class MainActivity extends Activity {
             restoreBackupFromUri(uri);
         } else if (requestCode == REQ_TAKE_MEAL_PHOTO) {
             handleMealCameraResult(resultCode, data);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_POST_NOTIFICATIONS || !pendingMealNotificationEnable) {
+            return;
+        }
+        pendingMealNotificationEnable = false;
+        boolean granted = grantResults != null && grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        if (granted && setProfileBoolean("mealNotificationsEnabled", true)) {
+            MealReminderReceiver.ensureScheduled(this);
+            showGlassToast("三餐通知已开启", Toast.LENGTH_SHORT);
+            if (inMoreSettingsPage) {
+                rerenderPreservingScroll(new Runnable() {
+                    @Override
+                    public void run() {
+                        renderMoreSettingsPage();
+                    }
+                });
+            }
+        } else {
+            showSimpleInfoDialog("需要通知权限", "开启系统通知权限后，才能按设定时间提醒你记录三餐。");
         }
     }
 
@@ -16631,7 +16925,14 @@ public class MainActivity extends Activity {
         root.postDelayed(new Runnable() {
             @Override
             public void run() {
-                showStartupAnnouncement(version);
+                if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) {
+                    return;
+                }
+                try {
+                    showStartupAnnouncement(version);
+                } catch (Throwable error) {
+                    Log.w(LOG_TAG, "Unable to show startup announcement", error);
+                }
             }
         }, 420);
     }
@@ -16670,15 +16971,16 @@ public class MainActivity extends Activity {
     }
 
     private View scrollableDialogText(String value, int sp, int color) {
-        ScrollView scroll = new ScrollView(this);
+        int maxHeight = (int) (getResources().getDisplayMetrics().heightPixels * 0.34f);
+        ScrollView scroll = new MaxHeightScrollView(this, maxHeight);
         scroll.setFillViewport(false);
         scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         TextView message = label(value, sp, color, false);
         message.setPadding(0, dp(4), 0, dp(4));
         message.setLineSpacing(dp(2), 1.04f);
         scroll.addView(message, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        int maxHeight = (int) (getResources().getDisplayMetrics().heightPixels * 0.56f);
-        scroll.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxHeight));
+        scroll.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return scroll;
     }
 
@@ -20143,6 +20445,18 @@ public class MainActivity extends Activity {
             if (!p.has("galleryStack")) {
                 p.put("galleryStack", true);
             }
+            if (!p.has("mealNotificationsEnabled")) {
+                p.put("mealNotificationsEnabled", false);
+            }
+            if (!p.has("breakfastNotificationTime")) {
+                p.put("breakfastNotificationTime", "08:00");
+            }
+            if (!p.has("lunchNotificationTime")) {
+                p.put("lunchNotificationTime", "12:00");
+            }
+            if (!p.has("dinnerNotificationTime")) {
+                p.put("dinnerNotificationTime", "18:30");
+            }
             if (!p.has("apiEnabled")) {
                 p.put("apiEnabled", false);
             }
@@ -22291,9 +22605,13 @@ public class MainActivity extends Activity {
             dialogWindow.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             WindowManager.LayoutParams attributes = dialogWindow.getAttributes();
             attributes.dimAmount = nightDecoration() ? 0.10f : 0.07f;
-            if (Build.VERSION.SDK_INT >= 31) {
-                attributes.setBlurBehindRadius(dp(12));
-                dialogWindow.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
+            if (platformBlurSupported()) {
+                try {
+                    attributes.setBlurBehindRadius(dp(12));
+                    dialogWindow.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
+                } catch (Throwable ignored) {
+                    dialogWindow.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
+                }
             }
             dialogWindow.setAttributes(attributes);
         }
@@ -22309,16 +22627,22 @@ public class MainActivity extends Activity {
     }
 
     private void applyDialogBackgroundBlur() {
-        if (root == null || Build.VERSION.SDK_INT < 31) {
+        if (root == null || !platformBlurSupported()) {
             return;
         }
-        root.setRenderEffect(RenderEffect.createBlurEffect(
-                dp(6), dp(6), Shader.TileMode.CLAMP));
+        try {
+            root.setRenderEffect(RenderEffect.createBlurEffect(
+                    dp(6), dp(6), Shader.TileMode.CLAMP));
+        } catch (Throwable ignored) {
+        }
     }
 
     private void clearDialogBackgroundBlur() {
-        if (root != null && Build.VERSION.SDK_INT >= 31) {
-            root.setRenderEffect(null);
+        if (root != null && platformBlurSupported()) {
+            try {
+                root.setRenderEffect(null);
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -22918,18 +23242,21 @@ public class MainActivity extends Activity {
         if (profile == null) {
             return;
         }
-        if (Build.VERSION.SDK_INT >= 31) {
-            android.app.UiModeManager manager = getSystemService(android.app.UiModeManager.class);
-            if (manager != null) {
-                int mode = followSystemNightMode()
-                        ? manager.getNightMode()
-                        : android.app.UiModeManager.MODE_NIGHT_NO;
-                if (mode < android.app.UiModeManager.MODE_NIGHT_AUTO
-                        || mode > android.app.UiModeManager.MODE_NIGHT_CUSTOM) {
-                    mode = android.app.UiModeManager.MODE_NIGHT_NO;
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                android.app.UiModeManager manager = getSystemService(android.app.UiModeManager.class);
+                if (manager != null) {
+                    int mode = followSystemNightMode()
+                            ? manager.getNightMode()
+                            : android.app.UiModeManager.MODE_NIGHT_NO;
+                    if (mode < android.app.UiModeManager.MODE_NIGHT_AUTO
+                            || mode > android.app.UiModeManager.MODE_NIGHT_CUSTOM) {
+                        mode = android.app.UiModeManager.MODE_NIGHT_NO;
+                    }
+                    manager.setApplicationNightMode(mode);
                 }
-                manager.setApplicationNightMode(mode);
             }
+        } catch (Throwable ignored) {
         }
         int desired = followSystemNightMode() && systemNightActive()
                 ? android.content.res.Configuration.UI_MODE_NIGHT_YES
@@ -22940,7 +23267,10 @@ public class MainActivity extends Activity {
             return;
         }
         current.uiMode = (current.uiMode & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK) | desired;
-        getResources().updateConfiguration(current, getResources().getDisplayMetrics());
+        try {
+            getResources().updateConfiguration(current, getResources().getDisplayMetrics());
+        } catch (Throwable ignored) {
+        }
     }
 
     private boolean settingsHidden() {
@@ -23117,6 +23447,21 @@ public class MainActivity extends Activity {
             this.label = label;
             this.header = header;
             this.outMonth = outMonth;
+        }
+    }
+
+    private class MaxHeightScrollView extends ScrollView {
+        private final int maxHeight;
+
+        MaxHeightScrollView(Context context, int maxHeight) {
+            super(context);
+            this.maxHeight = Math.max(dp(120), maxHeight);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int cappedHeight = View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST);
+            super.onMeasure(widthMeasureSpec, cappedHeight);
         }
     }
 
