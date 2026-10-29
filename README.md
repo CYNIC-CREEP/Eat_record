@@ -30,7 +30,7 @@ beta.34起，新导出与云同步均剥离API配置、云会话和上传授权�
 
 ## 版本
 
-当前正式版为`0.6.0`，versionCode184；用户已批准同步发布GitHub、OpenList并推送更新。下载与说明见[0.6.0 Release](https://github.com/CYNIC-CREEP/Eat_record/releases/tag/v0.6.0)及[本版更新说明](RELEASE_NOTES_0.6.0.md)。发布实际完成状态见CURRENT_TASK.md。
+当前正式版为`0.6.0`，versionCode184；GitHub、OpenList和应用更新清单已同步发布。下载与说明见[0.6.0 Release](https://github.com/CYNIC-CREEP/Eat_record/releases/tag/v0.6.0)及[本版更新说明](RELEASE_NOTES_0.6.0.md)。发布证据与旧版更新接口限制见[V06_PUBLISH_REPORT.md](V06_PUBLISH_REPORT.md)。
 
 0.6.0在既有功能上调整餐次文字上下居中并保留左右对齐，修复图片加载中切后台、恢复后可能跳图的边界问题。正式包审查与设备验收见V06_RELEASE_REPORT.md；沿用既有签名覆盖升级。
 

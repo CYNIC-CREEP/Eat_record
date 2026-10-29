@@ -138,7 +138,7 @@ gh release create v<versionName> <普通APK附件路径> --target <已确认提�
 ## 7. OpenList与其他上传（须另行授权）
 
 - 脚本：`scripts/publish-openlist.ps1`；支持BaseUrl、RemoteRoot、ArtifactSuffix、SkipBuild及从OPENLIST_USERNAME/OPENLIST_PASSWORD环境变量读取管理员凭据。只记录变量名，不写真实值或带凭据命令。
-- 代码中的历史默认管理端点为HTTP；默认挂载根 `/lanzou/Myapp/eat record`。当前实际管理HTTPS入口/可用性/账号权限 **待确认**，不可把客户端只读 `https://pan.freefeng.icu`、`/eat record` 直接套作管理员路径。
+- 旧脚本默认管理端点仍为HTTP，不直接采用。2026-10-29已确认管理HTTPS入口为 `https://pan.freefeng.icu`，管理挂载根 `/lanzou/Myapp/eat record`，用户提供的本机管理凭据可用；应用只读账号base_path为 `/lanzou/Myapp`，其请求路径是 `/eat record`。登录域名相同不代表两类账号路径相同，不在文档/Git写入真实凭据。
 - 确认参数及副作用后可使用模板 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish-openlist.ps1 -SkipBuild -BaseUrl <已确认管理入口> -RemoteRoot <已确认挂载目录>`。脚本默认上传-debug后缀包，与GitHub附件命名不同。
 - 会打源码ZIP并上传APK/源码/服务文件/教程/字体/清单；可能先删除同名远端文件及退休字体，并改写dist/update.json、server/update.json。不是无副作用的检查工具，执行前审查源码包排除项及删除目标。
 - 上传后重新下载APK对比SHA256，核对版本/notes/链接及本地清单diff。不要凭脚本旧提示推断旧HTTP静态路由仍有效。
