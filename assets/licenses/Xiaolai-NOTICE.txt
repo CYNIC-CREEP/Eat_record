@@ -1,0 +1,8 @@
+EatRecord bundled default: Xiaolai Regular (小赖手写), unmodified release v3.126.
+Project: https://github.com/lxgw/kose-font
+Source: https://github.com/lxgw/kose-font/releases/download/v3.126/Xiaolai-Regular.ttf
+SHA-256: e2f68daf0e72777a8cf58bc83de1b98634b251e537ddbfca24b0ae50d1802da2
+The existing server/fonts copy matched the author's published release digest.
+Packaged once as res/font/xiaolai_regular.ttf; no first-launch download is required.
+Copyright and SIL Open Font License 1.1: see Xiaolai-OFL-1.1.txt.
+No font glyphs, reserved names or font metadata were modified.

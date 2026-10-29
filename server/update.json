@@ -1,12 +1,17 @@
 {
-    "versionCode":  148,
-    "versionName":  "0.5.26",
-    "apkUrl":  "https://pan.freefeng.icu/lanzou/Myapp/eat%20record/0.5.26/apk/EatRecord-0.5.26-debug.apk",
-    "apkPath":  "/lanzou/Myapp/eat record/0.5.26/apk/EatRecord-0.5.26-debug.apk",
+    "versionCode":  184,
+    "versionName":  "0.6.0",
+    "apkUrl":  "https://github.com/CYNIC-CREEP/Eat_record/releases/download/v0.6.0/EatRecord-0.6.0.apk",
+    "apkPath":  "/lanzou/Myapp/eat record/0.6.0/apk/EatRecord-0.6.0.apk",
+    "sha256":  "1753a9754d06b5e29b850f0f8b1080a05ea01e3051ebd91d032509e76e9b0eed",
+    "apkSize":  121162865,
     "notes":  [
-                  "• 检测更新结果弹窗按内容自适应高度，不再留下大块空白",
-                  "• 个性化新增更多设置，集中管理三餐通知、自定义提醒时间与可用 AI 功能",
-                  "• 首页只能切换到今天或更早日期，滑动和日期选择均不会进入未来",
-                  "• 加固荣耀与华为设备的启动兼容性，系统特效不兼容时自动使用稳定样式"
+                  "• 统一餐纸与顶部日历联动，优化连续日期、主页面切换与底栏反馈",
+                  "• 记录本封面可打开和合拢，完善连续翻页、纸边与图片实时显示",
+                  "• 餐次直接输入，短文字上下居中且保持左对齐，长文字可滚动",
+                  "• 餐图通过自己的视觉API识别；保留本地抠图，移除实验性本机营养识别",
+                  "• API Key默认隐藏并可删除，凭据和授权不进入导出与云同步",
+                  "• 优化设置分类与返回，修复夜间顶栏灰影、图片返回闪烁及后台恢复跳图",
+                  "• 备份流式写入，恢复先校验再提交，失败回滚并支持中断恢复"
               ]
 }

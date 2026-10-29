@@ -1,5 +1,7 @@
 param(
-    [switch]$NoUpload
+    [switch]$NoUpload,
+    [switch]$Qa,
+    [string]$QaFixture
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +18,7 @@ function Version-FromName($Name) {
 }
 
 $LocalJdkBase = Join-Path $env:LOCALAPPDATA "Programs\EclipseAdoptium"
-if (-not (Get-Command javac -ErrorAction SilentlyContinue) -and (Test-Path $LocalJdkBase)) {
+if (Test-Path $LocalJdkBase) {
     $LocalJdkRoot = Get-ChildItem $LocalJdkBase -Directory -Filter "jdk-*" |
         Sort-Object @{ Expression = { Version-FromName $_.Name }; Descending = $true } |
         Select-Object -First 1
@@ -68,111 +70,23 @@ if ($ManifestText -notmatch 'android:versionName="([^"]+)"') {
 }
 $VersionName = $Matches[1]
 
+$ReleaseNotesPath = Join-Path $ProjectRoot 'src\com\eatrecord\app\ReleaseNotes.java'
+if (-not (Test-Path $ReleaseNotesPath)) { throw 'Local release notes source is required' }
+$ReleaseGroups = [regex]::Matches((Get-Content $ReleaseNotesPath -Raw), '(?m)^\s*\{\s*"([^"]+)"')
+if ($ReleaseGroups.Count -eq 0 -or $ReleaseGroups[$ReleaseGroups.Count - 1].Groups[1].Value -ne $VersionName) {
+    throw "Release notes must contain the current version as their latest entry: $VersionName"
+}
+
+$DefaultFontPath = Join-Path $ProjectRoot 'res\font\xiaolai_regular.ttf'
+if (-not (Test-Path $DefaultFontPath) -or (Get-FileHash $DefaultFontPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'e2f68daf0e72777a8cf58bc83de1b98634b251e537ddbfca24b0ae50d1802da2') {
+    throw 'Bundled Xiaolai v3.126 font is missing or does not match its verified release hash'
+}
+if (-not (Test-Path (Join-Path $ProjectRoot 'assets\licenses\Xiaolai-OFL-1.1.txt'))) { throw 'Bundled font license is required' }
+
 function Assert-Ok($StepName) {
     if ($LASTEXITCODE -ne 0) {
         throw "$StepName failed with exit code $LASTEXITCODE"
     }
-}
-
-function Ensure-File($Path, $Url, $Label) {
-    if (Test-Path $Path) {
-        return
-    }
-    $Parent = Split-Path -Parent $Path
-    New-Item $Parent -ItemType Directory -Force | Out-Null
-    Write-Host "Downloading $Label..."
-    Invoke-WebRequest -Uri $Url -OutFile $Path -TimeoutSec 900
-}
-
-function Ensure-MnnAndroid {
-    $DepsDir = Join-Path $BuildRoot "deps\mnn"
-    $Root = Join-Path $DepsDir "mnn_3.6.0_android_armv7_armv8_cpu_opencl_vulkan"
-    if (Test-Path $Root) {
-        return $Root
-    }
-    $ZipPath = Join-Path $DepsDir "mnn_3.6.0_android.zip"
-    Ensure-File $ZipPath `
-        "https://github.com/alibaba/MNN/releases/download/3.6.0/mnn_3.6.0_android_armv7_armv8_cpu_opencl_vulkan.zip" `
-        "MNN Android runtime"
-    Expand-Archive -Path $ZipPath -DestinationPath $DepsDir -Force
-    if (-not (Test-Path $Root)) {
-        throw "MNN Android runtime extraction failed: $Root"
-    }
-    return $Root
-}
-
-function Ensure-SamModels {
-    $ModelDir = Join-Path $BuildRoot "deps\sam-models"
-    New-Item $ModelDir -ItemType Directory -Force | Out-Null
-    $Embed = Join-Path $ModelDir "embed_vitb_int4.mnn"
-    $Segment = Join-Path $ModelDir "segment_vitb_fp32.mnn"
-    Ensure-File $Embed `
-        "https://github.com/wangzhaode/mnn-segment-anything/releases/download/vit_b_mnn/embed_vitb_int4.mnn" `
-        "SAM vit_b int4 embed model"
-    Ensure-File $Segment `
-        "https://github.com/wangzhaode/mnn-segment-anything/releases/download/vit_b_mnn/segment_vitb_fp32.mnn" `
-        "SAM vit_b segment model"
-    return @(
-        [pscustomobject]@{ Path = $Embed; Entry = "assets/sam/embed_vitb_int4.mnn" },
-        [pscustomobject]@{ Path = $Segment; Entry = "assets/sam/segment_vitb_fp32.mnn" }
-    )
-}
-
-function Ensure-MnnHeaders {
-    $HeadersRoot = Join-Path $BuildRoot "research\MNN"
-    if (-not (Test-Path $HeadersRoot)) {
-        New-Item (Split-Path -Parent $HeadersRoot) -ItemType Directory -Force | Out-Null
-        git clone --depth 1 --filter=blob:none --sparse https://github.com/alibaba/MNN.git $HeadersRoot
-        Assert-Ok "git clone MNN headers"
-        git -C $HeadersRoot sparse-checkout set include tools/cv/include
-        Assert-Ok "git sparse-checkout MNN headers"
-    }
-    if (-not (Test-Path (Join-Path $HeadersRoot "include\MNN\expr\Module.hpp"))) {
-        throw "MNN headers missing: $HeadersRoot"
-    }
-    return $HeadersRoot
-}
-
-function Build-NativeSam {
-    if (-not (Test-Path $CMakeExe)) { throw "cmake.exe not found under $CMakeRoot" }
-    if (-not (Test-Path $NinjaExe)) { throw "ninja.exe not found under $CMakeRoot" }
-    if (-not (Test-Path $NdkRoot)) { throw "Android NDK not found under $(Join-Path $SdkRoot "ndk")" }
-    $MnnRoot = Ensure-MnnAndroid
-    $HeadersRoot = Ensure-MnnHeaders
-    $Outputs = @()
-    foreach ($Abi in @("arm64-v8a", "armeabi-v7a")) {
-        $NativeBuildDir = Join-Path $BuildDir ("native-" + $Abi)
-        $MnnLibDir = Join-Path $MnnRoot $Abi
-        $ConfigureOutput = & $CMakeExe `
-            -S (Join-Path $ProjectRoot "native") `
-            -B $NativeBuildDir `
-            -G Ninja `
-            "-DCMAKE_MAKE_PROGRAM=$NinjaExe" `
-            "-DCMAKE_TOOLCHAIN_FILE=$(Join-Path $NdkRoot "build\cmake\android.toolchain.cmake")" `
-            "-DANDROID_ABI=$Abi" `
-            "-DANDROID_PLATFORM=android-26" `
-            "-DANDROID_STL=c++_shared" `
-            "-DMNN_INCLUDE_DIR=$(Join-Path $HeadersRoot "include")" `
-            "-DMNN_CV_INCLUDE_DIR=$(Join-Path $HeadersRoot "tools\cv\include")" `
-            "-DMNN_LIB_DIR=$MnnLibDir" `
-            "-DCMAKE_BUILD_TYPE=Release" 2>&1
-        if ($ConfigureOutput) { $ConfigureOutput | ForEach-Object { Write-Host $_ } }
-        Assert-Ok "cmake configure $Abi"
-        $BuildOutput = & $CMakeExe --build $NativeBuildDir --config Release 2>&1
-        if ($BuildOutput) { $BuildOutput | ForEach-Object { Write-Host $_ } }
-        Assert-Ok "cmake build $Abi"
-        $So = Join-Path $NativeBuildDir "libeatsam.so"
-        if (-not (Test-Path $So)) {
-            throw "Native library missing: $So"
-        }
-        $Outputs += [pscustomobject]@{
-            Abi = $Abi
-            Sam = $So
-            LibDir = $MnnLibDir
-            Deps = @("libc++_shared.so", "libMNN.so", "libMNN_Express.so", "libMNNOpenCV.so")
-        }
-    }
-    return $Outputs
 }
 
 function Add-ZipFile($Zip, $Path, $EntryName, $Compression) {
@@ -188,12 +102,25 @@ function Add-ZipFile($Zip, $Path, $EntryName, $Compression) {
 
 New-Item $BuildRoot -ItemType Directory -Force | Out-Null
 New-Item $CompiledDir, $GenDir, $ClassesDir, $DexDir, $OutDir -ItemType Directory -Force | Out-Null
+$BuildManifest = $ManifestPath
+if ($Qa) {
+    $BuildManifest = Join-Path $BuildDir 'AndroidManifest.xml'
+    [xml]$QaXml = $ManifestText
+    $AndroidNs = 'http://schemas.android.com/apk/res/android'
+    $QaXml.manifest.application.SetAttribute('debuggable', $AndroidNs, 'true')
+    $Instrumentation = $QaXml.CreateElement('instrumentation')
+    $Instrumentation.SetAttribute('name', $AndroidNs, 'com.eatrecord.app.UpgradeSmoke')
+    $Instrumentation.SetAttribute('targetPackage', $AndroidNs, 'com.eatrecord.app')
+    $QaXml.manifest.AppendChild($Instrumentation) | Out-Null
+    $QaXml.Save($BuildManifest)
+    if (-not $NoUpload) { throw 'QA builds require -NoUpload' }
+}
 
 & $Aapt2 compile --dir (Join-Path $ProjectRoot "res") -o (Join-Path $CompiledDir "res.zip")
 Assert-Ok "aapt2 compile"
 & $Aapt2 link `
     -I $AndroidJar `
-    --manifest (Join-Path $ProjectRoot "AndroidManifest.xml") `
+    --manifest $BuildManifest `
     --java $GenDir `
     --min-sdk-version 26 `
     --target-sdk-version $TargetSdkVersion `
@@ -205,6 +132,7 @@ $JavaFiles = @((Join-Path $GenDir "com\eatrecord\app\R.java"))
 $JavaFiles += Get-ChildItem (Join-Path $ProjectRoot "src\com\eatrecord\app") -Filter *.java |
     Sort-Object Name |
     Select-Object -ExpandProperty FullName
+if ($Qa) { $JavaFiles += (Join-Path $ProjectRoot 'tests\android\UpgradeSmoke.java') }
 
 javac -encoding UTF-8 --release 8 -cp $AndroidJar -d $ClassesDir $JavaFiles
 Assert-Ok "javac"
@@ -231,8 +159,9 @@ finally {
 & $D8 --min-api 26 --lib $AndroidJar --output $DexDir $ClassesJar
 Assert-Ok "d8"
 
-$NativeOutputs = @()
-$SamAssets = @()
+$VisionEntries = @(& (Join-Path $ProjectRoot 'scripts\build-food-vision.ps1') `
+    -ProjectRoot $ProjectRoot -BuildDir $BuildDir -SdkRoot $SdkRoot -NdkRoot $NdkRoot `
+    -CMakeExe $CMakeExe -NinjaExe $NinjaExe -Qa:$Qa)
 $AssetRoot = Join-Path $ProjectRoot "assets"
 $ProjectAssets = @()
 if (Test-Path $AssetRoot) {
@@ -248,17 +177,14 @@ $UnsignedApk = Join-Path $BuildDir "EatRecord.unsigned.apk"
 $Zip = [System.IO.Compression.ZipFile]::Open($UnsignedApk, [System.IO.Compression.ZipArchiveMode]::Update)
 try {
     Add-ZipFile $Zip (Join-Path $DexDir "classes.dex") "classes.dex" ([System.IO.Compression.CompressionLevel]::Optimal)
-    foreach ($NativeOutput in $NativeOutputs) {
-        Add-ZipFile $Zip $NativeOutput.Sam "lib/$($NativeOutput.Abi)/libeatsam.so" ([System.IO.Compression.CompressionLevel]::Optimal)
-        foreach ($Dep in $NativeOutput.Deps) {
-            Add-ZipFile $Zip (Join-Path $NativeOutput.LibDir $Dep) "lib/$($NativeOutput.Abi)/$Dep" ([System.IO.Compression.CompressionLevel]::Optimal)
-        }
-    }
-    foreach ($Asset in $SamAssets) {
-        Add-ZipFile $Zip $Asset.Path $Asset.Entry ([System.IO.Compression.CompressionLevel]::Optimal)
-    }
     foreach ($Asset in $ProjectAssets) {
         Add-ZipFile $Zip $Asset.Path $Asset.Entry ([System.IO.Compression.CompressionLevel]::Optimal)
+    }
+    foreach ($Asset in $VisionEntries) {
+        Add-ZipFile $Zip $Asset.Path $Asset.Entry ([System.IO.Compression.CompressionLevel]::Optimal)
+    }
+    if ($Qa -and $QaFixture) {
+        Add-ZipFile $Zip $QaFixture 'assets/qa/food.jpg' ([System.IO.Compression.CompressionLevel]::Optimal)
     }
 }
 finally {
@@ -280,6 +206,7 @@ if (-not (Test-Path $Keystore)) {
 
 $AlignedApk = Join-Path $BuildDir "EatRecord.aligned.apk"
 $FinalApk = Join-Path $OutDir "EatRecord-$VersionName-debug.apk"
+if ($Qa) { $FinalApk = Join-Path $OutDir "EatRecord-$VersionName-qa.apk" }
 $SignedApk = Join-Path $BuildDir "EatRecord-debug.apk"
 & $ZipAlign -f 4 $UnsignedApk $AlignedApk
 Assert-Ok "zipalign"
@@ -294,6 +221,26 @@ Assert-Ok "apksigner"
 Copy-Item $SignedApk $FinalApk -Force
 
 $Size = [math]::Round((Get-Item $FinalApk).Length / 1MB, 3)
+if ($Size -gt 300) { throw "APK exceeds 300 MiB budget: $Size MiB" }
+$CheckZip = [System.IO.Compression.ZipFile]::OpenRead($FinalApk)
+try {
+    foreach ($Entry in $VisionEntries) {
+        if (-not $CheckZip.GetEntry($Entry.Entry)) { throw "Missing APK entry: $($Entry.Entry)" }
+    }
+    $PackedModels = Get-Content (Join-Path $ProjectRoot 'assets\models\model_manifest.json') -Raw | ConvertFrom-Json
+    foreach ($Model in @($PackedModels.full, $PackedModels.small, $PackedModels.refiner.encoder, $PackedModels.refiner.decoder)) {
+        $Packed = $CheckZip.GetEntry("assets/models/$($Model.file)")
+        if (-not $Packed) { throw "Missing packaged model: $($Model.file)" }
+        $Stream = $Packed.Open()
+        $Sha = [System.Security.Cryptography.SHA256]::Create()
+        try { $Hash = [BitConverter]::ToString($Sha.ComputeHash($Stream)).Replace('-','').ToLowerInvariant() }
+        finally { $Sha.Dispose(); $Stream.Dispose() }
+        if ($Hash -ne $Model.sha256) { throw "Packaged model hash mismatch: $($Model.file)" }
+    }
+    if (@($CheckZip.Entries | Where-Object { $_.FullName -match 'sam/|libeatsam|\.onnx$' }).Count -gt 0) {
+        throw 'Unexpected legacy model or ONNX source in APK'
+    }
+} finally { $CheckZip.Dispose() }
 Write-Host "Built $FinalApk ($Size MB)"
 
 if (-not $NoUpload) {

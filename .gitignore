@@ -10,3 +10,6 @@ dist/*.png
 .playwright-cli/
 output/
 server/__pycache__/
+__pycache__/
+*.py[cod]
+openlist_password/

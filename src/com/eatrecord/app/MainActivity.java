@@ -4,12 +4,13 @@ import android.animation.ValueAnimator;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.app.TimePickerDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
@@ -120,6 +121,84 @@ import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 public class MainActivity extends Activity {
+    private FoodUi foodUi;
+    private FoodProcessingDialog foodProcessing;
+    private boolean destroyingFoodUi;
+    private boolean foodReceiverRegistered;
+    private long lastBackNavigationAt;
+    private final BroadcastReceiver foodReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            synchronized (NutritionStore.LOCK) {
+                NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY));
+            }
+            if (foodProcessing != null || getCurrentFocus() instanceof EditText) return;
+            if (currentTab == 0 && !inPhotoViewer && !inPreferencesPage && !inAiAnalysisPage) {
+                homeFoodRefreshPending=true;homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);homeFoodRefreshHandler.post(homeFoodRefresh);
+            }
+        }
+    };
+
+    private FoodUi foodUi() {
+        if (foodUi == null) foodUi = new FoodUi(this, new FoodUi.Host() {
+            public JSONObject days() { return MainActivity.this.days; }
+            public JSONObject profile() { return MainActivity.this.profile; }
+            public boolean night() { return nightDecoration(); }
+            public void recognition() { recognitionSetup().choose(false); }
+            public void recognitionEnabled(boolean enabled) { chooseRecognitionSource(FoodRecognitionPolicy.source(profile),enabled);refreshRecognitionSettings(); }
+            public int detailAccentColor() { return accentSoft; }
+            public void saveProfile() { MainActivity.this.saveProfile(); }
+            public void saveDays() { MainActivity.this.saveDays(); }
+            // Reading a detail must not invalidate the unchanged home behind it.
+            public void reload() { days = readJson(DATA_KEY); profile = readProfile(); }
+            public void refresh() { if (inBookDetail) renderBookDetail(bookDetailDate); else if(inMoreSettingsPage)renderMealReminderSettingsPage();else if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inThemeSettingsPage)renderThemeSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent(); }
+            public void api() { configureApi(() -> { days = readJson(DATA_KEY); profile = readProfile(); if (foodProcessing == null) {if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent();} }); }
+            public void preview(String date, String meal, String file) { showPhotoViewer(date, meal, file); }
+            public void previewDetails(String date,String meal,String file,java.util.function.BooleanSupplier current,java.util.function.Consumer<Boolean> ready){
+                showPhotoViewer(date,meal,file,current,ready);
+            }
+            public void processing(String date, String meal, String source) { showFoodProcessing(date, meal, java.util.Collections.singletonList(source)); }
+        });
+        return foodUi;
+    }
+
+    private void showFoodProcessing(String date, String meal, List<String> sources) {
+        if (isFinishing() || isDestroyed() || sources.isEmpty()) return;
+        if (foodProcessing != null) foodProcessing.dismiss();
+        try { prefs.edit().putString("food_processing_preview", new JSONObject().put("date", date).put("meal", meal).put("sources", new JSONArray(sources)).toString()).apply(); }
+        catch (JSONException ignored) { }
+        foodProcessing = new FoodProcessingDialog(this, date, meal, sources, nightDecoration(),
+                () -> recognitionSetup().choose(false), () -> {
+                    foodProcessing = null;
+                    if (!destroyingFoodUi) { prefs.edit().remove("food_processing_preview").apply(); days = readJson(DATA_KEY); renderCurrent(); }
+                });
+        foodProcessing.show();
+    }
+
+    private void resumeFoodProcessing() {
+        if (foodProcessing != null) return;
+        if (!prefs.contains("food_processing_preview")) {
+            List<String> pending = FoodDraftStore.pendingSources(this);
+            if (!pending.isEmpty()) {
+                JSONObject first = FoodDraftStore.item(this, pending.get(0));
+                if (first != null) {
+                    String date = first.optString("draftDate"), meal = first.optString("draftMeal");
+                    List<String> sameMeal = new ArrayList<String>();
+                    for (String source : pending) { JSONObject item = FoodDraftStore.item(this, source); if (item != null && date.equals(item.optString("draftDate")) && meal.equals(item.optString("draftMeal"))) sameMeal.add(source); }
+                    showFoodProcessing(date, meal, sameMeal);
+                }
+            }
+            return;
+        }
+        try {
+            JSONObject pending = new JSONObject(prefs.getString("food_processing_preview", "{}"));
+            JSONArray files = pending.optJSONArray("sources"); List<String> sources = new ArrayList<String>();
+            JSONObject meal = NutritionStore.meal(readJson(DATA_KEY), pending.optString("date"), pending.optString("meal"));
+            for (int i=0; files!=null && i<files.length(); i++) if (FoodDraftStore.item(this, files.optString(i)) != null || NutritionStore.containsPhoto(meal, files.optString(i))) sources.add(files.optString(i));
+            if (sources.isEmpty()) prefs.edit().remove("food_processing_preview").apply();
+            else showFoodProcessing(pending.getString("date"), pending.getString("meal"), sources);
+        } catch (JSONException ignored) { prefs.edit().remove("food_processing_preview").apply(); }
+    }
+
     private static final String LOG_TAG = "EatRecordCamera";
     private static final int REQ_PICK_AVATAR = 18;
     private static final int REQ_PICK_MEAL_PHOTO = 19;
@@ -127,6 +206,7 @@ public class MainActivity extends Activity {
     private static final int REQ_PICK_MEAL_STICKER = 22;
     private static final int REQ_RESTORE_BACKUP = 23;
     private static final int REQ_POST_NOTIFICATIONS = 24;
+    private static final int REQ_INTERNAL_FOOD_CAPTURE = 25;
     private static final String PREFS = "eat_record_prefs";
     private static final String DATA_KEY = "days_json";
     private static final String PROFILE_KEY = "profile_json";
@@ -143,18 +223,12 @@ public class MainActivity extends Activity {
     private static final String CLOUD_API_DATA_UPLOAD_RAW = CLOUD_API_BASE + "/api/users/data/upload-raw";
     private static final String CLOUD_API_DATA_DOWNLOAD_RAW = CLOUD_API_BASE + "/api/users/data/download-raw";
     private static final int MAX_JSON_RESPONSE_CHARS = 4 * 1024 * 1024;
-    private static final String OPENLIST_API_LIST_URL = "http://47.97.215.111:5244/api/fs/list";
-    private static final String OPENLIST_API_GET_URL = "http://47.97.215.111:5244/api/fs/get";
-    private static final String OPENLIST_APP_ROOT = "/lanzou/Myapp/eat record";
+    private final AppDownloadClient appDownloads = new AppDownloadClient();
+    private static final String OPENLIST_APP_ROOT = AppDownloadClient.ROOT;
     private static final String OPENLIST_FONT_ROOT = OPENLIST_APP_ROOT + "/fonts";
-    private static final String OPENLIST_UPDATE_JSON_PATH = "/lanzou/Myapp/eat record/update.json";
-    private static final String OPENLIST_APP_PAGE = "http://47.97.215.111:5244/lanzou/Myapp/eat%20record";
-    private static final String OPENLIST_TUTORIAL_URL = "http://47.97.215.111:5244/lanzou/Myapp/eat%20record/%E6%96%B0%E6%89%8B%E6%95%99%E7%A8%8B.md";
+    private static final String OPENLIST_UPDATE_JSON_PATH = OPENLIST_APP_ROOT + "/update.json";
+    private static final String OPENLIST_APP_PAGE = AppDownloadClient.BASE + "/eat%20record";
     private static final String TAG_BOOK_NOTEBOOK_PAGE = "book_detail_notebook_page";
-    private static final String SAM_EMBED_ASSET = "sam/embed_vitb_int4.mnn";
-    private static final String SAM_SEGMENT_ASSET = "sam/segment_vitb_fp32.mnn";
-    private static final String SAM_EMBED_FILE = "sam_embed_vitb_int4.mnn";
-    private static final String SAM_SEGMENT_FILE = "sam_segment_vitb_fp32.mnn";
     private static final int AI_STICKER_CANDIDATE_COUNT = 4;
     private static final String[] TAB_TITLES = {"今日", "迹", "日历", "我"};
     private static final String[] TAB_ICONS = {"", "", "▦", "●"};
@@ -177,7 +251,7 @@ public class MainActivity extends Activity {
             {"中午吃了什么好东西(งᵒ̌皿ᵒ̌)ง", "午餐要好好补能量呀(๑•̀ㅁ•́ฅ)", "今天午饭有没有香迷糊(｡•̀ᴗ-)✧", "中午的饭饭来报到(ง ˙˘˙ )ว", "午餐时间到，吃点什么呢(੭ˊᵕˋ)੭", "把午餐悄悄记下来吧(๑˘︶˘๑)", "今天中午有没有认真吃٩(ˊᗜˋ*)و", "午餐有没有把电量充满(๑•̀ㅂ•́)و", "中午的好吃请入座(づ￣ ³￣)づ", "饭点到了，午餐写一下吧(˶ᵔ ᵕ ᵔ˶)", "今天午餐是什么小幸福(๑´ڡ`๑)", "把中午的香气留住吧(ﾉ◕ヮ◕)ﾉ"},
             {"晚上吃点什么治愈自己(´▽`ʃ♡ƪ)", "晚餐记录一下吧(づ￣ ³￣)づ", "今晚的饭饭是什么味道(๑´ڡ`๑)", "晚上吃点热乎的了吗(*´▽`*)", "晚餐小剧场开播啦(ﾉ◕ヮ◕)ﾉ*:･ﾟ✧", "今天的收尾饭饭是什么(っ˘ڡ˘ς)", "把今晚的好吃放进本子里(˶‾᷄ ⁻̫ ‾᷅˵)", "晚餐有没有温柔收尾(๑˘︶˘๑)", "夜色里也要好好吃饭(｡•̀ᴗ-)✧", "今天晚饭值得被夸夸吗(๑˃̵ᴗ˂̵)و", "把晚上的美味轻轻放好(੭ˊᵕˋ)੭", "今晚的餐桌有什么故事(˶ᵔ ᵕ ᵔ˶)"},
             {"下午茶偷偷快乐一下(´▽`ʃ♡ƪ)", "小点心出现了吗(˶‾᷄ ⁻̫ ‾᷅˵)", "下午有没有补充甜甜能量٩(ˊᗜˋ*)و", "下午茶小暂停(｡･ω･｡)", "喝点什么，吃点什么(๑•̀ㅂ•́)و✧", "今日甜甜补给站(๑˘︶˘๑)", "下午的小快乐写下来(ง •̀_•́)ง", "来一点下午的小治愈(੭ˊᵕˋ)੭", "今天的小零嘴登场了吗(๑´ڡ`๑)", "下午茶有没有香香的(˶ᵔ ᵕ ᵔ˶)", "把这口甜甜收进来吧(｡•̀ᴗ-)✧", "茶点时间悄悄亮灯啦(ﾉ◕ヮ◕)ﾉ"},
-            {"夜宵小分队集合(๑•̀ㅂ•́)و✧", "今晚有没有加餐呀(˶‾᷄ ⁻̫ ‾᷅˵)", "夜里吃了什么小快乐(´▽`ʃ♡ƪ)", "夜宵有没有悄悄出现(｡･ω･｡)", "深夜小馋猫记录一下٩(ˊᗜˋ*)و", "夜里的饭饭也值得记住(ง •̀_•́)ง", "睡前有没有吃点什么呀(੭ˊᵕˋ)੭", "夜宵如果来了就写一下(๑˘︶˘๑)", "今晚的小加餐是什么呀(๑´ڡ`๑)", "深夜快乐请轻轻落座(づ￣ ³￣)づ", "把夜里的味道留一点(˶ᵔ ᵕ ᵔ˶)", "夜宵本本等你投喂(｡•̀ᴗ-)✧"}
+            {"给夜晚增加一点美好~", "夜宵小分队集合(๑•̀ㅂ•́)و✧", "今晚有没有加餐呀(˶‾᷄ ⁻̫ ‾᷅˵)", "夜里吃了什么小快乐(´▽`ʃ♡ƪ)", "夜宵有没有悄悄出现(｡･ω･｡)", "深夜小馋猫记录一下٩(ˊᗜˋ*)و", "夜里的饭饭也值得记住(ง •̀_•́)ง", "睡前有没有吃点什么呀(੭ˊᵕˋ)੭", "夜宵如果来了就写一下(๑˘︶˘๑)", "今晚的小加餐是什么呀(๑´ڡ`๑)", "深夜快乐请轻轻落座(づ￣ ³￣)づ", "把夜里的味道留一点(˶ᵔ ᵕ ᵔ˶)", "夜宵本本等你投喂(｡•̀ᴗ-)✧"}
     };
     private static final String[] PROFILE_TAGLINES = {
             "你今天吃饭了吗(´▽`ʃ♡ƪ)",
@@ -185,546 +259,6 @@ public class MainActivity extends Activity {
             "饭饭记录小基地(｡･ω･｡)",
             "每一餐都值得被记住(๑•̀ㅂ•́)و✧",
             "把好吃的悄悄收起来(´▽`ʃ♡ƪ)"
-    };
-    private static final String[][] RELEASE_NOTES = {
-
-            {"0.4.29",
-                    "底栏选中背景重新按图标中心对齐，切换后不再偏一边。",
-                    "关于我们的检测更新和联系作者图标缩小一点，和其他设置项更搭。",
-                    "首页管理开关改成原地更新，不再整页闪一下。",
-                    "新增打开新版后只显示一次的更新公告。"},
-            {"0.4.30",
-                    "更新公告改成按版本分组，不再每一句重复版本号。",
-                    "切换日期加入卡片滑动感，并接入震动音效。",
-                    "隐藏设置和震动相关开关改成原地更新。",
-                    "震动设置拆成独立页面，可调强度并分别控制底栏和日历振动。",
-                    "深夜灰主题下足迹小本本改成灰白色。",
-                    "首页有图餐卡支持上滑折叠图片，并显示 photo 数量。"},
-            {"0.4.31",
-                    "首页餐卡区域不再带动整页上下滑动，只保留空白处滚动。",
-                    "有图餐卡上滑会真正折叠图片区域，并保留 photo 数量提示。",
-                    "切换日期恢复日期边框，并优化成年月日翻卡片动画。",
-                    "日历收缩后压小下方空白，让周视图更紧凑。"},
-            {"0.4.32",
-                    "今日页移除餐卡 emoji 标注入口，避免下滑误弹选择 emoji。",
-                    "已折叠图片的餐卡支持下滑展开图片。",
-                    "右上角恢复记录时间，photo 数量移到正文区域右侧。",
-                    "切换日期升级为更接近翻折日历的上下滑动画。",
-                    "新增挖出美食和上传抠图开关，可手动框选食物生成小贴纸。"},
-            {"0.4.33",
-                    "发现新版本和更新公告弹窗改为可滚动内容区，下载按钮固定在底部。",
-                    "饿肚肚标记时间显示在卡片右上角。",
-                    "饿肚肚正文与普通美食记录文本框左侧对齐。"},
-            {"0.4.34",
-                    "关于我们调整为联系作者、检测更新、更新日志。",
-                    "新增更新日志页面，可查看最近十个版本更新内容。",
-                    "检测更新和启动更新公告只显示最新版本内容。",
-                    "偏好设置其他页重新整理启动与显示分组顺序。"},
-            {"0.4.35",
-                    "餐卡里的 photo 数量只在图片折叠后显示，并与文字区域右侧对齐。",
-                    "饿肚肚标记改为卡片右下角灰色小字。",
-                    "上传抠图改名为上传贴纸，可从相册导入已保存的透明美食贴纸。",
-                    "保留挖出美食入口，避免集成大体积自动抠图库影响安装包大小。"},
-            {"0.4.36",
-                    "photo 数量调整到正文同一行右侧，不再掉到文字下方。",
-                    "饿肚肚标记调整到提醒文字同一行右侧，更贴近卡片右侧标注位置。"},
-            {"0.4.37",
-                    "更新日志页灰色提示增加小表情。",
-                    "新增从其他 App 分享图片到一蔬一饭并保存为餐卡贴纸的入口。",
-                    "上传贴纸文件入口改为系统文件选择，和普通相册图片区分开。"},
-            {"0.4.38",
-                    "图片上滑不再误触发这张图片菜单，只有稳定长按才会显示图片操作。",
-                    "图片背景移到图片分类第一项，偏好设置更顺手。",
-                    "开启隐藏设置前会先弹出确认说明，避免误开后找不到我页面。",
-                    "新增实验版 OpenCV/GrabCut 挖出美食，保存前可先生成更像贴纸的透明抠图。"},
-            {"0.4.39",
-                    "重构缩略图长按逻辑，上滑折叠图片时不再误弹这张图片菜单。",
-                    "开启挖出美食后，打开图片长按即可自动尝试生成美食贴纸。",
-                    "缩略图长按只保留删除图片，挖出美食不再需要从菜单里刻意选择。"},
-            {"0.4.40",
-                    "挖出美食改为挖出贴纸编辑器：自动识别后可手动补全或擦掉区域。",
-                    "打开大图长按后先进入确认编辑页，不再直接保存效果不确定的贴纸。",
-                    "偏好设置里把挖出贴纸和上传贴纸标注为实验功能。"},
-            {"0.4.41",
-                    "撤下 OpenCV/GrabCut 实验挖出贴纸入口，避免继续生成变形或识别很差的贴纸。",
-                    "保留上传贴纸实验入口，方便继续使用手机相册或其他工具保存的透明贴纸。",
-                    "开始评估更强的 AI 识别抠图方案，目标控制在 200MB 以内。"},
-            {"0.4.42",
-                    "新增高识别度 SAM AI 挖出贴纸实验版，打开图片后长按食物位置即可自动识别。",
-                    "使用 vit_b int4 模型和 MNN 本地推理，识别优先，安装包会明显变大。",
-                    "AI 识别会在原图坐标上生成透明贴纸，不再使用放大裁剪框。"},
-            {"0.4.43",
-                    "AI挖出贴纸改成相册式预览，长按后先显示灰色识别层，不再直接保存。",
-                    "预览页新增保存贴纸、换一个和取消，方便比较 SAM 候选识别结果。",
-                    "偏好设置的图片部分新增贴纸页面，收纳 AI挖出贴纸和上传贴纸开关。"},
-            {"0.4.44",
-                    "上传贴纸开关改为相册贴纸模式，选完餐别后直接从相册导入贴纸。",
-                    "从系统分享面板分享到一蔬一饭后，可选择添加到今天的早午晚餐。",
-                    "导入贴纸时会尝试去掉边缘黑底，保留手机相册抠好的美食贴纸。"},
-            {"0.4.45",
-                    "撤下软件内部 AI 抠图打包内容，贴纸只保留相册上传和系统分享导入。",
-                    "添加入口改为添加图片/贴纸，上传贴纸模式下仍可直接从相册选择。",
-                    "图片和贴纸长按进入编辑状态，显示小叉叉、轻微抖动，并支持拖动排序或叠放。",
-                    "震动设置新增图片/贴纸编辑振动开关。"},
-            {"0.4.46",
-                    "修正切换日期上下滑动时卡片翻动方向相反的问题。",
-                    "添加图片/贴纸一次最多可选择三张，超出的会自动忽略。",
-                    "长按图片或贴纸后，同一行全部进入整理状态并显示小叉叉。",
-                    "图片/贴纸拖动支持换位和叠放，叠放时更像一把小卡片。",
-                    "餐卡右上角时间只跟随文字记录，添加图片/贴纸不会再改时间。",
-                    "字体大小改成七个档位，布局改成更细腻的滑动条。"},
-            {"0.4.47",
-                    "叠放图片和隐藏设置从父页面开关改成独立设置页面。",
-                    "叠放图片改为几乎重叠的小卡片效果，底部更贴近、顶部轻微散开。",
-                    "修复长按图片/贴纸后，小叉叉点击其他区域偶尔不会消失的问题。",
-                    "整理态退出时会恢复原来的叠放角度和位置。"},
-            {"0.4.48",
-                    "底栏合并为今日、迹、我，日子收进足迹页面里。",
-                    "足迹标题支持在吃饭本子和日历之间来回切换，过渡更连贯。",
-                    "首页右上角日期可进入贴纸集合页，并可设置每行显示 3 到 6 个贴纸。",
-                    "贴纸新增无边框、邮票边、泡泡边、餐盘边和虚线边等样式。",
-                    "优化叠放图片/贴纸的拉出逻辑和底部贴近的卡片效果。"},
-            {"0.4.49",
-                    "修正首页顶部点击逻辑：点今日进入贴纸合集，点日期继续切换日期。",
-                    "贴纸合集改为按天、周、月分组显示，右上角可循环切换分组和每行数量。",
-                    "贴纸合集标题可直接返回今日页，移除左上角返回按钮和全部贴纸标题。",
-                    "餐盘边改为更圆的盘子形态。",
-                    "足迹页点击标题进入日历，日历页标题改为日历并原地淡入返回足迹。"},
-            {"0.4.50",
-                    "贴纸合集里的日期改成灰色小字，当前年份自动省略，跨年才显示年份。",
-                    "贴纸合集右上角的天/周/月和每行数量改为局部刷新，减少整页抖动。",
-                    "优化图片/贴纸叠放，底部更贴近，上方轻微错开，更像一小叠卡片。",
-                    "修复叠放后可能闪退的问题，拖拽保存后延迟刷新页面。",
-                    "点击底栏的“迹”也可以在足迹和日历之间切换。"},
-            {"0.4.51",
-                    "贴纸合集日期去掉前导 0，6月和7月1日会按自然写法显示。",
-                    "新增图片合集开关，开启后贴纸合集会把普通图片按贴纸大小一起展示。",
-                    "首页管理移到偏好设置启动分组里的独立页面。",
-                    "叠放图片/贴纸进一步靠近，拖动分开时不再被裁掉一半。",
-                    "修复隐藏设置后从日历齿轮进入我页面与日历重叠的问题。"},
-            {"0.4.52",
-                    "叠放图片/贴纸改为只显示最上层图片和数量角标，点击可丝滑展开或收回。",
-                    "整理态下叠放组右上角小叉改为取消叠放，单张图片/贴纸仍是删除。",
-                    "数据与安全改成独立页面，支持本地备份、二次确认删除和从备份恢复。",
-                    "字体大小改为 7 档粗滑条，并新增确认前实时预览文字。",
-                    "图片合集开关移入贴纸设置页，布局滑条同步加粗。"},
-            {"0.4.53",
-                    "今日和贴纸合集之间的切换改为轻淡入场，不再像左右翻页。",
-                    "偏好设置的显示分组新增足迹页面设置，可选择原始或展开布局。",
-                    "足迹展开布局会把小本本铺满整页，并支持每行 3 到 6 本。",
-                    "所有短提示改为圆润玻璃感浮层，阅读更清楚。"},
-            {"0.4.54",
-                    "偏好设置里的足迹页面入口改名为足迹，设置页标题也同步简化。",
-                    "足迹展开布局的小本本日期只显示几月几日，不再显示年份。",
-                    "足迹展开布局适当增加小本本之间的纵向间距，看起来更松一点。",
-                    "左侧条痕改为滑动条调整，并加入实时预览。"},
-            {"0.4.55",
-                    "足迹设置新增本子样式，可在美食风、简约风、拼接风、夏天风和清透白之间切换。",
-                    "足迹设置新增本子字体，可为吃饭本子详情选择默认、圆润、手写或少女感字体。",
-                    "吃饭本子详情改成纸页小本本背景，餐次记录会落在本子横线上。",
-                    "吃饭本子详情的餐次时间只显示几点几分，不再重复年月日。"},
-            {"0.4.56",
-                    "足迹设置新增本子格式，可在笔记本格式和原格式之间切换，分享截图也会跟随切换。",
-                    "修复本子字体在吃饭本子详情里不明显的问题，并新增更多字体风格。",
-                    "简约风、拼接风、夏天风和清透白封面按日期生成不同颜色和图案，不再每本都长一样。",
-                    "本子页面新增多种纸张样式，日期和叙述式记录都会写进小本本里。"},
-            {"0.4.57",
-                    "首页右上角不再显示完整年月日，只保留更轻的星期提示。",
-                    "吃饭本子支持左右滑动查看前后记录，本子里的贴纸会集中摆到下方。",
-                    "足迹设置新增记录排版和贴纸摆放选项，并补充更有差异的本子字体和纸张样式。",
-                    "数据与安全新增回收站，删除的图片和贴纸会保留24小时，可恢复或彻底删除。",
-                    "我页面头像昵称卡片增强液体玻璃感，不同主题下更有差异。"},
-            {"0.4.58",
-                    "首页右上角恢复日期显示，餐卡右上角只显示记录时间。",
-                    "吃饭本子左右滑动改成卡片拖动效果，滑动中途可以同时看到两页本子。",
-                    "修复新增本子字体被回退成默认字体的问题，并补充更明显的字体差异。",
-                    "整齐摆放贴纸会自动换行，不再横向溢出本子页面。",
-                    "足迹设置新增图片摆放开关，开启后本子下方可把图片像贴纸一样摆放。"},
-            {"0.4.59",
-                    "少女体换成更可爱的中文字体，不再只是普通斜体。",
-                    "吃饭本子下方贴纸按一行四个摆放，右侧空隙更自然。",
-                    "优化吃饭本子左右滑动，减少闪屏和页面中间竖线。",
-                    "分享截图同步使用新的贴纸四列布局。"},
-            {"0.4.60",
-                    "饿肚肚侧边按钮会跟随左侧餐卡高度，长卡更长、短卡更短。",
-                    "吃饭本子里的“今日贴纸”统一改成“今日记录”。",
-                    "分享截图也同步显示“今日记录”。"},
-            {"0.4.61",
-                    "重构吃饭本子左右滑动，由外层容器统一接管翻页。",
-                    "滑动中途稳定显示前后两页本子，减少闪烁和竖线。",
-                    "降低翻页触发距离，短促横滑也更容易切到下一本。"},
-            {"0.4.62",
-                    "吃饭本子左右滑动时两页轻微重叠，减少中间竖线。",
-                    "软萌体和奶泡体改成更圆更可爱的字体效果。",
-                    "本子与分享图里的贴纸排列更紧凑。",
-                    "分享图片底部新增记录文案，并保留一蔬一饭水印。"},
-            {"0.4.63",
-                    "关闭页面可见滚动条，并加大吃饭本子翻页重叠，进一步去除滑动中间线。",
-                    "精简本子字体列表，保留差异更明显的字体，并在选择界面直接预览对应字体。",
-                    "我页面昵称下方改为个性签名，可自定义，留空时继续使用默认文案。",
-                    "更多偏好重新整理为全局、今日、足迹和其他四个部分。",
-                    "新增实验性功能页面，未来 AI 分析、热量记录等入口先以待开发状态展示。"},
-            {"0.4.64",
-                    "震动强度切换改为局部更新，点击轻、中、强不再带动整页抖动。",
-                    "进入更多偏好后切到底栏其他页面，再回到我页面会自动回到更多偏好。",
-                    "新增多款真实中文手写字体，少女体、软糖体、奶泡体等差异更明显。",
-                    "本子页面选择改为横向多行预览卡片，可以直接看到每种纸张样式。",
-                    "修复记录排版选择分开几行时跳到足迹布局页面的问题。",
-                    "点击个性签名或头像昵称卡片会以透明玻璃弹窗编辑资料，过渡更柔和。"},
-            {"0.4.65",
-                    "编辑资料只在点击姓名或个性签名时弹出，头像后的背景框不再误触发。",
-                    "主题改为独立页面，新增头像背景透明水滴和底栏透明水滴选项。",
-                    "吃饭本子详情改为顶栏固定，左右滑动时只让纸张区域移动。",
-                    "修复本子分享图比例异常、贴纸被压扁和内容触底拥挤的问题。",
-                    "清理马克笔、方块体和潦草字体，保留更清晰圆润的本子字体。"},
-            {"0.4.66",
-                    "本子字体进一步精简，移除难辨认的潦草和厚重字体，新增更清晰的手写字体。",
-                    "吃饭本子日期改成更松的写法，阅读起来不再挤在一起。",
-                    "分享图片里的纸张宽度和应用内更接近，贴纸保持比例显示，不再被拉扁。",
-                    "分享图片会根据贴纸行数给本子留空间，内容靠近底部时自动上移。"},
-            {"0.4.67",
-                    "未吃提醒改成更生气但可爱的语气，早餐缺席会更像认真提醒。",
-                    "分享图片纸张更窄，贴纸间距更紧凑，并会按数量自动选择四到六列。",
-                    "修复主题页面切换后颜色刷新不完整，需要返回重进才恢复的问题。",
-                    "本子字体重新整理为清晰手写体命名，弱化无意义的花哨叫法。",
-                    "首页右下角图片按钮改成更浅的透明主题色。",
-                    "吃饭本子翻页时两页纸不再在边缘互相压住。"},
-            {"0.4.68",
-                    "分享图片改成更接近本子比例的窄画布，减少左右空白。",
-                    "分享图里纸张与底部文案距离缩短，贴纸会按宽度自动排满再换行。",
-                    "今日右下角图片按钮的底色、描边和图标全部再变浅。",
-                    "本子字体替换为更像真实手写的悠哉、小赖和文楷字体。"},
-            {"0.4.69",
-                    "分享截图重新平衡标题、纸张和水印的上下距离，并让背景更贴近当前主题。",
-                    "分享图贴纸略微缩小并在原列位居中，不再贴近底部水印。",
-                    "震动设置新增滑动页面振动，可单独控制吃饭本子翻页反馈。",
-                    "移除缺字的本子字体，旧选择会自动切回更稳定的小赖手写。"},
-            {"0.4.70",
-                    "优化设置页保存后的刷新逻辑，选择选项时尽量保留当前位置，不再频繁回到页面顶部。",
-                    "统一返回处理并增加返回键兜底，减少个别页面手势返回偶尔无效的情况。",
-                    "分享图片的底部留白稍微加大，纸张主体再缩小一点，整体更舒服。",
-                    "修复分享图纸张左侧装订色块盖住圆角的问题，左右 R 角显示更完整。"},
-            {"0.4.71",
-                    "记录本子里的记录方式和贴纸摆放改为行内更新，选择后不再整页闪一下。",
-                    "新增漫黑手写字体，风格更可爱活泼，也保持中文显示清晰。",
-                    "字体选择预览同步支持漫黑手写，方便直接看效果。"},
-            {"0.4.72",
-                    "分享图片改为高清画布生成，保存和转发后文字与贴纸更清晰。",
-                    "分享图里今日记录灰字更小并下移，本子整体稍微上移。",
-                    "修复漫黑手写字体选项点击不生效的问题。",
-                    "记录本子新增只分享笔记纸张开关，开启后水印会写进纸张最后一行。"},
-            {"0.4.73",
-                    "分享图纸张位置下移一点，整体更接近居中。",
-                    "纸张界面分享改为贴近纸张边缘，并使用跟纸张相近的柔和渐变背景。",
-                    "记录本子里的只分享笔记纸张改名为纸张界面。",
-                    "修复主题页水滴质感两个开关点击后整页闪屏的问题。"},
-            {"0.4.74",
-                    "分享设置升级为分享界面选项，可在纸张界面和全屏界面之间选择。",
-                    "全屏分享背景改成跟纸张色系相近的柔和渐变，纸张界面分享则铺满整张纸。",
-                    "图片摆放改为确认弹窗，说明后再开启。",
-                    "更多偏好改名为个性化，并新增恢复默认设置。",
-                    "修复今日页顶部误触，只有点击今日文字才会进入贴纸合集。",
-                    "更新日志扩展到最近30个版本，并新增教程入口。",
-                    "检测更新打开 APK 直链，尽量直接进入浏览器下载。"},
-            {"0.4.75",
-                    "分享图背景改为上方贴近纸张色、下方更白的柔和渐变。",
-                    "分享图三张图片或贴纸改为按四列靠左排列，不再被分散到整行。",
-                    "记录本子新增媒体数量标记，可在最后一张图片或贴纸右下角显示 photo×4 / sticker×4。",
-                    "今日页右上角日期支持左右轻扫切换前后一天，点击仍可打开切换日期。"},
-            {"0.4.76",
-                    "今日页右上角日期左右滑动改为局部刷新，只更新标题、日期、提示和餐卡内容。",
-                    "分享图媒体数量标记移到时间与今日记录之间，并同时支持 photo× 和 sticker×。",
-                    "分享图背景右侧增加一点柔和粉色，整体更贴纸本子感。",
-                    "更新日志扩展为最近50个版本，入口文案更简洁。",
-                    "个性化-今日新增文本框玻璃设置，可调主界面餐卡透明度和液态玻璃感。"},
-            {"0.4.77",
-                    "文本框设置改为更明显的透明度与玻璃效果，透明度可从几乎不透明调到很通透。",
-                    "个性化新增界面布局入口，统一收纳文本框和左侧条痕设置。",
-                    "联系作者改为弹窗，可选择 QQ 或微信并复制微信号。",
-                    "分享图右下角水印颜色更接近白色。",
-                    "实验性功能新增 API 调用和自动识别热量入口，可自行填写模型 API Key 并联网检测。"},
-            {"0.4.78",
-                    "修复主界面文本框和顶栏在非红色主题下也偏粉的问题，主界面回到干净白色系。",
-                    "分享图背景改为只在分享图片中按本子纸张颜色生成，不再影响应用内页面。",
-                    "贴纸边框在主页面跟随主题色，在吃饭本子里跟随纸张颜色。",
-                    "联系作者的微信入口会尝试打开微信搜索，并提示添加好友时说明来意。"},
-            {"0.4.79",
-                    "修复联系作者点击微信无法跳转的问题，补充微信包可见性与显式启动兜底。",
-                    "调用 API 支持检测并选择可用模型，兼容 DeepSeek、ChatGPT 和 OpenAI 风格接口。",
-                    "实验性功能新增 AI分析、小饿饿页面、自动/手动分析和饮食健康问答。",
-                    "小饿饿支持身高体重与 BMI 信息，会按今日和近期记录给出简洁饮食建议。",
-                    "新增识别图片/贴纸开关，只有检测到支持识图的模型后才允许开启。"},
-            {"0.4.80",
-                    "调用 API 改为检测后从模型列表选择，不再手动输入模型名，并新增快速/思考模式。",
-                    "AI 分析页改名为餐饮分析，关闭 AI 分析后点击底栏今日不再弹提示。",
-                    "餐饮分析页新增自绘动态小玩偶、固定底部聊天栏和更详细的 BMI 对照表。",
-                    "识图模型会随请求读取当天图片/贴纸，非识图模型无法开启识别图片/贴纸。",
-                    "记录本子新增真实翻页开关，开启后点击本子有封面打开动画，左右翻页有纸张弯折和翻页声。",
-                    "微信联系作者入口增加多路跳转兜底，失败时仍会复制账号并提示说明来意。"},
-            {"0.4.81",
-                    "餐饮分析右上角改为使用你设置的头像，小玩偶气泡文字也放大了一些。",
-                    "AI 分析和聊天回复改得更简洁，输入法弹出时聊天输入框会跟着抬起。",
-                    "吃饭本子里的热量估算可点击重新检测，晚餐新增后不会一直停留在旧估算。",
-                    "记录本子的衔接动画改为普通/翻页两档，翻页时左侧更像书脊固定、右页翻过去。",
-                    "打开本子封面时会先露出纸张预览内容，减少内容突然跳出来的感觉。",
-                    "检测更新优先读取 OpenList 的原始更新文件，减少服务器跳转导致的检测失败。"},
-            {"0.4.82",
-                    "餐饮分析小玩偶头上的气泡文字按屏幕密度放大，阅读更清楚。",
-                    "聊天输入框在输入法弹出时会抬起，并给页面底部留出滚动空间。",
-                    "发送按钮改为真正追加聊天记录，AI 回复会保存在历史里，页面可上下滚动查看。",
-                    "个人信息弹窗打开后会主动聚焦身高输入框并调出键盘。",
-                    "今日分析不再因为打开页面或点小玩偶就强制重跑，只有点重新分析才会强制分析。",
-                    "翻页模式放慢速度，并改成纸张截图弯曲翻页，封面打开时也会更早显示里面文字。"},
-            {"0.4.83",
-                    "个人信息弹窗强化输入法拉起逻辑，点身高或体重输入框会主动调出键盘。",
-                    "餐饮分析聊天输入框更贴近输入法顶部，发送后会收起键盘并带轻微动效。",
-                    "聊天气泡改成更接近今日分析卡片的玻璃色，你的提问会随主题偏绿显示。",
-                    "今日右下角图片按钮改为展开提示条，点后餐次卡片会明显高亮。",
-                    "高亮状态下点击早餐、午餐或晚餐卡片任意文字区域即可添加图片或贴纸。",
-                    "翻页模式改为纸张边缘弯曲提示，去掉中途整页透明和末尾明显停顿。"},
-            {"0.4.84",
-                    "餐饮分析输入框进一步贴近输入法顶部，打字时不再隔一大段空白。",
-                    "今日图片按钮改成单一延展提示条，再点一次收回并取消高亮，不再同时弹出提示框。",
-                    "吃饭本子翻页重做为底页常驻、当前页弯曲翻走，减少透明、停顿和闪线。"},
-            {"0.4.85",
-                    "吃饭本子翻页时翻动页保持不透明，避免中途像半透明纸一样发灰。",
-                    "上一页方向改成固定书脊侧的翻页逻辑，左侧装订边不再跟着滑走。",
-                    "点击小本本进入详情时先渲染底层页面再播放封面动画，减少结束瞬间卡顿。"},
-            {"0.4.86",
-                    "吃饭本子翻页改为不透明覆盖页，避免中途文字重叠和纸张发灰。",
-                    "个人信息数字输入保留点击位置，点到数字左侧修改时不再跳到末尾。",
-                    "BMI 对照表新增 BMI 区间列，AI 饮食分析会偶尔带一点表情或颜文字。"},
-            {"0.4.87",
-                    "吃饭本子翻页期间隐藏真实页面，只保留不透明截图翻页层，避免文字叠影。",
-                    "上一页方向不再把左侧装订条带进翻动纸面，翻完后再切换到新页面。",
-                    "BMI 对照表左侧改为清晰显示正常 BMI 区间。"},
-            {"0.4.88",
-                    "吃饭本子翻页改为真实纸背逻辑，翻动中只显示空白背面，不再显示带字截图。",
-                    "上一页返回改为从右侧自由边把上一张纸翻回来，装订边不再参与翻页。",
-                    "翻页结束顺序优化，目标页先就位再移除纸背层，减少旧页闪回。"},
-            {"0.4.89",
-                    "翻页动画重写为纸背遮挡模型，翻动中不再把整页截图切开翻。",
-                    "餐饮分析聊天气泡和输入框改为暖黄色透明玻璃感，发送气泡按内容收窄。",
-                    "个人信息 BMI 改为男生/女生两张淡色矩阵表，并补充公式和颜色说明。"},
-            {"0.4.90",
-                    "个人信息弹窗改为固定高度可滚动，身高和体重输入区右下角新增完成按钮。",
-                    "餐饮分析聊天输入框和气泡改成灰白玻璃感，减少背景文字透出来的问题。",
-                    "吃饭本子翻页停用透明截图卷页层，改为真实页面稳定过渡，中途能看到目标页内容。",
-                    "更新日志扩展为最近100次更新内容。"},
-            {"0.4.91",
-                    "餐饮分析输入栏去掉内层边框，整体更像一整块灰白玻璃胶囊。",
-                    "发送按钮改成更浅、更透明的主题色按钮。",
-                    "个人信息里的完成按钮改为输入后才出现，点击会保存身高体重并提示保存成功。",
-                    "吃饭本子翻页在稳定过渡上增加轻微纸背弯折感，中途能看到一点空白纸面。"},
-            {"0.4.92",
-                    "吃饭本子翻页改为只作用在中间笔记纸张区域，不再把整页做成巨大纸背。",
-                    "餐饮分析输入栏改成更厚的灰白磨砂底，减少后方聊天文字透出。",
-                    "实验性功能新增 AI读取记录开关，开启后聊天可读取最近记录摘要与餐次统计。",
-                    "餐饮分析的最近记录读取也改为受 AI读取记录开关控制。"},
-            {"0.4.93",
-                    "餐饮分析输入栏改成实时取底层画面的小范围磨砂玻璃，不再只是灰色遮罩。",
-                    "个人信息弹窗打开后不再自动弹输入法，点身高或体重输入框时才唤起键盘。",
-                    "个人信息里的身高和体重加入左侧标签，输入后也能清楚知道字段含义。",
-                    "吃饭本子翻页的空白纸背和弯折阴影加宽，只在中间纸张区域内显示。"},
-            {"0.4.94",
-                    "吃饭本子翻页去掉透明假纸条，翻页模式改为更稳定的纸张直翻折过渡。",
-                    "翻页音效改为每次翻动只响一次，不再结束时额外响一下。",
-                    "从餐饮分析切回今日后会恢复右下角添加图片/贴纸按钮。",
-                    "添加图片/贴纸提示条向左延伸并压小文字，三餐高亮去掉明显灰色边框。"},
-            {"0.4.95",
-                    "记录本子设置新增翻页音效开关，仅在衔接动画选择翻页时显示，默认开启。",
-                    "餐饮分析个人信息新增性别、餐饮习惯、就餐方式和平均每餐消费，AI 会作为背景参考。",
-                    "足迹日历长按日期可标记就餐方式，日历小格和当天摘要会显示标签。",
-                    "今日添加图片/贴纸模式下三餐会流畅收缩成餐次大标签，避免误输入文字。"},
-            {"0.4.96",
-                    "今日右下角图片按钮图标加深并加粗，浅色按钮里也能看清楚。",
-                    "餐饮习惯选项改为一天1~2餐、2~3餐等区间表达。",
-                    "就餐方式合并餐厅和线下餐厅，避免重复选项。",
-                    "选择餐次添加图片/贴纸时会保持折叠高亮，等相册或相机返回后再恢复原样。"},
-            {"0.4.97",
-                    "今日右下角图片按钮改为实心图片图标，并增加文字符号兜底，避免变成空白圆圈。"},
-            {"0.4.98",
-                    "图片与贴纸设置新增贴纸上滑收缩开关。",
-                    "开启后，今日餐卡里的贴纸条可像图片一样上滑折叠、下滑展开，并显示 sticker 数量。"},
-            {"0.4.99",
-                    "足迹日历的当天标记改为按餐次选择就餐方式，早餐、午餐、晚餐和已启用的夜宵等餐次下方会显示小标签。",
-                    "日历格子与当天摘要不再显示“就餐方式”这几个字，旧版整天标记会自动兼容到当天有记录的第一餐。",
-                    "今日右下角添加图片按钮恢复为图片轮廓图标，不再显示斜线方块。",
-                    "图片与贴纸设置里保留贴纸上滑收缩开关，贴纸条可像图片一样折叠和展开。"},
-            {"0.5.0",
-                    "日历详情改为在下方日期卡片里按餐次逐行显示就餐方式标签，日历格子不再挤标签。",
-                    "今日右下角添加图片/贴纸按钮恢复清晰相册图标，展开时三餐会一起顺滑收缩成餐次大标签，并等相册返回后再恢复。",
-                    "贴纸合集新增合并贴纸开关，今日里叠放的贴纸在合集里也会合并显示并标记 ×n。",
-                    "餐饮分析标题可进入历史聊天列表，历史记录只读；实验性功能新增开启记忆，可让当天 AI 读取过往聊天记忆。",
-                    "我页面头像昵称卡片增强主题差异，昵称下方新增本机 ID，主题页新增个人资料入口，集中显示昵称、ID 和餐饮分析资料。",
-                    "个性化界面布局继续收纳文本框玻璃和左侧条痕设置，更新日志保留最近100次更新内容。"},
-            {"0.5.1（restart）",
-                    "保持安装版本 0.5.1 不变，继续修复本轮反馈的首页图片按钮、日历标签和个人信息设置结构。",
-                    "新增一蔬一饭云端基础服务，个人 ID 会优先由服务器分配，首个真实用户从 10000 开始。",
-                    "首页右下角添加图片/贴纸按钮改为更清晰的实心相册图标，收起状态不再变成空白圆圈。",
-                    "日历详情里的就餐方式标签更小更淡，三餐行距更紧凑。",
-                    "我页面入口改名为个人信息，返回后不再和我页面重叠。",
-                    "个人信息页可直接修改性别、身高体重、餐饮习惯、就餐方式和平均消费。",
-                    "新用户不再自动生成 ID，第一次保存昵称才会创建唯一账号；ID 创建后不可修改。"},
-            {"0.5.2",
-                    "正式升到 0.5.2，确保检测更新可以拿到这次修复。",
-                    "首页右下角添加图片/贴纸按钮新增独立相册图标层，不再只依赖按钮自绘。",
-                    "收起态同时保留文字兜底标识，避免任何主题或机型下再次变成空圆圈。",
-                    "进入添加图片模式时去掉旧内容裁切中间态，三餐卡片同步平滑进入选择状态。",
-                    "底部添加图片提示文字稍微放大一点。"},
-            {"0.5.3",
-                    "修复进入添加图片/贴纸模式时早餐、午餐卡片向上弹动的问题。",
-                    "三餐卡片改为内部内容从下往上慢速收缩，顶部标题保持稳定。",
-                    "去掉旧的列表整体位移和行高反弹动画，减少闪屏和中间错位。"},
-            {"0.5.4",
-                    " 0.5.4：修复联系作者微信调用失败，改用启动微信+剪贴板复制方案。",
-                    " 贴纸合集界面  N 现在点击可展开查看所有叠放贴纸。",
-                    " 个人信息新增设置/修改密码（需旧密码+新密码+确认密码）。",
-                    " 切换登录支持通过ID或用户名（昵称）和密码登录云账号。",
-                    " 修改昵称时会联网检测唯一性，重复昵称会提示已被使用。",
-                    " 新增服务端密码和登录认证API，数据存储在服务器数据库中。"},
-            {"0.5.5",
-                    "新增完整云端数据同步：头像、昵称、个性签名、三餐记录、日历、小本本、图片贴纸和AI聊天记录可跨设备同步。",
-                    "云同步会自动排除实验性功能里的 API Key、接口地址和模型配置，避免把个人接口信息同步到云端。",
-                    "数据与安全新增一键同步数据到云端、同步云端数据到本地两个按钮。",
-                    "登录账号后会自动尝试读取云端数据；个人信息页新增退出登录，可回到纯本地使用模式。"},
-            {"0.5.6",
-                    "修复上传贴纸后添加图片按钮不自动恢复的问题，图片、贴纸、拍照完成后都会统一收起选择模式。",
-                    "点击文本框外的空白区域会收起输入法并隐藏光标。",
-                    "下午茶固定显示在午餐和晚餐之间。",
-                    "未在设置中开启下午茶或夜宵时，可右滑午餐临时加入下午茶、右滑晚餐临时加入夜宵。",
-                    "下午茶和夜宵左滑后改为开心/伤心两个标记按钮，不再使用饿肚肚逻辑。"},
-            {"0.5.7",
-                    "今日页右滑午餐/晚餐时只显示添加下午茶/夜宵按钮，点击按钮后才会添加。",
-                    "临时添加的下午茶和夜宵支持右滑显示删除按钮，点击后删除当天对应餐次。",
-                    "日历页面下方餐饮记录卡片支持左右滑动切换前一天和后一天，并同步刷新上方选中日期。"},
-            {"0.5.8",
-                    "加下午茶、加夜宵以及临时餐次删除按钮改为在餐卡左侧出现。",
-                    "贴纸合集里的叠放贴纸改为列表内一点展开、再点收缩，不再弹出单独窗口。",
-                    "修复多设备登录后云端资料同步容易失败的问题，登录不再挤掉旧设备，客户端会自动尝试恢复过期 token。"},
-            {"0.5.9",
-                    "日历详情里不再显示早餐等缺席餐次的饿肚肚内容。",
-                    "吃饭本子和分享纸张会跳过缺席餐次，只保留实际记录过的餐饮内容。"},
-            {"0.5.10",
-                    "今日页图片/贴纸上滑折叠后会记住状态，切走再回来不会自动展开。",
-                    "贴纸合集更名为贴纸栏，叠放贴纸改用今日页同款展开/收缩动画。",
-                    "隐藏设置新增隐藏贴纸栏、隐藏日历和合并足迹日历选项，并防止日历与设置同时隐藏。",
-                    "联系作者微信入口改为复制微信号并提示手动搜索，夜宵/下午茶心情表情改到餐名右侧。",
-                    "页面滚动关闭边缘弹性并优先请求高刷新率，减少上下滑动掉帧感。"},
-            {"0.5.11",
-                    "贴纸栏叠放贴纸展开后按网格自动换行，展开状态下可在贴纸上直接收缩。",
-                    "个人信息新增注销账号，云端会清空资料并回收 ID，本地记录不受影响。",
-                    "数据与安全新增同步数据子页面，集中放置上传、下载和自动同步。",
-                    "主题页新增夜间模式开关，默认不跟随手机深色模式，保持原主题偏白背景。",
-                    "实验性功能整理为可用功能和敬请期待，食物识别入口命名更清晰。",
-                    "震动强度切换加入底栏式滑动动画，上传图片按钮增加快速双击防抖。",
-                    "云端登录改为最多保留两台设备，第三台登录会让较早设备退出云端身份。"},
-            {"0.5.12",
-                    "清理贴纸栏旧弹窗代码，叠放贴纸改为原地展开/收缩。",
-                    "修复贴纸栏展开时整页刷新导致的闪屏和旧版本样式回退。"},
-            {"0.5.13",
-                    "贴纸栏叠放贴纸恢复首页同款横向展开/收缩动画，删除额外展开面板旧逻辑。",
-                    "修复更新日志最新版本顺序、深夜模式跟随系统变黑、震动强度分段背景异常。",
-                    "优化添加图片按钮快速点击防抖和餐卡贴纸滑动时误触输入光标。"},
-            {"0.5.14",
-                    "震动强度选中块改成更轻的内嵌胶囊，不再出现深色硬边。",
-                    "个性化、今日、足迹和记录本子相关选项换成主题自适应自绘图标。",
-                    "修复个性化设置页偶发侧滑返回只抖动、不返回我界面的问题。"},
-            {"0.5.15",
-                    "关于我们里的联系作者和检测更新换成更贴合功能的新图标。",
-                    "修复震动强度分段文字偏下，选中胶囊和文字保持同一中心线。",
-                    "接入 Android 系统返回回调，继续优化个性化页面偶发侧滑返回失效。"},
-            {"0.5.16",
-                    "软件图标换成清新小本子汤碗图标。",
-                    "我页面把个人信息入口移到数据分组，放在数据与安全上方。",
-                    "云端同步新增进度条弹窗和完成提示。",
-                    "同步数据改为哈希判断，内容未变化时不重复上传，云端有其他设备新数据时会提示先同步到本地。"},
-            {"0.5.17",
-                    "今日提示词移除已经下线的长按文字插入 emoji 说明。",
-                    "关闭夜间模式时强制使用浅色界面配置，不再随手机深夜模式变黑。",
-                    "软件图标换成更简洁的餐具图标，个性化设置图标整体调浅。",
-                    "记录本子调整纸张与字体命名，足迹新增五种本子封面样式。"},
-            {"0.5.18",
-                    "升级时会清洗旧版已经保存的今日提示词，彻底移除长按文字添加 emoji 的过时说明。",
-                    "Android 12 及以上改用系统应用级夜间模式接口，关闭夜间模式后不再被手机强制变黑。"},
-            {"0.5.19",
-                    "本子封面升级为九种差异明显的可爱样式，并加入可视化封面预览网格。",
-                    "笔记本页面选择标题精简为纸张样式。",
-                    "夜间模式切换会留在主题页面，并以平滑交叉淡入淡出完成明暗过渡。"},
-            {"0.5.20",
-                    "九种本子封面都会根据日期变化配色、主图案、表情与排布，同一风格下每天也不重复。",
-                    "全局弹窗统一升级为半透明主题面板，并对后方页面进行强模糊处理。",
-                    "软件名称正式更改为一蔬一饭，启动器名称、分享水印与应用内文案同步更新。"},
-            {"0.5.20 (restart)",
-                    "同一封面风格的每日构图进一步拉开差异，主图案与大面积背景结构都会随日期改变。",
-                    "全局弹窗改为内部明显半透明，外部页面只保留轻微模糊。",
-                    "足迹展开布局新增年月分组、封面热量和可实时预览的本子间距设置。",
-                    "足迹页面布局的原始选项更名为平滑。",
-                    "分享吃饭本子的两种界面都恢复清晰可见的一蔬一饭右下角水印。"},
-            {"0.5.20 (ultimate)",
-                    "本子封面扩展为十八种可视化样式，新增可爱、商务、淡彩、经典笔记和多色拼接封面。",
-                    "长按足迹本子可按餐填写热量与消费，手动热量优先于 AI 估算，封面可同时展示总热量与总消费。",
-                    "足迹设置重新整理选项顺序，分享水印改用笔记字体，全局弹窗的半透明模糊质感进一步增强。",
-                    "今日、足迹、日历、我、贴纸栏、营养师和吃饭本子启用固定磨砂顶栏，滚动内容会在顶栏后方模糊呈现。",
-                    "全局纵向页面加大边缘回弹距离并放缓回位动画。"},
-            {"0.5.20 (final)",
-                    "固定顶栏改为滚动后一帧异步捕获背景，解决 Android 16 上背景快照无法进入模糊层的问题。",
-                    "顶栏使用硬件模糊与彩色玻璃渐变组合，滚动内容会形成浓模糊水滴玻璃质感。",
-                    "调用 API 的说明改为兼容 DeepSeek、Xiaomi MiMo、MiniMax 等国内大模型。",
-                    "调用 API 弹窗新增 API 官网入口，可直接打开三家模型厂商的官方控制台。"},
-            {"0.5.20 (end)",
-                    "修复已知Bug"},
-            {"0.5.21",
-                     "顶栏透明开关改为原地切换，开启和关闭时不再重建页面闪烁。",
-                     "吃饭本子的每张纸统一固定高度，记录过长时可在纸张内部上下滑动查看。",
-                     "漫黑、站酷快乐体和马善政手写改为云端字体，按需下载并显示进度。",
-                     "主题新增全局字体跟随笔记字体，顶栏和底栏继续保持系统字体。"},
-            {"0.5.21 (restart)",
-                     "恢复吃饭本子的舒适纸张高度，较长记录可在纸张内部滚动查看。",
-                     "修复全局字体下个人签名裁切和营养师提示气泡未跟随的问题。",
-                     "我页面新增关于该软件入口，更新教程并修复足迹标题误触日历。",
-                     "营养师个人信息弹窗保持四角圆润，并新增常见食物热量参考。"},
-            {"0.5.21 (ultimate)",
-                      "我页将 ID 调整到昵称右侧，并修复小屏设备个性签名裁切。",
-                      "修复日历卡片边角阴影，优化大量贴纸时进入贴纸栏的速度。",
-                      "个性化设置新增统一的界面布局页面，并重新整理记录本封面与笔记页面入口。",
-                      "所有自定义字体改为云端按需下载，保留已下载文件并明显缩小安装包。"},
-            {"0.5.21 (final)",
-                      "关于该软件新增字体来源页，可查看全部云端字体的 GitHub 开源项目。",
-                      "修复拍照完成后照片没有加入所选早餐、午餐或晚餐的问题。",
-                      "拍照目标餐次和照片地址会临时保存在本机，相机导致应用进程重建后也不会丢失。",
-                      "为相机显式授权照片写入，并在返回后等待完整图片写入、自动重试读取。",
-                      "餐次右侧相机图标进一步调浅，保持半透明并跟随当前主题色。",
-                      "足迹年份只在跨年边界显示，个性化子页返回后会恢复原来的滚动位置。",
-                      "页面切换过渡更加舒缓，底栏我支持从任意设置子页直接返回我首页。"},
-            {"0.5.21 (endness)",
-                      "重构拍照输出通道，修复部分安卓 16 设备拍照完成后图片未加入所选餐次的问题。",
-                      "兼容相机返回地址与应用输出地址，照片写入稍有延迟时会自动短暂重试。",
-                      "餐次右侧相机图标改为更浅的半透明主题色，减弱灰暗感。"},
-            {"0.5.22",
-                      "降低选图、拍照、贴纸、本子和分享页面的图片内存峰值，修复使用中偶发闪退。",
-                      "云端备份改为限流式上传与下载，修复自动同步读取超大数据时可能直接退出的问题。",
-                      "底栏外边距与内部留白改为四周对称，阴影轮廓更加平衡。",
-                      "笔记字体完整移动到个性化的界面布局 > 足迹中。",
-                      "长按足迹本子可收藏当天记录，数据与安全新增收藏记录页面。"},
-            {"0.5.23",
-                      "修复隐藏贴纸后横滑餐次会让卡片变高、贴纸数量下移和意外出现输入光标的问题。",
-                      "底栏整体略微缩小，椭圆外部保持透明，阴影与页面边缘的四周留白统一。",
-                      "收藏星选中颜色调浅，收藏记录列表更加紧凑，并可切换为足迹同款展开布局。"},
-            {"0.5.24",
-                      "修复打开应用时偶发显示 UTF-8 解码技术错误的问题，自动同步兼容新旧云端接口。",
-                      "长按餐次图片或贴纸后新增向左旋转按钮，折叠与展开状态均可逐张旋转或删除。",
-                      "媒体拖动改为原尺寸插入排序，支持移动到间隙和末尾，并降低误叠放概率。",
-                      "阻止系统长按图片功能接管拖动手势，修复分享面板意外弹出；右下角添加图片按钮轻微上移。"},
-            {"0.5.25",
-                       "修复 API 配置无法自动识别正确接入地址、检测时间过长或检测失败的问题。",
-                       "检测后仅展示当前 API Key 实际可用的模型，避免混入其他服务商模型。",
-                       "检测与保存改为两个清晰步骤，选择模型后可稳定保存接入地址、模型与模式。"},
-            {"0.5.26",
-                       "检测更新结果弹窗按内容自适应高度，不再留下大块空白。",
-                       "个性化新增更多设置，集中管理三餐通知、自定义提醒时间与可用 AI 功能。",
-                       "首页只能切换到今天或更早日期，滑动和日期选择均不会进入未来。",
-                       "加固荣耀与华为设备的启动兼容性，系统特效不兼容时会自动使用稳定样式。"}
     };
     private static final String[] DINING_METHOD_OPTIONS = {"食堂", "线下餐厅", "外卖", "自己做"};
     private static final String[] MEAL_HABIT_OPTIONS = {"一天1~2餐", "一天2~3餐", "一天3~4餐", "一天4餐以上"};
@@ -802,15 +336,27 @@ public class MainActivity extends Activity {
     private FrameLayout content;
     private FrameLayout navHost;
     private View navIndicator;
+    private ViewTreeObserver.OnPreDrawListener pendingNavIndicatorLayout,pendingNavClick;
+    private long navClickGeneration;
+    private int pendingNavTab=-1;
     private LinearLayout navBar;
     private TextView fab;
-    private ImageView fabIcon;
+    private View manualFoodButton;
     private JSONObject days;
     private JSONObject profile;
     private int currentTab = 0;
     private int viewingYear;
     private int viewingMonth;
     private String homeDateKey;
+    private Calendar todayWeekAnchor;
+    private String todayWeekSelection;
+    private boolean homeCalendarExpanded;
+    private boolean homeCalendarPickedDuringExpansion;
+    private HomeCalendarView homeCollapseTarget;
+    private android.view.VelocityTracker homeCollapseTracker;
+    private float homeCollapseDownX, homeCollapseDownY;
+    private int homeCollapsePointer = -1;
+    private boolean homeCollapseDragging, homeCollapseCancelled;
     private String selectedCalendarDate;
     private int accent = Color.rgb(86, 191, 112);
     private int accentSoft = Color.rgb(224, 246, 228);
@@ -818,29 +364,28 @@ public class MainActivity extends Activity {
     private int pageBgBottom = Color.rgb(239, 246, 255);
     private boolean calendarCollapsed = false;
     private int hintSeed;
+    private final HashMap<String,String> manualMealPromptHistory = new HashMap<String,String>();
+    private final java.util.Random manualMealPromptRandom = new java.util.Random();
     private int textureMode = 0;
     private String pendingPhotoDate;
     private String pendingPhotoMeal;
     private Uri pendingMealCameraUri;
     private Uri pendingSharedStickerUri;
-    private boolean samNativeLoaded = false;
-    private boolean samNativeTried = false;
     private boolean inPreferencesPage = false;
     private boolean inHintManagerPage = false;
     private boolean inVibrationPage = false;
     private boolean inStickerSettingsPage = false;
-    private boolean inStackSettingsPage = false;
-    private boolean inFootprintSettingsPage = false;
     private boolean inNotebookSettingsPage = false;
     private boolean inDataSecurityPage = false;
     private boolean inCloudSyncPage = false;
     private boolean inRecycleBinPage = false;
     private boolean inFavoriteRecordsPage = false;
-    private boolean inHiddenSettingsPage = false;
-    private boolean inHomeManagerPage = false;
+    private boolean favoriteRecordsFromBooks;
     private boolean inInterfaceLayoutPage = false;
     private boolean inMoreSettingsPage = false;
-    private boolean inExperimentalPage = false;
+    private boolean inSmartAssistantPage = false;
+    private String smartAssistantSection = "";
+    private boolean foodAdvancedExpanded;
     private boolean inApiOfficialSitesPage = false;
     private boolean inStickerGalleryPage = false;
     private boolean inAiAnalysisPage = false;
@@ -852,9 +397,152 @@ public class MainActivity extends Activity {
     private boolean resumeAboutAfterUpdateLog = false;
     private int preferencesScrollY = 0;
     private ImageView themeModeTransitionOverlay;
+    private PageCrossfade pageCrossfade;
+    private boolean cachedRootReturn,returnWorkExecuting;
+    private boolean startupRecoveryBlocked;
+    private long returnRequestGeneration;
+    private Runnable returnAfterDraw;
+    private java.lang.ref.WeakReference<View> navigationPress;
+    private ViewTreeObserver returnDrawObserver;
+    private ViewTreeObserver.OnDrawListener returnDrawListener;
+
+    private void cancelReturnFeedback(){
+        returnRequestGeneration++;
+        if(root!=null&&returnAfterDraw!=null)root.removeCallbacks(returnAfterDraw);
+        if(returnDrawObserver!=null&&returnDrawObserver.isAlive()&&returnDrawListener!=null)
+            returnDrawObserver.removeOnDrawListener(returnDrawListener);
+        returnAfterDraw=null;returnDrawObserver=null;returnDrawListener=null;
+    }
+    /** Let the pressed control reach one real frame before preparing a return. No timer. */
+    private boolean afterReturnFeedback(final Runnable action){
+        if(returnWorkExecuting||root==null||!root.isAttachedToWindow()||!root.isShown()||!ValueAnimator.areAnimatorsEnabled())return false;
+        if(returnAfterDraw!=null)return true;
+        final long request=++returnRequestGeneration;
+        returnAfterDraw=()->{
+            if(request!=returnRequestGeneration)return;
+            cancelReturnFeedback();returnWorkExecuting=true;
+            View pressed=navigationPress==null?null:navigationPress.get();navigationPress=null;
+            if(pressed!=null){pressed.animate().cancel();pressed.setScaleX(1);pressed.setScaleY(1);}
+            try{action.run();}finally{returnWorkExecuting=false;}
+        };
+        returnDrawObserver=root.getViewTreeObserver();
+        returnDrawListener=new ViewTreeObserver.OnDrawListener(){
+            private boolean posted;
+            public void onDraw(){if(!posted&&request==returnRequestGeneration&&returnAfterDraw!=null){posted=true;root.post(returnAfterDraw);}}
+        };
+        returnDrawObserver.addOnDrawListener(returnDrawListener);root.invalidate();return true;
+    }
+    private RootPagePager rootPager;
+    private long rootPagerGeneration;
+    private boolean rootStopped,rootCacheEvicted;
+    private int rootCacheScroll;
+    private String rootHomeRestoreDate;
+    private void rememberRootHomeDestination(){
+        if(rootPagesVisible()){
+            View day=rootPager.page(0).findViewWithTag("today_day_pager");
+            if(day instanceof TodayDayPager)rootHomeRestoreDate=dateKey(((TodayDayPager)day).rootDestination());
+        }
+    }
+    private void preservePendingHomeReturn(){
+        if(!rootPagesVisible())return;
+        View day=rootPager.page(0).findViewWithTag("today_day_pager");
+        if(day instanceof TodayDayPager&&((TodayDayPager)day).hasPendingRootMotion())rememberRootHomeDestination();
+    }
+    private void releaseBackgroundRootPages(){
+        if(!rootStopped||rootPager==null)return;
+        RootPagePager previous=rootPager;boolean live=rootPagesVisible();previous.freeze();
+        if(live){currentTab=rootTab(previous.target());rememberRootHomeDestination();rootCacheScroll=currentContentScrollY();rootCacheEvicted=true;}
+        rootPagerGeneration++;rootPager=null;
+        if(live)content.removeView(previous);rootPagesDirty=true;
+    }
+    private boolean rootPagesDirty;
+    private String rootPagesDay;
+    private final SharedPreferences.OnSharedPreferenceChangeListener rootDataListener=(store,key)->{
+        if(DATA_KEY.equals(key)||PROFILE_KEY.equals(key))invalidateRootPages();
+    };
+    private final Runnable refreshRootPages=new Runnable(){public void run(){
+        if(rootStopped||!rootPagesDirty||!rootPagesVisible()||isFinishing()||isDestroyed())return;
+        if(mediaPreviewActive())return;
+        View day=content.findViewWithTag("today_day_pager"),calendar=content.findViewWithTag("home_calendar");
+        if(windowTouchActive||bookOpeningOverlay!=null||rootPager.isInteracting()||pageCrossfade!=null&&pageCrossfade.active()||activeGlassDialogCount>0||activeOverlay!=null||foodProcessing!=null||!editingMediaItems.isEmpty()||getCurrentFocus() instanceof EditText||!hasWindowFocus()
+                ||day instanceof TodayDayPager&&((TodayDayPager)day).isInteracting()
+                ||calendar instanceof HomeCalendarView&&((HomeCalendarView)calendar).isInteracting()){
+            root.postDelayed(this,120);return;
+        }
+        rememberRootHomeDestination();int y=currentContentScrollY();days=readJson(DATA_KEY);profile=readProfile();applyDecoration();
+        renderCurrent();restoreScrollPosition(currentPageScroll(),y);
+    }};
+    private boolean rootPagesVisible(){return rootPager!=null&&rootPager.getParent()==content&&content!=null&&content.indexOfChild(rootPager)>=0;}
+    private boolean mediaPreviewActive(){return inPhotoViewer||photoOverlay!=null||aiPreviewOverlay!=null;}
+    private void invalidateRootPages(){rootPagesDirty=true;if(root!=null&&!rootStopped){root.removeCallbacks(refreshRootPages);if(!mediaPreviewActive())root.postDelayed(refreshRootPages,120);}}
+    private void resumeDeferredRootRefresh(){
+        if(root==null||rootStopped||mediaPreviewActive()||isFinishing()||isDestroyed())return;
+        if(rootPagesDirty){root.removeCallbacks(refreshRootPages);root.post(refreshRootPages);}
+        if(homeFoodRefreshPending){homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);homeFoodRefreshHandler.post(homeFoodRefresh);}
+    }
+    private static int rootIndex(int tab){return tab==0?0:tab==1?1:2;}
+    private static int rootTab(int index){return index==2?3:index;}
+    private void positionRootIndicator(float position){
+        if(!rootPagesVisible()||!rootPager.isInteracting()||navIndicator==null||navIndicator.getWidth()<=0||navBar.getWidth()<=0)return;
+        if(!navPeerActive){cancelPendingNavIndicatorLayout();navIndicatorGeneration++;navIndicator.animate().cancel();navPeerActive=true;}
+        int left=Math.min(1,(int)Math.floor(position)),right=left+1;float t=Math.max(0,Math.min(1,position-left));
+        float width=lerp(navItemWidth(rootTab(left)),navItemWidth(rootTab(right)),t);
+        navIndicator.setVisibility(View.VISIBLE);navIndicator.setPivotX(0);navIndicator.setScaleX(width/navIndicator.getWidth());
+        navIndicator.setTranslationX(lerp(navItemX(rootTab(left)),navItemX(rootTab(right)),t));
+    }
+    private void installRootPages(){
+        if(rootPager!=null)rootPager.freeze();
+        homeFoodRefreshPending=false;homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);
+        boolean suppress=suppressEntryAnimation;suppressEntryAnimation=true;View[] pages;
+        String todayDate=rootHomeRestoreDate==null?homeDate():rootHomeRestoreDate;rootHomeRestoreDate=null;
+        try{pages=new View[]{buildTodayRoot(todayDate),buildBooksRoot(),buildMeRoot()};}finally{suppressEntryAnimation=suppress;}
+        rootPagesDirty=false;rootCacheEvicted=false;rootPagesDay=dateKey(Calendar.getInstance());
+        final long generation=++rootPagerGeneration;final RootPagePager[] installed={null};
+        RootPagePager created=new RootPagePager(this,pages,rootIndex(currentTab),new RootPagePager.Listener(){
+            public void onProgress(float position){if(installed[0]!=null&&generation==rootPagerGeneration&&installed[0]==rootPager)positionRootIndicator(position);}
+            public void onTarget(int index){
+                if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;currentTab=rootTab(index);navPeerActive=true;
+                updateNav(false);updateFab();
+            }
+            public void onRest(int index){
+                if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;currentTab=rootTab(index);
+                navPeerActive=false;navIndicator.setScaleX(1);updateNav(false);updateFab();finishPeerIndicator(effectiveNavTab());
+                if(rootPagesDirty){root.removeCallbacks(refreshRootPages);root.postDelayed(refreshRootPages,120);}
+            }
+        });
+        installed[0]=created;rootPager=created;
+        content.addView(rootPager,new FrameLayout.LayoutParams(-1,-1));rootPager.select(rootIndex(currentTab),false);
+    }
+
+    private FoodRecognitionSetup foodRecognitionSetup;
+    private int peerPointer=-1;
+    private float peerDownX,peerDownY;
+    private boolean peerTracking,peerDragging,peerExisting,peerSwallow,navPeerActive;
+    private long navIndicatorGeneration;
+    private android.view.VelocityTracker peerTracker;
+    private boolean windowTouchActive,homeFoodRefreshPending;
+    private final Handler homeFoodRefreshHandler=new Handler();
+    private final Runnable homeFoodRefresh=new Runnable(){public void run(){
+        if(!homeFoodRefreshPending||isFinishing()||isDestroyed())return;
+        if(mediaPreviewActive())return;
+        if(currentTab!=0||!mainPeerVisible()){homeFoodRefreshPending=false;return;}
+        if(!hasWindowFocus())return;
+        View pager=content.findViewWithTag("today_day_pager"),calendar=content.findViewWithTag("home_calendar");
+        if(windowTouchActive||activeGlassDialogCount>0||activeOverlay!=null||foodProcessing!=null||rootPagesVisible()&&rootPager.isInteracting()||!editingMediaItems.isEmpty()||pageCrossfade!=null&&pageCrossfade.active()
+                ||pager instanceof TodayDayPager&&((TodayDayPager)pager).isInteracting()
+                ||calendar instanceof HomeCalendarView&&((HomeCalendarView)calendar).isInteracting()){
+            homeFoodRefreshHandler.postDelayed(this,80);return;
+        }
+        homeFoodRefreshPending=false;renderCurrent();
+    }};
     private int themeModeTransitionScrollY = 0;
     private ValueAnimator photoFabAnimator;
     private boolean inBookDetail = false;
+    private boolean bookClosePending;
+    private long bookCloseGeneration;
+    private String bookEntryDate;
+    private int bookShelfScrollY,bookShelfScrollX;
+    private void cancelPendingBookClose(){bookClosePending=false;bookCloseGeneration++;}
     private boolean inPhotoViewer = false;
     private boolean resumePreferencesOnMe = false;
     private View aiPreviewOverlay;
@@ -865,6 +553,8 @@ public class MainActivity extends Activity {
     private View photoOverlay;
     private View glassToastView;
     private int activeGlassDialogCount = 0;
+    private final java.util.IdentityHashMap<AlertDialog,Long> glassDialogOwners=new java.util.IdentityHashMap<>();
+    private long glassDialogGeneration;
     private final Handler glassToastHandler = new Handler();
     private LinearLayout stickerGalleryList;
     private TextView stickerGroupModePill;
@@ -884,6 +574,7 @@ public class MainActivity extends Activity {
     private LinearLayout aiAnalysisResultView;
     private LinearLayout aiChatListView;
     private ScrollView aiAnalysisScrollView;
+    private LiquidGlassBarLayout aiChatBar;
     private EditText aiQuestionInput;
     private long lastPageFlipSoundAt = 0L;
     private final List<View> editingMediaItems = new ArrayList<View>();
@@ -914,6 +605,12 @@ public class MainActivity extends Activity {
     private final HashMap<String, Typeface> downloadedTypefaceCache = new HashMap<String, Typeface>();
     private final ExecutorService stickerGalleryExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService mediaThumbnailExecutor = Executors.newFixedThreadPool(3);
+    // Full-screen requests must not wait behind the bookshelf thumbnail queue.
+    private final ExecutorService photoViewerExecutor = Executors.newSingleThreadExecutor();
+    private final HashMap<String, ArrayList<java.lang.ref.WeakReference<ImageView>>> mediaThumbnailInFlight = new HashMap<>();
+    private long mediaThumbnailEpoch;
+    private volatile long photoViewerGeneration;
+    private Runnable resetPhotoViewerTarget;
     private final LruCache<String, Bitmap> mediaThumbnailCache = new LruCache<String, Bitmap>(thumbnailCacheBytes()) {
         @Override
         protected int sizeOf(String key, Bitmap value) {
@@ -925,40 +622,13 @@ public class MainActivity extends Activity {
     private boolean pendingMealNotificationEnable = false;
 
     private static Context configuredNightContext(Context base) {
-        boolean followSystem = false;
-        try {
-            SharedPreferences stored = base.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            JSONObject savedProfile = new JSONObject(stored.getString(PROFILE_KEY, "{}"));
-            followSystem = savedProfile.optBoolean("followSystemNight", false);
-        } catch (JSONException ignored) {
-        }
-        try {
-            if (Build.VERSION.SDK_INT >= 31) {
-                android.app.UiModeManager manager = base.getSystemService(android.app.UiModeManager.class);
-                if (manager != null) {
-                    int mode = followSystem ? manager.getNightMode() : android.app.UiModeManager.MODE_NIGHT_NO;
-                    if (mode < android.app.UiModeManager.MODE_NIGHT_AUTO
-                            || mode > android.app.UiModeManager.MODE_NIGHT_CUSTOM) {
-                        mode = android.app.UiModeManager.MODE_NIGHT_NO;
-                    }
-                    manager.setApplicationNightMode(mode);
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        if (followSystem) {
-            return base;
-        }
-        try {
-            android.content.res.Configuration configuration =
-                    new android.content.res.Configuration(base.getResources().getConfiguration());
-            configuration.uiMode = (configuration.uiMode
-                    & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK)
-                    | android.content.res.Configuration.UI_MODE_NIGHT_NO;
-            return base.createConfigurationContext(configuration);
-        } catch (Throwable ignored) {
-            return base;
-        }
+        JSONObject savedProfile=NutritionStore.read(base.getSharedPreferences(PREFS,Context.MODE_PRIVATE),PROFILE_KEY);
+        boolean systemNight=(android.content.res.Resources.getSystem().getConfiguration().uiMode&android.content.res.Configuration.UI_MODE_NIGHT_MASK)==android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        boolean night=AppearanceMode.isNight(savedProfile,systemNight);
+        try{if(Build.VERSION.SDK_INT>=31){android.app.UiModeManager manager=base.getSystemService(android.app.UiModeManager.class);if(manager!=null)manager.setApplicationNightMode(night?android.app.UiModeManager.MODE_NIGHT_YES:android.app.UiModeManager.MODE_NIGHT_NO);}}catch(RuntimeException ignored){}
+        android.content.res.Configuration configuration=new android.content.res.Configuration(base.getResources().getConfiguration());
+        configuration.uiMode=(configuration.uiMode&~android.content.res.Configuration.UI_MODE_NIGHT_MASK)|(night?android.content.res.Configuration.UI_MODE_NIGHT_YES:android.content.res.Configuration.UI_MODE_NIGHT_NO);
+        return base.createConfigurationContext(configuration);
     }
 
     @Override
@@ -977,8 +647,14 @@ public class MainActivity extends Activity {
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         preferSmoothDisplay();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        try{BackupRestoreRecovery.recover(this);}catch(IllegalStateException unavailable){
+            startupRecoveryBlocked=true;startActivity(new Intent(this,RestoreRecoveryActivity.class));finish();return;
+        }
+        FoodRecognitionRetirement.apply(this);
+        prefs.registerOnSharedPreferenceChangeListener(rootDataListener);
         days = readJson(DATA_KEY);
         profile = readProfile();
+
         cleanupRetiredDownloadedFonts();
         applyNightModeOverride();
         cleanupRecycleBin();
@@ -1001,14 +677,20 @@ public class MainActivity extends Activity {
         installSystemBackCallback();
 
         content = new FrameLayout(this);
+        content.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
+            if((r-l!=or-ol||b-t!=ob-ot)&&navPeerActive) {
+                clearPeerPointer();
+                if(pageCrossfade!=null)pageCrossfade.clear();finishPeerIndicator(effectiveNavTab());
+                updateNavIndicator(false);
+            }
+        });
         disableForceDark(content);
         FrameLayout.LayoutParams contentLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT);
         root.addView(content, contentLp);
 
-        LiquidGlassNavLayout glassNav = new LiquidGlassNavLayout(this);
-        glassNav.setBlurSource(content);
+        PaperNavLayout glassNav = new PaperNavLayout(this);
         navHost = glassNav;
         disableForceDark(navHost);
         navHost.setPadding(dp(7), dp(7), dp(7), dp(7));
@@ -1024,6 +706,7 @@ public class MainActivity extends Activity {
         root.addView(navHost, navLp);
 
         navIndicator = new View(this);
+        navIndicator.setVisibility(View.INVISIBLE);
         disableForceDark(navIndicator);
         navIndicator.setBackground(round(accentSoft, dp(26), 0, 0));
         FrameLayout.LayoutParams navIndicatorLp = new FrameLayout.LayoutParams(
@@ -1036,10 +719,13 @@ public class MainActivity extends Activity {
         disableForceDark(navBar);
         navBar.setOrientation(LinearLayout.HORIZONTAL);
         navBar.setGravity(Gravity.CENTER);
+        navBar.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
+            if(!navPeerActive&&(l!=ol||t!=ot||r!=or||b!=ob))updateNavIndicator(false);
+        });
         navHost.addView(navBar, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        fab = new PhotoFabButton(this);
+        fab = new TextView(this);
         disableForceDark(fab);
         fab.setText("");
         fab.setTextColor(photoFabIconColor());
@@ -1053,20 +739,16 @@ public class MainActivity extends Activity {
         root.addView(fab, fabLp);
         attachPressAnimation(fab);
 
-        fabIcon = new ImageView(this);
-        disableForceDark(fabIcon);
-        fabIcon.setImageResource(R.drawable.ic_photo_upload);
-        fabIcon.setColorFilter(photoFabIconColor());
-        fabIcon.setScaleType(ImageView.ScaleType.CENTER);
-        fabIcon.setClickable(false);
-        FrameLayout.LayoutParams fabIconLp = new FrameLayout.LayoutParams(dp(spaceByLayout(42, 40, 38)), dp(spaceByLayout(42, 40, 38)));
-        fabIconLp.gravity = Gravity.RIGHT | Gravity.BOTTOM;
-        fabIconLp.rightMargin = dp(24 + spaceByLayout(10, 9, 9));
-        fabIconLp.bottomMargin = dp(photoFabBottomMargin() + spaceByLayout(10, 9, 9));
-        root.addView(fabIcon, fabIconLp);
+        manualFoodButton = new View(this);
+        manualFoodButton.setTag("manual_add_food");
+        manualFoodButton.setContentDescription("手写记录餐食，不上传图片");
+        manualFoodButton.setFocusable(true);manualFoodButton.setOnClickListener(v -> chooseMealForText());
+        FrameLayout.LayoutParams penLp=new FrameLayout.LayoutParams(dp(56),dp(56),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
+        penLp.bottomMargin=dp(photoFabBottomMargin());manualFoodButton.setTranslationX(dp(58));
+        root.addView(manualFoodButton,penLp);attachPressAnimation(manualFoodButton);
 
         buildNav();
-        int startTab = Math.max(0, Math.min(TAB_TITLES.length - 1, profile.optInt("startTab", 0)));
+        int startTab = 0; // Always open Today; retain old preference only for backup compatibility.
         boolean openedFromMealReminder = getIntent() != null
                 && getIntent().getBooleanExtra(MealReminderReceiver.EXTRA_OPEN_FROM_REMINDER, false);
         if (openedFromMealReminder) {
@@ -1076,24 +758,26 @@ public class MainActivity extends Activity {
         if (pendingPhotoDate != null && pendingPhotoMeal != null) {
             startTab = 0;
         }
-        if (startTab == 2 && (calendarHidden() || footprintCalendarMerged())) {
-            startTab = 1;
-        }
-        if (settingsHidden() && startTab == 3) {
-            startTab = 0;
-        }
         showTab(startTab, false);
         MealReminderReceiver.ensureScheduled(this);
-        maybeShowStartupAnnouncement();
-        handleIncomingShare(getIntent());
-        maybeAutoCloudSync(false);
+        maybeShowStartupAnnouncement();root.postDelayed(()->maybeShowRecognitionSetup(),700);
+        handleIncomingShare(getIntent());maybeAutoCloudSync(false);
+
     }
 
     @Override
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        if(startupRecoveryBlocked)return;
+        cancelReturnFeedback();
+        cancelPendingBookClose();backSwipeTracking=false;if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();
+        clearPeerPointer();
+        if(pageCrossfade!=null)pageCrossfade.clear();finishPeerIndicator(effectiveNavTab());
         boolean keepThemeSettingsVisible = inThemeSettingsPage;
-        int previousScrollY = currentContentScrollY();
+        boolean keepAssistantVisible = inSmartAssistantPage;
+        boolean keepRemindersVisible = inMoreSettingsPage;
+        boolean keepPreferencesVisible = inPreferencesPage;
+        int previousScrollY = keepThemeSettingsVisible&&themeModeTransitionOverlay!=null?themeModeTransitionScrollY:currentContentScrollY();
         applyNightModeOverride();
         applyDecoration();
         updateSystemBars();
@@ -1106,8 +790,8 @@ public class MainActivity extends Activity {
         }
         if (navHost != null) {
             navHost.setBackgroundColor(Color.TRANSPARENT);
-            if (navHost instanceof LiquidGlassNavLayout) {
-                ((LiquidGlassNavLayout) navHost).refreshGlass();
+            if (navHost instanceof PaperNavLayout) {
+                ((PaperNavLayout) navHost).refreshPaper();
             }
             navHost.setElevation(0f);
         }
@@ -1117,21 +801,65 @@ public class MainActivity extends Activity {
             renderThemeSettingsPage();
             suppressEntryAnimation = wasSuppressing;
             restoreScrollPosition(currentPageScroll(), previousScrollY);
+        } else if(keepAssistantVisible) {
+            renderCurrentAssistantSettingsPage();restoreScrollPosition(currentPageScroll(),previousScrollY);
+        } else if(keepRemindersVisible) {
+            renderMealReminderSettingsPage();restoreScrollPosition(currentPageScroll(),previousScrollY);
+        } else if(keepPreferencesVisible) {
+            renderPreferencesPage(previousScrollY);
         } else {
             renderCurrent();
         }
         updateFab();
+        updateNavIndicator(false);
     }
-
     @Override
     protected void onResume() {
-        super.onResume();
+        super.onResume();rootStopped=false;
+        if(startupRecoveryBlocked)return;
+        if (!foodReceiverRegistered) {
+            IntentFilter filter = new IntentFilter(FoodAnalysisJobService.CHANGED);
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(foodReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            else registerReceiver(foodReceiver, filter);
+            foodReceiverRegistered = true;
+        }
+        synchronized (NutritionStore.LOCK) { NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
+        if(rootCacheEvicted){int saved=rootCacheScroll;profile=readProfile();renderCurrent();restoreScrollPosition(currentPageScroll(),saved);}
+        FoodAnalysisJobService.schedule(this, false, 0);
+        resumeFoodProcessing();
+        if(rootPagesVisible()){rootPager.resume();if(!dateKey(Calendar.getInstance()).equals(rootPagesDay))invalidateRootPages();}
         preferSmoothDisplay();
         maybeAutoCloudSync(false);
     }
 
     @Override
+    protected void onStop(){if(startupRecoveryBlocked){super.onStop();return;}cancelPendingBookClose();rootStopped=true;if(rootPager!=null)rootPager.freeze();root.removeCallbacks(refreshRootPages);cancelPendingNavClick();windowTouchActive=false;homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);clearPeerPointer();if(pageCrossfade!=null)pageCrossfade.clear();finishPeerIndicator(effectiveNavTab());cancelThemeModeTransition();super.onStop();}
+    @Override public void onWindowFocusChanged(boolean focused){
+        super.onWindowFocusChanged(focused);
+        if(focused&&homeFoodRefreshPending){homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);homeFoodRefreshHandler.post(homeFoodRefresh);}
+        if(focused&&root!=null&&profile!=null)root.post(()->maybeShowRecognitionSetup());
+    }
+
+    @Override protected void onPause(){photoViewerGeneration++;if(resetPhotoViewerTarget!=null)resetPhotoViewerTarget.run();cancelReturnFeedback();super.onPause();}
+
+    @Override
     protected void onDestroy() {
+        if(startupRecoveryBlocked){stickerGalleryExecutor.shutdownNow();mediaThumbnailExecutor.shutdownNow();photoViewerExecutor.shutdownNow();super.onDestroy();return;}
+        cancelReturnFeedback();
+        for(AlertDialog dialog:new ArrayList<AlertDialog>(glassDialogOwners.keySet()))dialog.dismiss();
+        glassDialogOwners.clear();activeGlassDialogCount=0;clearDialogBackgroundBlur();
+        cancelPendingBookClose();if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();
+        cancelPendingNavClick();cancelPendingNavIndicatorLayout();
+        rootPagerGeneration++;
+        if(prefs!=null)prefs.unregisterOnSharedPreferenceChangeListener(rootDataListener);
+        if(root!=null)root.removeCallbacks(refreshRootPages);if(rootPager!=null)rootPager.freeze();
+        if(foodRecognitionSetup!=null)foodRecognitionSetup.dispose();
+        if(pageCrossfade!=null)pageCrossfade.clear();
+        cancelThemeModeTransition();
+        clearHomeCollapseGesture();
+        destroyingFoodUi = true;
+        if (foodProcessing != null) foodProcessing.dismiss();
+        if (foodReceiverRegistered) { unregisterReceiver(foodReceiver); foodReceiverRegistered = false; }
         for (ValueAnimator animator : new ArrayList<ValueAnimator>(mealPhotoBodyAnimators.values())) {
             animator.cancel();
         }
@@ -1139,6 +867,7 @@ public class MainActivity extends Activity {
         stickerGalleryLoadGeneration++;
         stickerGalleryExecutor.shutdownNow();
         mediaThumbnailExecutor.shutdownNow();
+        photoViewerGeneration++;photoViewerExecutor.shutdownNow();mediaThumbnailEpoch++;mediaThumbnailInFlight.clear();
         mediaThumbnailCache.evictAll();
         super.onDestroy();
     }
@@ -1146,6 +875,7 @@ public class MainActivity extends Activity {
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
+        if(rootStopped&&level>=android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN)releaseBackgroundRootPages();
         if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
             mediaThumbnailCache.trimToSize(Math.max(1024 * 1024, thumbnailCacheBytes() / 4));
         }
@@ -1156,7 +886,7 @@ public class MainActivity extends Activity {
 
     @Override
     public void onLowMemory() {
-        mediaThumbnailCache.evictAll();
+        releaseBackgroundRootPages();mediaThumbnailCache.evictAll();
         super.onLowMemory();
     }
 
@@ -1212,15 +942,12 @@ public class MainActivity extends Activity {
         if (intent == null || !intent.getBooleanExtra(MealReminderReceiver.EXTRA_OPEN_FROM_REMINDER, false)) {
             return false;
         }
-        homeDateKey = dateKey(Calendar.getInstance());
+        rootHomeRestoreDate=null;homeDateKey = dateKey(Calendar.getInstance());invalidateRootPages();
         intent.removeExtra(MealReminderReceiver.EXTRA_OPEN_FROM_REMINDER);
         if (root != null) {
-            if (currentTab == 0) {
-                renderCurrent();
-                updateFab();
-            } else {
-                showTab(0, true);
-            }
+            if(rootPagesVisible())showTab(0,false);
+            else if (currentTab == 0) {renderCurrent();updateFab();}
+            else showTab(0,true);
         }
         return true;
     }
@@ -1246,6 +973,15 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
+        if(startupRecoveryBlocked)return super.dispatchTouchEvent(event);
+        if(event.getActionMasked()==MotionEvent.ACTION_DOWN){
+            if(bookOpeningOverlay!=null&&bookOpeningOverlay.closing&&containsRawPoint(navHost,event.getRawX(),event.getRawY()))bookOpeningOverlay.finish();
+            windowTouchActive=true;if(rootPagesVisible()&&!dateKey(Calendar.getInstance()).equals(rootPagesDay))invalidateRootPages();}
+        if(event.getActionMasked()==MotionEvent.ACTION_UP||event.getActionMasked()==MotionEvent.ACTION_CANCEL){
+            windowTouchActive=false;if(homeFoodRefreshPending){homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);homeFoodRefreshHandler.postDelayed(homeFoodRefresh,80);}
+        }
+        if (dispatchPeerSwipe(event)) return true;
+        if (dispatchHomeCalendarCollapse(event)) return true;
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
             clearTextFocusIfTouchOutside(event.getRawX(), event.getRawY());
             backSwipeDownX = event.getRawX();
@@ -1269,8 +1005,139 @@ public class MainActivity extends Activity {
         return super.dispatchTouchEvent(event);
     }
 
+    /** Root peers are adjacent sheets. Nested date/media gestures keep their own stream. */
+    private boolean dispatchPeerSwipe(MotionEvent event){
+        int action=event.getActionMasked();
+        if(peerSwallow&&action!=MotionEvent.ACTION_DOWN){if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)peerSwallow=false;return true;}
+        if(action==MotionEvent.ACTION_DOWN){
+            if(!containsRawPoint(navHost,event.getRawX(),event.getRawY()))cancelPendingNavClick();
+            peerSwallow=false;clearPeerPointer();
+            if(!rootPagesVisible()||bookOpeningOverlay!=null||inPhotoViewer||inBookDetail||inStickerGalleryPage||inAiAnalysisPage||activeOverlay!=null||photoOverlay!=null||aiPreviewOverlay!=null||foodProcessing!=null||!editingMediaItems.isEmpty()||activeGlassDialogCount>0||!containsRawPoint(content,event.getRawX(),event.getRawY())
+                    ||containsRawPoint(navHost,event.getRawX(),event.getRawY())
+                    ||fab!=null&&fab.isClickable()&&containsRawPoint(fab,event.getRawX(),event.getRawY())
+                    ||manualFoodButton!=null&&manualFoodButton.getVisibility()==View.VISIBLE&&containsRawPoint(manualFoodButton,event.getRawX(),event.getRawY()))return false;
+            boolean moving=rootPager.isInteracting();
+            if(!moving&&nestedHorizontalAt(content,event.getRawX(),event.getRawY(),0))return false;
+            peerTracking=true;peerExisting=moving;peerPointer=event.getPointerId(0);peerDownX=event.getRawX();peerDownY=event.getRawY();
+            peerTracker=android.view.VelocityTracker.obtain();peerTracker.addMovement(event);
+            if(moving)rootPager.grab();return false;
+        }
+        if(!peerTracking)return false;
+        if(peerTracker!=null)peerTracker.addMovement(event);
+        if(action==MotionEvent.ACTION_POINTER_DOWN||event.findPointerIndex(peerPointer)<0){
+            MotionEvent cancel=MotionEvent.obtain(event);cancel.setAction(MotionEvent.ACTION_CANCEL);super.dispatchTouchEvent(cancel);cancel.recycle();
+            if(peerDragging||peerExisting)rootPager.release(0,true);
+            clearPeerPointer();peerSwallow=action!=MotionEvent.ACTION_UP&&action!=MotionEvent.ACTION_CANCEL;return true;
+        }
+        float dx=event.getRawX()-peerDownX,dy=event.getRawY()-peerDownY;
+        if(action==MotionEvent.ACTION_MOVE){
+            int slop=Math.max(dp(10),android.view.ViewConfiguration.get(this).getScaledTouchSlop());
+            if(!peerDragging&&Math.abs(dy)>slop&&Math.abs(dy)>Math.abs(dx)*1.3f){if(peerExisting)rootPager.release(0,false);clearPeerPointer();return false;}
+            if(!peerDragging&&Math.abs(dx)>slop&&Math.abs(dx)>Math.abs(dy)*1.3f){
+                if(!peerExisting&&nestedHorizontalAt(content,peerDownX,peerDownY,dx<0?1:-1)){clearPeerPointer();return false;}
+                MotionEvent cancel=MotionEvent.obtain(event);cancel.setAction(MotionEvent.ACTION_CANCEL);super.dispatchTouchEvent(cancel);cancel.recycle();clearHomeCollapseGesture();
+                // Ignore outward root gestures at rest without pausing Today or starting a spring.
+                if(!peerExisting&&((rootPager.position()<=0&&dx>0)||(rootPager.position()>=2&&dx<0))){
+                    clearPeerPointer();peerSwallow=true;return true;
+                }
+                if(!peerExisting)rootPager.grab();peerDragging=true;
+            }
+            if(peerDragging)rootPager.drag(dx);return peerDragging;
+        }
+        if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL){
+            boolean owned=peerDragging;float velocity=0;
+            if(peerTracker!=null&&peerPointer>=0){peerTracker.computeCurrentVelocity(1000,android.view.ViewConfiguration.get(this).getScaledMaximumFlingVelocity());velocity=peerTracker.getXVelocity(peerPointer);}
+            if(owned){if(action==MotionEvent.ACTION_UP)rootPager.drag(dx);rootPager.release(velocity,action!=MotionEvent.ACTION_UP);}
+            else if(peerExisting)rootPager.release(0,action!=MotionEvent.ACTION_UP);
+            clearPeerPointer();return owned;
+        }
+        return peerDragging;
+    }
+    private void clearPeerPointer(){
+        if(peerTracker!=null){peerTracker.recycle();peerTracker=null;}
+        peerTracking=peerDragging=peerExisting=false;peerPointer=-1;
+    }
+    private boolean mainPeerVisible(){
+        if(content==null||content.getChildCount()==0)return false;
+        Object tag=content.getChildAt(0).getTag();return tag!=null&&tag.toString().startsWith("main_peer_");
+    }
+    private boolean nestedHorizontalAt(View view,float x,float y,int direction){
+        if(view.getVisibility()!=View.VISIBLE||!containsRawPoint(view,x,y))return false;
+        if(view instanceof TodayDayPager||view instanceof HomeCalendarView
+                ||view instanceof EditText||view instanceof SeekBar)return true;
+        if(view instanceof HorizontalScrollView)return direction!=0&&view.canScrollHorizontally(direction);
+        if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=group.getChildCount()-1;i>=0;i--)
+            if(nestedHorizontalAt(group.getChildAt(i),x,y,direction))return true;}
+        return false;
+    }
+
+    /** Observe MainActivity's window, including the paper/FAB, without changing dialog gestures. */
+    private boolean dispatchHomeCalendarCollapse(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            clearHomeCollapseGesture();
+            if(bookOpeningOverlay!=null||rootPagesVisible()&&rootPager.isInteracting())return false;
+            View calendar = currentTab == 0 && content != null
+                    ? content.findViewWithTag("home_calendar") : null;
+            if (!(calendar instanceof HomeCalendarView) || !((HomeCalendarView)calendar).canCollapse()
+                    || !editingMediaItems.isEmpty()) return false;
+            homeCollapseTarget = (HomeCalendarView)calendar;
+            homeCollapseDownX = event.getX();homeCollapseDownY = event.getY();homeCollapsePointer = event.getPointerId(0);
+            homeCollapseTracker = android.view.VelocityTracker.obtain();homeCollapseTracker.addMovement(event);
+            return false;
+        }
+        if (homeCollapseTarget == null) return false;
+        if (homeCollapseTracker != null) homeCollapseTracker.addMovement(event);
+        if (action == MotionEvent.ACTION_POINTER_DOWN) {
+            if (homeCollapseDragging) {
+                homeCollapseTarget.endExternalCollapse(0, true);homeCollapseCancelled = true;return true;
+            }
+            clearHomeCollapseGesture();return false;
+        }
+        int index = event.findPointerIndex(homeCollapsePointer);
+        float dx = index < 0 ? 0 : event.getX(index) - homeCollapseDownX;
+        float dy = index < 0 ? 0 : event.getY(index) - homeCollapseDownY;
+        if (action == MotionEvent.ACTION_MOVE && !homeCollapseCancelled) {
+            if (!homeCollapseTarget.isAttachedToWindow() || !editingMediaItems.isEmpty()) {
+                boolean owned = homeCollapseDragging;
+                if (owned) homeCollapseTarget.endExternalCollapse(0, true);
+                clearHomeCollapseGesture();return owned;
+            }
+            int slop = Math.max(dp(10), android.view.ViewConfiguration.get(this).getScaledTouchSlop());
+            if (!homeCollapseDragging && Math.abs(dx) > slop && Math.abs(dx) > Math.abs(dy) * 1.3f) {
+                clearHomeCollapseGesture();return false;
+            }
+            if (!homeCollapseDragging && dy < -slop && -dy > Math.abs(dx) * 1.3f) {
+                if (!homeCollapseTarget.beginExternalCollapse()) { clearHomeCollapseGesture();return false; }
+                homeCollapseDragging = true;
+                MotionEvent cancel = MotionEvent.obtain(event);cancel.setAction(MotionEvent.ACTION_CANCEL);
+                super.dispatchTouchEvent(cancel);cancel.recycle();
+            }
+            if (homeCollapseDragging) { homeCollapseTarget.updateExternalCollapse(-dy);return true; }
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            boolean owned = homeCollapseDragging;
+            if (owned && !homeCollapseCancelled) {
+                float velocity = 0;
+                if (homeCollapseTracker != null && homeCollapsePointer >= 0) {
+                    homeCollapseTracker.computeCurrentVelocity(1000);velocity = homeCollapseTracker.getYVelocity(homeCollapsePointer);
+                }
+                homeCollapseTarget.endExternalCollapse(velocity, action != MotionEvent.ACTION_UP);
+            }
+            clearHomeCollapseGesture();return owned;
+        }
+        return homeCollapseDragging;
+    }
+
+    private void clearHomeCollapseGesture() {
+        if (homeCollapseDragging && !homeCollapseCancelled && homeCollapseTarget != null
+                && homeCollapseTarget.isAttachedToWindow()) homeCollapseTarget.endExternalCollapse(0, true);
+        if (homeCollapseTracker != null) { homeCollapseTracker.recycle();homeCollapseTracker = null; }
+        homeCollapseTarget = null;homeCollapsePointer = -1;homeCollapseDragging = false;homeCollapseCancelled = false;
+    }
+
     private boolean shouldTrackBackSwipe(float rawX) {
-        if (rawX > dp(24)) {
+        if (bookClosePending||bookOpeningOverlay!=null&&bookOpeningOverlay.closing||rawX > dp(24)) {
             return false;
         }
         return inPreferencesPage || inThemeSettingsPage || inProfileSettingsPage || inAboutSoftwarePage || inUpdateLogPage
@@ -1286,13 +1153,6 @@ public class MainActivity extends Activity {
         hideKeyboard();
     }
 
-    private void clearCurrentTextFocus() {
-        View focus = getCurrentFocus();
-        if (focus instanceof EditText) {
-            focus.clearFocus();
-            hideKeyboard();
-        }
-    }
 
     private boolean touchInsideEditingMedia(float rawX, float rawY) {
         for (View item : editingMediaItems) {
@@ -1337,10 +1197,6 @@ public class MainActivity extends Activity {
         if (uri == null) {
             return;
         }
-        if (!uploadCutoutEnabled()) {
-            showGlassToast("在贴纸设置里开启上传贴纸后，就可以从分享面板导入啦", Toast.LENGTH_LONG);
-            return;
-        }
         pendingSharedStickerUri = uri;
         try {
             getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -1359,29 +1215,18 @@ public class MainActivity extends Activity {
             return;
         }
         final String date = homeDate();
-        final List<MealOption> meals = visibleMealsForDate(date);
-        if (meals.isEmpty()) {
-            showGlassToast("还没有可记录的餐别", Toast.LENGTH_SHORT);
-            return;
-        }
-        String[] names = new String[meals.size()];
-        for (int i = 0; i < meals.size(); i++) {
-            names[i] = "贴到" + meals.get(i).title;
-        }
-        showChoiceDialog("导入贴纸", names, 0, new ChoiceHandler() {
+        final String[] keys = {"breakfast", "lunch", "dinner"};
+        showChoiceDialog("添加图片", new String[]{"早餐", "午餐", "晚餐"}, 0, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
-                if (which < 0 || which >= meals.size() || pendingSharedStickerUri == null) {
+                if (which < 0 || which >= keys.length || pendingSharedStickerUri == null) {
                     return;
                 }
-                Bitmap bitmap = decodeBitmap(pendingSharedStickerUri, dp(900));
-                if (bitmap == null) {
-                    showGlassToast("贴纸读取失败", Toast.LENGTH_SHORT);
-                    return;
-                }
-                saveImportedMealSticker(date, meals.get(which).key, bitmap);
+                Uri source = pendingSharedStickerUri;
                 pendingSharedStickerUri = null;
-                showTab(0, true);
+                showTab(0, false);
+                pendingPhotoDate = date; pendingPhotoMeal = keys[which];
+                importSelectedMealMediaAsync(java.util.Collections.singletonList(source), false);
             }
         });
     }
@@ -1389,10 +1234,7 @@ public class MainActivity extends Activity {
     private void buildNav() {
         navBar.removeAllViews();
         for (int i = 0; i < TAB_TITLES.length; i++) {
-            if ((i == 2 && (calendarHidden() || footprintCalendarMerged()))
-                    || (settingsHidden() && i == 3)) {
-                continue;
-            }
+            if (i == 2) continue; // Calendar belongs to Today, never a separate/merged Footprints tab.
             final int index = i;
             LinearLayout item = new LinearLayout(this);
             item.setTag(Integer.valueOf(index));
@@ -1400,10 +1242,16 @@ public class MainActivity extends Activity {
             item.setGravity(Gravity.CENTER);
             item.setPadding(dp(6), dp(3), dp(6), dp(2));
             item.setClickable(true);
-            attachPressAnimation(item);
+            item.setOnTouchListener((v,event)->{
+                int action=event.getActionMasked();
+                if(action==MotionEvent.ACTION_DOWN){v.animate().cancel();v.setScaleX(.97f);v.setScaleY(.97f);v.setAlpha(.72f);}
+                else if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)v.animate().scaleX(1).scaleY(1).alpha(1).setDuration(160).setInterpolator(UiTokens.motionEaseOut()).start();
+                return false;
+            });
             item.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
+                    cancelPendingNavClick();
                     if (index == 3 && currentTab == 3) {
                         if (isMeSubPageVisible()) {
                             returnToMeRoot();
@@ -1418,12 +1266,7 @@ public class MainActivity extends Activity {
                         }
                         return;
                     }
-                    if (index == 1 && footprintCalendarMerged() && !calendarHidden()
-                            && (currentTab == 1 || currentTab == 2)) {
-                        showFootprintsCalendar(currentTab != 2);
-                        return;
-                    }
-                    showTab(index, true);
+                    requestTabFromNav(index);
                 }
             });
             LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(0,
@@ -1433,17 +1276,47 @@ public class MainActivity extends Activity {
         updateNav(false);
     }
 
+    private void cancelPendingNavClick(){
+        navClickGeneration++;
+        if(pendingNavClick!=null&&navHost!=null&&navHost.getViewTreeObserver().isAlive())navHost.getViewTreeObserver().removeOnPreDrawListener(pendingNavClick);
+        pendingNavClick=null;
+        View pressed=findNavItem(pendingNavTab);pendingNavTab=-1;
+        if(pressed!=null){pressed.animate().cancel();pressed.setAlpha(1);pressed.setScaleX(1);pressed.setScaleY(1);}
+    }
+    private void requestTabFromNav(final int tab){
+        cancelPendingNavClick();
+        if(rootPagesVisible()){showTab(tab,true);return;}
+        final long generation=navClickGeneration;pendingNavTab=tab;
+        View pressed=findNavItem(tab);if(pressed!=null){pressed.animate().cancel();pressed.setAlpha(.72f);pressed.setScaleX(.97f);pressed.setScaleY(.97f);}
+        pendingNavClick=new ViewTreeObserver.OnPreDrawListener(){
+            public boolean onPreDraw(){
+                if(navHost.getViewTreeObserver().isAlive())navHost.getViewTreeObserver().removeOnPreDrawListener(this);
+                if(pendingNavClick==this)pendingNavClick=null;
+                if(generation==navClickGeneration)navHost.post(()->{if(generation==navClickGeneration&&!isFinishing()&&!isDestroyed())showTab(tab,true);});
+                return true;
+            }
+        };
+        navHost.getViewTreeObserver().addOnPreDrawListener(pendingNavClick);navHost.invalidate();
+    }
+
     private void updateNav(boolean animateIndicator) {
         for (int i = 0; i < navBar.getChildCount(); i++) {
             LinearLayout item = (LinearLayout) navBar.getChildAt(i);
-            item.removeAllViews();
             Object tag = item.getTag();
             int tabIndex = tag instanceof Integer ? ((Integer) tag).intValue() : i;
             boolean active = tabIndex == effectiveNavTab();
             item.setBackground(null);
-
+            if(item.getChildCount()==2&&item.getChildAt(0) instanceof TabIconView&&item.getChildAt(1) instanceof TextView){
+                ((TabIconView)item.getChildAt(0)).setIconColor(active?accent:Color.rgb(150,150,150));
+                TextView title=(TextView)item.getChildAt(1);
+                title.setTextColor(themedTextColor(active?Color.rgb(32,32,32):Color.rgb(145,145,145)));
+                title.setTextSize(scaled(13));resetSystemTypefaceRecursive(title);
+                item.animate().cancel();item.setScaleX(1);item.setScaleY(1);item.setAlpha(1);
+                continue;
+            }
+            item.removeAllViews();
             View icon;
-            if (tabIndex == 0 || tabIndex == 1) {
+            if (tabIndex == 0 || tabIndex == 1 || tabIndex == 3) {
                 TabIconView iconView = new TabIconView(this, tabIndex);
                 iconView.setIconColor(active ? accent : Color.rgb(150, 150, 150));
                 iconView.setTranslationY(dp(2));
@@ -1461,44 +1334,75 @@ public class MainActivity extends Activity {
             item.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(21)));
             item.animate().cancel();
             item.setScaleX(1f);
-            item.setScaleY(1f);
+            item.setScaleY(1f);item.setAlpha(1f);
         }
         updateNavIndicator(animateIndicator);
     }
 
     private void updateNavIndicator(final boolean animated) {
-        if (navHost == null || navBar == null || navIndicator == null) {
-            return;
-        }
-        navHost.post(new Runnable() {
-            @Override
-            public void run() {
-                View target = findNavItem(effectiveNavTab());
-                if (target == null || target.getWidth() == 0) {
-                    return;
-                }
-                int targetWidth = Math.max(dp(74), target.getWidth() - dp(6));
-                ViewGroup.LayoutParams lp = navIndicator.getLayoutParams();
-                if (lp.width != targetWidth) {
-                    lp.width = targetWidth;
-                    navIndicator.setLayoutParams(lp);
-                }
-                navIndicator.setBackground(round(accentSoft, dp(26), 0, 0));
-                float targetX = target.getLeft() + (target.getWidth() - targetWidth) / 2f;
-                navIndicator.animate().cancel();
-                if (animated) {
-                    navIndicator.animate()
-                            .translationX(targetX)
-                            .setDuration(300)
-                            .setInterpolator(new android.view.animation.DecelerateInterpolator(1.65f))
-                            .start();
-                } else {
-                    navIndicator.setTranslationX(targetX);
-                }
-            }
-        });
+        requestNavIndicator(effectiveNavTab(),animated);
     }
 
+    private void cancelPendingNavIndicatorLayout() {
+        if(pendingNavIndicatorLayout!=null&&navHost!=null&&navHost.getViewTreeObserver().isAlive())
+            navHost.getViewTreeObserver().removeOnPreDrawListener(pendingNavIndicatorLayout);
+        pendingNavIndicatorLayout=null;
+    }
+
+    private void requestNavIndicator(final int tab,final boolean animated) {
+        cancelPendingNavIndicatorLayout();
+        final long generation=++navIndicatorGeneration;
+        if(navHost==null||navBar==null||navIndicator==null||navPeerActive)return;
+        if(placeNavIndicator(tab,animated))return;
+        // Slot widths are zero during onCreate. Wait for both the slots and
+        // the resized indicator before allowing its first visible frame.
+        pendingNavIndicatorLayout=new ViewTreeObserver.OnPreDrawListener(){
+            @Override public boolean onPreDraw(){
+                if(pendingNavIndicatorLayout!=this||generation!=navIndicatorGeneration||navPeerActive){
+                    if(navHost.getViewTreeObserver().isAlive())navHost.getViewTreeObserver().removeOnPreDrawListener(this);
+                    if(pendingNavIndicatorLayout==this)pendingNavIndicatorLayout=null;
+                    return true;
+                }
+                if(!placeNavIndicator(tab,animated))return false;
+                cancelPendingNavIndicatorLayout();
+                return true;
+            }
+        };
+        navHost.getViewTreeObserver().addOnPreDrawListener(pendingNavIndicatorLayout);
+        navHost.requestLayout();navHost.invalidate();
+    }
+
+    private boolean placeNavIndicator(int tab,boolean animated) {
+        View target=findNavItem(tab);
+        if(target==null){navIndicator.setVisibility(View.INVISIBLE);return true;}
+        if(navHost.getWidth()<=0||navBar.getWidth()<=0||target.getWidth()<=0){
+            navIndicator.setVisibility(View.INVISIBLE);return false;
+        }
+        int width=Math.max(dp(74),target.getWidth()-dp(6));
+        ViewGroup.LayoutParams lp=navIndicator.getLayoutParams();
+        if(lp.width!=width){lp.width=width;navIndicator.setLayoutParams(lp);}
+        if(navIndicator.getWidth()!=width){navIndicator.setVisibility(View.INVISIBLE);return false;}
+        float x=target.getLeft()+(target.getWidth()-width)*.5f;
+        navIndicator.setBackground(round(accentSoft,dp(26),0,0));
+        navIndicator.animate().cancel();navIndicator.setScaleX(1);navIndicator.setVisibility(View.VISIBLE);
+        if(animated)navIndicator.animate().translationX(x).setDuration(300)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.65f)).start();
+        else navIndicator.setTranslationX(x);
+        return true;
+    }
+
+    private float navItemWidth(int tab){
+        View item=findNavItem(tab);return item==null?navIndicator.getLayoutParams().width
+                :Math.max(dp(74),item.getWidth()-dp(6));
+    }
+    private float navItemX(int tab){
+        View item=findNavItem(tab);return item==null?navIndicator.getTranslationX()
+                :item.getLeft()+(item.getWidth()-navItemWidth(tab))*.5f;
+    }
+    private void finishPeerIndicator(int tab){
+        navPeerActive=false;
+        requestNavIndicator(tab,false);
+    }
     private View findNavItem(int tab) {
         if (navBar == null) {
             return null;
@@ -1514,41 +1418,36 @@ public class MainActivity extends Activity {
     }
 
     private int effectiveNavTab() {
-        if (currentTab == 2 && footprintCalendarMerged()) {
-            return 1;
-        }
-        if (settingsHidden() && currentTab == 3) {
-            return calendarHidden() || footprintCalendarMerged() ? 1 : 2;
-        }
+        if (currentTab == 2) return 0;
         return currentTab;
     }
 
     private void showTab(final int tab, boolean animated) {
-        if (tab == 2 && calendarHidden()) {
-            return;
-        }
+        photoViewerGeneration++;
+        cancelReturnFeedback();
+        cancelPendingBookClose();if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();cancelThemeModeTransition();
+        cancelPendingNavClick();
+        if(tab==2){homeCalendarExpanded=true;showTab(0,animated);return;}
         final int oldTab = currentTab;
+        final boolean peer=mainPeerVisible();
+        clearPeerPointer();
         if (animated && tab == oldTab) {
             return;
         }
         boolean leavingPreferences = inPreferencesPage && tab != 3;
         boolean restorePreferences = tab == 3 && resumePreferencesOnMe;
         inPreferencesPage = false;
+        inSmartAssistantPage = false;
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inNotebookSettingsPage = false;
         inDataSecurityPage = false;
         inCloudSyncPage = false;
         inRecycleBinPage = false;
         inFavoriteRecordsPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
-        inExperimentalPage = false;
         inApiOfficialSitesPage = false;
         inStickerGalleryPage = false;
         inAiAnalysisPage = false;
@@ -1574,14 +1473,17 @@ public class MainActivity extends Activity {
         if (animated) {
             playTabFeedback();
         }
-        updateNav(animated);
-        updateFab();
+        boolean cachedSwitch=animated&&rootPagesVisible()&&(pageCrossfade==null||!pageCrossfade.active())&&!restorePreferences;
+        if(cachedSwitch)navPeerActive=true;
+        else{updateNav(animated);updateFab();}
         if (!animated) {
+            if(pageCrossfade!=null)pageCrossfade.clear();
+            finishPeerIndicator(effectiveNavTab());
             renderCurrent();
             return;
         }
         final float direction = tab > oldTab ? 1 : -1;
-        smoothContentSwap(new Runnable() {
+        Runnable render=new Runnable() {
             @Override
             public void run() {
                 if (restorePreferences) {
@@ -1590,21 +1492,15 @@ public class MainActivity extends Activity {
                     renderCurrent();
                 }
             }
-        }, direction);
+        };
+        if(peer&&rootPagesVisible()&&(pageCrossfade==null||!pageCrossfade.active())&&!restorePreferences){
+            if(pageCrossfade!=null&&pageCrossfade.active())pageCrossfade.clear();
+            rootPager.select(rootIndex(tab),true);
+        }else smoothContentSwap(render,direction);
     }
-
     private boolean navHapticEnabled() {
         return profile == null || profile.optBoolean("navHaptic", true);
     }
-
-    private boolean calendarHapticEnabled() {
-        return profile == null || profile.optBoolean("calendarHaptic", true);
-    }
-
-    private boolean pageSwipeHapticEnabled() {
-        return profile == null || profile.optBoolean("pageSwipeHaptic", true);
-    }
-
     private boolean mediaEditHapticEnabled() {
         return profile == null || profile.optBoolean("mediaEditHaptic", true);
     }
@@ -1630,13 +1526,6 @@ public class MainActivity extends Activity {
         playHapticFeedback(navHapticEnabled());
     }
 
-    private void playCalendarFeedback() {
-        playHapticFeedback(calendarHapticEnabled());
-    }
-
-    private void playPageSwipeFeedback() {
-        playHapticFeedback(pageSwipeHapticEnabled());
-    }
 
     private void playPageFlipSound() {
         if (!bookFlipSoundEnabled()) {
@@ -1729,122 +1618,62 @@ public class MainActivity extends Activity {
     }
 
     private void smoothContentSwap(final Runnable renderAction, final float direction) {
-        if (isPreferencesRootVisible()) {
-            preferencesScrollY = currentContentScrollY();
-        }
-        content.animate().cancel();
-        content.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        suppressEntryAnimation = true;
-        try {
-            renderAction.run();
-        } finally {
-            suppressEntryAnimation = false;
-        }
-        content.setTranslationX(dp(16) * direction);
-        content.setAlpha(0.985f);
-        content.animate()
-                .alpha(1f)
-                .translationX(0f)
-                .setDuration(460)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.38f))
-                .withEndAction(new Runnable() {
-                    @Override
-                    public void run() {
-                        content.setAlpha(1f);
-                        content.setTranslationX(0f);
-                        content.setLayerType(View.LAYER_TYPE_NONE, null);
-                    }
-                }).start();
+        smoothContentSwap(renderAction,direction,false);
     }
 
-    private void softContentSwap(final Runnable renderAction) {
-        content.animate().cancel();
-        content.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        suppressEntryAnimation = true;
-        try {
-            renderAction.run();
-        } finally {
-            suppressEntryAnimation = false;
+    private void smoothContentSwap(final Runnable renderAction, final float direction,boolean gentle) {
+        photoViewerGeneration++;
+        if(direction<0&&afterReturnFeedback(()->smoothContentSwap(renderAction,direction,gentle)))return;
+        cancelReturnFeedback();
+        cancelPendingBookClose();if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();cancelThemeModeTransition();
+        cancelPendingNavClick();if(rootPagesVisible()){preservePendingHomeReturn();rootPager.freeze();}
+        if(navPeerActive){
+            clearPeerPointer();
+            finishPeerIndicator(effectiveNavTab());
         }
-        content.setAlpha(0f);
-        content.setTranslationY(dp(8));
-        content.setScaleX(0.992f);
-        content.setScaleY(0.992f);
-        content.animate()
-                .alpha(1f)
-                .translationY(0f)
-                .scaleX(1f)
-                .scaleY(1f)
-                .setDuration(380)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.34f))
-                .withEndAction(new Runnable() {
-                    @Override
-                    public void run() {
-                        content.setAlpha(1f);
-                        content.setTranslationY(0f);
-                        content.setScaleX(1f);
-                        content.setScaleY(1f);
-                        content.setLayerType(View.LAYER_TYPE_NONE, null);
-                    }
-                }).start();
+        if(isPreferencesRootVisible())preferencesScrollY=currentContentScrollY();
+        if(pageCrossfade==null)pageCrossfade=new PageCrossfade(content);
+        pageCrossfade.setPaperColor(UiTokens.paper(nightDecoration()));
+        pageCrossfade.setPaperBackground(root.getBackground());
+        pageCrossfade.run(()->{
+            boolean previous=suppressEntryAnimation,previousReturn=cachedRootReturn;
+            suppressEntryAnimation=true;cachedRootReturn=direction<0;
+            try{renderAction.run();}finally{suppressEntryAnimation=previous;cachedRootReturn=previousReturn;}
+        },direction,gentle);
     }
+    private void softContentSwap(final Runnable renderAction) { smoothContentSwap(renderAction,1f); }
 
     private void renderCurrent() {
+        photoViewerGeneration++;
+        // Clean Me/books roots are already laid out. Reusing them avoids rebuilding
+        // three pages on Back. Today is rebuilt because detached media owns its decode lifecycle.
+        boolean reuse=cachedRootReturn&&(currentTab==1||currentTab==3)&&rootPager!=null&&rootPager.getParent()==null
+                &&!rootPagesDirty&&!rootCacheEvicted&&rootHomeRestoreDate==null
+                &&dateKey(Calendar.getInstance()).equals(rootPagesDay)
+                &&rootPager.getWidth()==content.getWidth()&&rootPager.getHeight()==content.getHeight()
+                &&(pageCrossfade==null||!pageCrossfade.retains(rootPager));
         exitMediaEditMode(false);
-        inPreferencesPage = false;
-        inHintManagerPage = false;
-        inVibrationPage = false;
-        inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
-        inNotebookSettingsPage = false;
-        inDataSecurityPage = false;
-        inCloudSyncPage = false;
-        inRecycleBinPage = false;
-        inFavoriteRecordsPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
-        inInterfaceLayoutPage = false;
-        inMoreSettingsPage = false;
-        inExperimentalPage = false;
-        inApiOfficialSitesPage = false;
-        inStickerGalleryPage = false;
-        inAiAnalysisPage = false;
-        inUpdateLogPage = false;
-        inThemeSettingsPage = false;
-        inProfileSettingsPage = false;
-        inAboutSoftwarePage = false;
-        inFontSourcesPage = false;
-        inBookDetail = false;
-        returnToFavoriteRecordsAfterBook = false;
-        inPhotoViewer = false;
-        bookDetailSwipeFrame = null;
-        aiPreviewOverlay = null;
-        photoOverlay = null;
-        calendarCardHost = null;
-        calendarCardView = null;
-        calendarSummaryView = null;
-        root.setBackground(pageBackground());
-        content.removeAllViews();
-        if (currentTab == 0) {
-            renderToday();
-        } else if (currentTab == 1) {
-            renderBooks();
-        } else if (currentTab == 2) {
-            renderCalendar();
-        } else {
-            renderMe();
-        }
+        clearPreferencesSubPageFlags();
+        inPreferencesPage=false;inStickerGalleryPage=false;inAiAnalysisPage=false;inUpdateLogPage=false;
+        inThemeSettingsPage=false;inProfileSettingsPage=false;inAboutSoftwarePage=false;inFontSourcesPage=false;
+        inBookDetail=false;returnToFavoriteRecordsAfterBook=false;inPhotoViewer=false;
+        bookDetailSwipeFrame=null;aiPreviewOverlay=null;photoOverlay=null;resetPhotoViewerTarget=null;
+        calendarCardHost=null;calendarCardView=null;calendarSummaryView=null;
+        root.setBackground(pageBackground());if(rootPager!=null)rootPager.freeze();content.removeAllViews();
+        if(currentTab==2){currentTab=0;homeCalendarExpanded=true;}
+        if(reuse){content.addView(rootPager,new FrameLayout.LayoutParams(-1,-1));rootPager.select(rootIndex(currentTab),false);}
+        else installRootPages();
     }
 
-    @Override
-    public void onBackPressed() {
-        if (!handleBackNavigation()) {
-            super.onBackPressed();
-        }
-    }
+    @Override public void onBackPressed(){if(startupRecoveryBlocked||!handleBackNavigation())super.onBackPressed();}
 
     private boolean handleBackNavigation() {
+        if(returnAfterDraw!=null)return true;
+        if(bookClosePending||bookOpeningOverlay!=null&&bookOpeningOverlay.closing)return true;
+        // Some system/key paths deliver both legacy and dispatcher callbacks for one Back.
+        long backNow=android.os.SystemClock.uptimeMillis();
+        if(backNow-lastBackNavigationAt<100)return true;
+        lastBackNavigationAt=backNow;
         if (aiPreviewOverlay != null) {
             closeAiStickerPreview();
             return true;
@@ -1912,10 +1741,6 @@ public class MainActivity extends Activity {
             closePreferencesPage();
             return true;
         }
-        if (settingsHidden() && currentTab == 3) {
-            showTab(2, true);
-            return true;
-        }
         if (currentTab == 2) {
             showTab(1, true);
             return true;
@@ -1931,6 +1756,15 @@ public class MainActivity extends Activity {
         if (!inPreferencesPage) {
             return false;
         }
+        if(inInterfaceLayoutPage){closeInterfaceLayoutPage();return true;}
+        if (inSmartAssistantPage && !smartAssistantSection.isEmpty()) {
+            smoothContentSwap(() -> renderSmartAssistantPage(), -1f);
+            return true;
+        }
+        if (inSmartAssistantPage) {
+            returnToMeRoot();
+            return true;
+        }
         if (inApiOfficialSitesPage) {
             smoothContentSwap(new Runnable() {
                 @Override
@@ -1941,10 +1775,10 @@ public class MainActivity extends Activity {
             }, -1f);
             return true;
         }
-        if (inHintManagerPage || inVibrationPage || inStickerSettingsPage || inStackSettingsPage
-                || inFootprintSettingsPage || inNotebookSettingsPage || inDataSecurityPage
-                || inCloudSyncPage || inRecycleBinPage || inHiddenSettingsPage || inHomeManagerPage
-                || inInterfaceLayoutPage || inMoreSettingsPage || inExperimentalPage) {
+        if (inHintManagerPage || inVibrationPage || inStickerSettingsPage
+                 || inNotebookSettingsPage || inDataSecurityPage
+                || inCloudSyncPage || inRecycleBinPage
+                || inInterfaceLayoutPage || inMoreSettingsPage || inSmartAssistantPage) {
             content.animate().cancel();
             smoothContentSwap(new Runnable() {
                 @Override
@@ -1962,28 +1796,24 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inNotebookSettingsPage = false;
         inDataSecurityPage = false;
         inCloudSyncPage = false;
         inRecycleBinPage = false;
         inFavoriteRecordsPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
-        inExperimentalPage = false;
+        inSmartAssistantPage = false;
         inApiOfficialSitesPage = false;
     }
 
     private boolean isPreferencesRootVisible() {
         return inPreferencesPage && !inHintManagerPage && !inVibrationPage
-                && !inStickerSettingsPage && !inStackSettingsPage
-                && !inFootprintSettingsPage && !inNotebookSettingsPage
+                && !inStickerSettingsPage
+                 && !inNotebookSettingsPage
                 && !inDataSecurityPage && !inCloudSyncPage && !inRecycleBinPage
-                && !inHiddenSettingsPage && !inHomeManagerPage
-                && !inInterfaceLayoutPage && !inMoreSettingsPage && !inExperimentalPage
+
+                && !inInterfaceLayoutPage && !inMoreSettingsPage && !inSmartAssistantPage
                 && !inApiOfficialSitesPage;
     }
 
@@ -2029,38 +1859,17 @@ public class MainActivity extends Activity {
     }
 
     private void updateFab() {
-        boolean show = currentTab == 0 && !inStickerGalleryPage && !inAiAnalysisPage;
-        fab.animate().alpha(show ? 1f : 0f).scaleX(show ? 1f : 0.8f).scaleY(show ? 1f : 0.8f).setDuration(160).start();
-        if (fabIcon != null) {
-            fabIcon.animate().alpha(show && !mealPhotoPickMode ? 1f : 0f)
-                    .scaleX(show && !mealPhotoPickMode ? 1f : 0.8f)
-                    .scaleY(show && !mealPhotoPickMode ? 1f : 0.8f)
-                    .setDuration(160).start();
-        }
+        boolean show = currentTab == 0 && !inStickerGalleryPage && !inAiAnalysisPage && !inBookDetail && !inPhotoViewer
+                && !inPreferencesPage && !inThemeSettingsPage && !inProfileSettingsPage;
+        fab.animate().alpha(show ? 1f : 0f).scaleX(show ? 1f : .8f).scaleY(show ? 1f : .8f).setDuration(160).start();
         fab.setClickable(show);
-        if (show) {
-            fab.bringToFront();
-            if (fabIcon != null) {
-                fabIcon.bringToFront();
-            }
-            updatePhotoFabState(mealPhotoPickMode);
-            fab.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    long now = System.currentTimeMillis();
-                    if (photoFabAnimator != null || now - lastPhotoFabTapAt < 720) {
-                        return;
-                    }
-                    lastPhotoFabTapAt = now;
-                    if (mealPhotoPickMode) {
-                        exitMealPhotoPickMode();
-                    } else {
-                        enterMealPhotoPickMode();
-                    }
-                }
-            });
-        } else {
-            fab.setOnClickListener(null);
+        if (show) { fab.bringToFront();updatePhotoFabState(false);fab.setOnClickListener(v -> chooseMealForPhoto()); }
+        else fab.setOnClickListener(null);
+        if (manualFoodButton != null) {
+            manualFoodButton.setVisibility(show ? View.VISIBLE : View.GONE);
+            manualFoodButton.setClickable(show);
+            manualFoodButton.setBackground(new ManualMealButtonDrawable(UiTokens.card(nightDecoration()),UiTokens.line(nightDecoration()),accent));
+            if(show)manualFoodButton.bringToFront();
         }
     }
 
@@ -2069,235 +1878,260 @@ public class MainActivity extends Activity {
     }
 
     private void updatePhotoFabState(boolean expanded) {
-        if (fab == null) {
-            return;
-        }
-        if (fab instanceof PhotoFabButton) {
-            ((PhotoFabButton) fab).setExpanded(expanded);
-        }
-        fab.setText(expanded ? "点击上面餐次添加图片或贴纸喔" : "▧");
-        fab.setSingleLine(true);
-        fab.setIncludeFontPadding(false);
-        fab.setPadding(expanded ? dp(20) : 0, 0, expanded ? dp(20) : 0, 0);
-        fab.setTextSize(expanded ? scaled(14) : scaled(24));
-        fab.setTextColor(expanded ? themedTextColor(Color.rgb(62, 92, 76)) : photoFabIconColor());
-        fab.setGravity(Gravity.CENTER);
-        fab.invalidate();
-        updatePhotoFabIconState(expanded);
-        fab.setBackground(round(expanded
-                        ? (nightDecoration() ? Color.argb(220, 42, 46, 48) : Color.argb(232, 246, 255, 250))
-                        : photoFabColor(),
-                dp(31), expanded ? adjustAlpha(accent, 112) : photoFabStrokeColor(), dp(2)));
-        ViewGroup.LayoutParams params = fab.getLayoutParams();
-        if (params instanceof FrameLayout.LayoutParams) {
-            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) params;
-            int screen = getResources().getDisplayMetrics().widthPixels;
-            lp.rightMargin = expanded ? dp(28) : dp(24);
-            lp.bottomMargin = dp(photoFabBottomMargin());
-            int targetW = expanded ? Math.min(screen - dp(56), dp(382))
-                    : dp(spaceByLayout(62, 58, 56));
-            int targetH = expanded ? dp(spaceByLayout(66, 62, 60)) : dp(spaceByLayout(62, 58, 56));
-            if (photoFabAnimator != null) {
-                photoFabAnimator.cancel();
-            }
-            ValueAnimator animator = ValueAnimator.ofInt(fab.getWidth() <= 0 ? lp.width : fab.getWidth(), targetW);
-            photoFabAnimator = animator;
-            animator.setDuration(expanded ? 260 : 210);
-            animator.setInterpolator(new android.view.animation.DecelerateInterpolator(1.65f));
-            animator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-                @Override
-                public void onAnimationUpdate(ValueAnimator animation) {
-                    FrameLayout.LayoutParams current = (FrameLayout.LayoutParams) fab.getLayoutParams();
-                    current.width = (Integer) animation.getAnimatedValue();
-                    current.height = targetH;
-                    fab.setLayoutParams(current);
-                    updatePhotoFabIconLayout(targetH);
-                }
-            });
-            animator.addListener(new android.animation.AnimatorListenerAdapter() {
-                @Override
-                public void onAnimationEnd(android.animation.Animator animation) {
-                    if (photoFabAnimator == animation) {
-                        photoFabAnimator = null;
-                    }
-                }
-            });
-            animator.start();
-        }
+        if (fab == null) return;
+        if(photoFabAnimator!=null){photoFabAnimator.cancel();photoFabAnimator=null;}
+        fab.setBackground(new RecognitionButtonDrawable(photoFabColor(),photoFabIconColor()));
+        fab.setText("");fab.setTag("smart_add_food");fab.setContentDescription("智能识别，拍照或从相册添加食物");
+        fab.setElevation(dp(3));fab.setTranslationX(-dp(34));
+        FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)fab.getLayoutParams();
+        lp.gravity=Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL;lp.rightMargin=0;lp.width=dp(104);lp.height=dp(56);lp.bottomMargin=dp(photoFabBottomMargin());fab.setLayoutParams(lp);
     }
 
-    private void updatePhotoFabIconState(boolean expanded) {
-        if (fabIcon == null) {
-            return;
-        }
-        fabIcon.setColorFilter(photoFabIconColor());
-        fabIcon.setVisibility(expanded ? View.GONE : View.VISIBLE);
-        fabIcon.setAlpha(expanded ? 0f : 1f);
-        fabIcon.setScaleX(expanded ? 0.82f : 1f);
-        fabIcon.setScaleY(expanded ? 0.82f : 1f);
-        updatePhotoFabIconLayout(dp(spaceByLayout(62, 58, 56)));
-        if (!expanded) {
-            fabIcon.bringToFront();
-        }
-    }
 
-    private void updatePhotoFabIconLayout(int fabSizePx) {
-        if (fabIcon == null) {
-            return;
-        }
-        ViewGroup.LayoutParams raw = fabIcon.getLayoutParams();
-        if (!(raw instanceof FrameLayout.LayoutParams)) {
-            return;
-        }
-        int buttonSize = fabSizePx > 0 ? fabSizePx : dp(spaceByLayout(62, 58, 56));
-        int iconSize = Math.max(dp(34), Math.round(buttonSize * 0.66f));
-        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) raw;
-        lp.width = iconSize;
-        lp.height = iconSize;
-        lp.gravity = Gravity.RIGHT | Gravity.BOTTOM;
-        lp.rightMargin = dp(24) + Math.max(0, (buttonSize - iconSize) / 2);
-        lp.bottomMargin = dp(photoFabBottomMargin()) + Math.max(0, (buttonSize - iconSize) / 2);
-        fabIcon.setLayoutParams(lp);
-    }
 
-    private void enterMealPhotoPickMode() {
-        if (mealPhotoPickMode) {
-            return;
-        }
-        mealPhotoPickMode = true;
-        applyMealPhotoPickModeToExistingRows(true);
-        updatePhotoFabState(true);
-    }
 
-    private void exitMealPhotoPickMode() {
-        if (!mealPhotoPickMode) {
-            return;
-        }
-        if (mealPhotoPickAwaitingResult) {
-            return;
-        }
-        mealPhotoPickMode = false;
-        applyMealPhotoPickModeToExistingRows(false);
-        updatePhotoFabState(false);
-    }
 
-    private void refreshMealPickHighlight(boolean active) {
-        if (todayMealListView == null) {
-            return;
-        }
-        for (int i = 0; i < todayMealListView.getChildCount(); i++) {
-            View row = todayMealListView.getChildAt(i);
-            View card = row.findViewWithTag(TAG_MEAL_CARD);
-            if (card != null) {
-                card.setBackground(active
-                        ? mealPickHighlightBackground(dp(spaceByLayout(18, 16, 14)))
-                        : mealCardBackground(dp(spaceByLayout(18, 16, 14))));
-                card.setElevation(active ? dp(5) : dp(2 + Math.round(mealCardGlassLevel() / 34f)));
-                card.animate().scaleX(active ? 1.015f : 1f).scaleY(active ? 1.015f : 1f).setDuration(180).start();
-            }
-        }
-    }
 
-    private Drawable mealPickHighlightBackground(int radius) {
-        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                new int[]{
-                        adjustAlpha(blendColor(accentSoft, Color.WHITE, nightDecoration() ? 0.28f : 0.20f), nightDecoration() ? 224 : 236),
-                        adjustAlpha(blendColor(accent, Color.WHITE, nightDecoration() ? 0.64f : 0.78f), nightDecoration() ? 218 : 232)
-                });
-        d.setCornerRadius(radius);
-        d.setStroke(0, Color.TRANSPARENT);
-        return d;
-    }
 
-    private int photoFabColor() {
-        if (nightDecoration()) {
-            return Color.argb(172, 72, 76, 84);
-        }
-        return adjustAlpha(blendColor(accentSoft, Color.WHITE, 0.42f), 210);
-    }
+    private int photoFabColor() { return UiTokens.action(nightDecoration()); }
 
-    private int photoFabStrokeColor() {
-        if (nightDecoration()) {
-            return Color.argb(92, 220, 226, 236);
-        }
-        return adjustAlpha(blendColor(accent, Color.WHITE, 0.34f), 178);
-    }
+    private int photoFabStrokeColor() { return Color.TRANSPARENT; }
 
-    private int photoFabIconColor() {
-        if (nightDecoration()) {
-            return Color.argb(188, 236, 240, 246);
-        }
-        return adjustAlpha(blendColor(accent, Color.rgb(26, 104, 70), 0.12f), 255);
-    }
+    private int photoFabIconColor() { return nightDecoration() ? UiTokens.paper(true) : Color.WHITE; }
 
     private void renderToday() {
+        renderTodayV2();
+    }
+
+    private void renderTodayV2() {
+        homeFoodRefreshPending=false;homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);
+        todayTitleView = null; todayDateView = null; todayHintView = null; todayMealListView = null;
+        content.addView(buildTodayRoot(),new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private View buildTodayRoot(){return buildTodayRoot(homeDate());}
+    private View buildTodayRoot(final String date) {
         FrameLayout host = new FrameLayout(this);
-        disableForceDark(host);
-        content.addView(host, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        ScrollView scroll = pageScroll();
+        host.setTag("main_peer_today");
         LinearLayout page = basePage();
-        scroll.addView(page);
-        host.addView(scroll, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        String key = homeDate();
-        Calendar selected = calendarFromKey(key);
-        JSONObject day = ensureDay(key);
-
+        page.setPadding(page.getPaddingLeft(), dp(UiTokens.HEADER_CORE + 12), page.getPaddingRight(), dp(photoFabBottomMargin() + 56 + 12));
+        host.addView(page, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout header = row(Gravity.CENTER_VERTICAL);
-        TextView title = label(homeTitle(key), 34, Color.rgb(28, 28, 30), true);
-        todayTitleView = title;
-        title.setClickable(true);
-        attachPressAnimation(title);
-        title.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (!stickerGalleryHidden()) {
-                    openStickerGalleryPage();
-                }
+        TextView brand = label("一蔬一饭", 26, UiTokens.ink(nightDecoration()), true);
+        brand.setContentDescription("一蔬一饭，点击打开美食栏"); brand.setTag("food_gallery_entry");
+        brand.setOnClickListener(v -> openStickerGalleryPage());
+        header.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView weekly = label("周报 ↗", 14, UiTokens.ink(nightDecoration()), true);
+        weekly.setGravity(Gravity.CENTER); weekly.setMinHeight(dp(48)); weekly.setMinWidth(dp(72));
+        weekly.setOnClickListener(v -> foodUi().weekly(homeDate())); header.addView(weekly);
+        installStickyHeader(host, page, header, false);
+        page.addView(createHomeCalendar(date));
+        TodayDayPager pager = new TodayDayPager(this, calendarFromKey(date),
+                day -> createTodayPaperViewport(dateKey(day)), new TodayDayPager.Listener() {
+            public boolean canSwipe() { return editingMediaItems.isEmpty(); }
+            public void onDayProgress(Calendar from,Calendar to,float progress){
+                View calendar=content==null?null:content.findViewWithTag("home_calendar");
+                if(calendar instanceof HomeCalendarView)((HomeCalendarView)calendar).setDayProgress(from,to,progress);
+            }
+            public void onVisibleDate(Calendar picked) { syncHomeVisibleDate(picked); }
+            public void onDate(Calendar picked) {
+                syncHomeVisibleDate(picked);
             }
         });
-        header.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        Space headerGap = new Space(this);
-        header.addView(headerGap, new LinearLayout.LayoutParams(0, 1, 1));
-        TextView date = pill(formatHeaderDate(selected), nightDecoration() ? Color.rgb(36, 37, 40) : Color.WHITE, accent, 14);
-        todayDateView = date;
-        date.setClickable(true);
-        date.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseHomeDate();
+        LinearLayout.LayoutParams pagerLp = new LinearLayout.LayoutParams(-1,0,1);pagerLp.topMargin=dp(14);page.addView(pager,pagerLp);
+        return host;
+    }
+
+    private View createTodayPaperViewport(final String date) {
+        ScrollView scroll = new ScrollView(this);
+        disableForceDark(scroll);scroll.setNestedScrollingEnabled(false);
+        String today = dateKey(Calendar.getInstance());
+        JSONObject day = days.optJSONObject(date);
+        TodayPaperView paper = new TodayPaperView(this, nightDecoration(), day, new TodayPaperView.Listener() {
+            public void onFood(String mealKey, JSONObject item) { retainHomeFoodDate(date);foodUi().details(date, mealKey, item); }
+            public void onLegacy(String mealKey) {
+                retainHomeFoodDate(date);
+                JSONObject meal=NutritionStore.meal(days,date,mealKey);
+                if(meal!=null&&meal.optBoolean("manualTextEntry"))showManualMealTextEditor(date,mealKey);
+                else showMealRecordEditor(date, mealKey);
             }
+            public View editableMedia(DayFoodEntries.Entry entry, View image) { return journalMedia(date, entry, image); }
+            public View editableText(DayFoodEntries.Entry entry, View text) { return journalText(date,entry,text); }
         });
-        attachHomeDateSwipe(date);
-        header.addView(date);
-        installStickyHeader(host, scroll, page, header);
+        LinearLayout summary = new LinearLayout(this); summary.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout dateRow = row(Gravity.CENTER_VERTICAL);
+        LinearLayout pick = row(Gravity.CENTER_VERTICAL); pick.setTag("today_date_pick");
+        TextView dateLabel = label(date.equals(today) ? "今天" : new SimpleDateFormat("M月d日", Locale.CHINA).format(calendarFromKey(date).getTime()), 14, UiTokens.secondary(nightDecoration()), false);
+        pick.addView(dateLabel);
+        JournalActionIcon down = new JournalActionIcon(false); down.setTag("today_date_triangle"); down.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams downLp = new LinearLayout.LayoutParams(dp(14), dp(16)); downLp.leftMargin = dp(6); pick.addView(down, downLp);
+        pick.setMinimumHeight(dp(48)); pick.setContentDescription("展开首页日历选择日期"); pick.setOnClickListener(v -> {retainHomeFoodDate(date);expandHomeCalendar();});
+        dateRow.addView(pick, new LinearLayout.LayoutParams(0, -2, 1));
+        JournalActionIcon more = new JournalActionIcon(true); more.setTag("today_more"); more.setContentDescription("管理今日记录");
+        more.setOnClickListener(v -> {retainHomeFoodDate(date);manageDayRecords(date);});dateRow.addView(more, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        // The visible last dot follows the ruling, while the full 48dp hit area stays inside the paper.
+        summary.addView(dateRow,new LinearLayout.LayoutParams(-1,-2));
+        int calories = FoodUi.displayCalories(day), target = profile.optInt("dailyCalorieGoal");
+        boolean hasEntries=!DayFoodEntries.collect(day).isEmpty();
+        boolean energyKnown=NutritionStore.totals(day).optInt("count")>0 || (day!=null && (day.optBoolean("manualCaloriesOverride") || day.optInt("calories")>0));
+        String calorieLabel=hasEntries&&!energyKnown?"—":Integer.toString(calories);
+        TextView energy = label(calorieLabel + (target > 0 ? " / " + target : "") + " kcal", 34, UiTokens.ink(nightDecoration()), false);
+        energy.setTag("today_energy");energy.setMinHeight(dp(48));energy.setPadding(0,0,0,dp(4));energy.setContentDescription((hasEntries&&!energyKnown?"营养数据尚未补充，不代表零摄入":"当日已记录热量 " + calories + " 千卡") + (target > 0 ? "，目标 " + target + " 千卡" : "，未设置个人目标"));
+        energy.setOnClickListener(v -> {retainHomeFoodDate(date);foodUi().dayNutrition(date);});summary.addView(energy);
+        String source = day != null && day.optBoolean("manualCaloriesOverride") ? "手动热量优先" : NutritionStore.totals(day).optInt("count") > 0 ? "AI 估算 · 点食物查看详情" : day != null && day.optInt("calories") > 0 ? "旧版热量记录" : hasEntries?"餐食已收好 · 热量待补充":"留下今天的第一份美味";
+        if(hasEntries||energyKnown){TextView hint = label(source,12,UiTokens.secondary(nightDecoration()),false);hint.setPadding(0,0,0,dp(12));summary.addView(hint);}
+        LinearLayout.LayoutParams summaryLp=new LinearLayout.LayoutParams(-1,-2);
+        summaryLp.rightMargin=-dp(TodayPaperView.CONTENT_INSET+JournalActionIcon.TRAILING_INSET-TodayPaperView.RULE_INSET);
+        paper.addView(summary,0,summaryLp);
+        return paper.wrapInViewport(scroll);
+    }
 
-        TextView hint = label(homeHint(key), 14, Color.rgb(116, 122, 130), false);
-        todayHintView = hint;
-        hint.setPadding(0, dp(spaceByLayout(8, 6, 4)), 0, dp(spaceByLayout(14, 10, 6)));
-        page.addView(hint);
+    private HomeCalendarView createHomeCalendar(final String date) {
+        if(todayWeekAnchor==null||!date.equals(todayWeekSelection)){todayWeekAnchor=calendarFromKey(date);todayWeekSelection=date;}
+        HomeCalendarView calendar=new HomeCalendarView(this,nightDecoration(),calendarFromKey(date),todayWeekAnchor,homeCalendarExpanded,new HomeCalendarView.Listener(){
+            public void onDay(Calendar picked){
+                View active=content==null?null:content.findViewWithTag("home_calendar");
+                if(active instanceof HomeCalendarView)homeCalendarExpanded=((HomeCalendarView)active).isExpanded();
+                if(homeCalendarExpanded)homeCalendarPickedDuringExpansion=true;
+                View pager=content==null?null:content.findViewWithTag("today_day_pager");
+                if(pager instanceof TodayDayPager){((TodayDayPager)pager).animateToDate(picked);return;}
+                homeDateKey=dateKey(picked);renderCurrent();
+            }
+            public void onWeek(Calendar anchor){todayWeekAnchor=(Calendar)anchor.clone();}
+            public void onExpanded(boolean expanded){homeCalendarExpanded=expanded;homeCalendarPickedDuringExpansion=false;}
+            public String holiday(String key){return holidayLabel(key);}
+        });
+        calendar.setDatePickedDuringExpansion(homeCalendarPickedDuringExpansion);
+        calendar.setPalette(accent,accentSoft);return calendar;
+    }
 
-        FrameLayout timeline = new FrameLayout(this);
-        timeline.setClipChildren(false);
-        LinearLayout list = new LinearLayout(this);
-        todayMealListView = list;
-        list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(dp(timelineListInset()), 0, 0, 0);
-        if (timelineVisible()) {
-            View line = new View(this);
-            line.setBackground(round(accent, dp(timelineWidth()), 0, 0));
-            FrameLayout.LayoutParams lineLp = new FrameLayout.LayoutParams(dp(timelineWidth()), ViewGroup.LayoutParams.MATCH_PARENT);
-            lineLp.leftMargin = dp(0);
-            timeline.addView(line, lineLp);
+    private void retainHomeFoodDate(String date) {
+        View pager=content==null?null:content.findViewWithTag("today_day_pager");
+        if(pager instanceof TodayDayPager&&((TodayDayPager)pager).retainDate(calendarFromKey(date)))homeDateKey=date;
+    }
+
+    private void syncHomeVisibleDate(Calendar picked) {
+        homeDateKey=dateKey(picked);todayWeekAnchor=(Calendar)picked.clone();todayWeekSelection=homeDateKey;
+        View calendar=content==null?null:content.findViewWithTag("home_calendar");
+        if(calendar instanceof HomeCalendarView){
+            HomeCalendarView active=(HomeCalendarView)calendar;homeCalendarExpanded=active.isExpanded();
+            if(homeCalendarExpanded)homeCalendarPickedDuringExpansion=true;
+            active.setSelectedDate(picked);
         }
-        timeline.addView(list);
-        page.addView(timeline);
+    }
 
-        rebuildTodayMeals(false, 0);
-        page.addView(space(dp(120)));
-        animateIn(page);
+    private void expandHomeCalendar(){
+        View view=content==null?null:content.findViewWithTag("home_calendar");
+        if(view instanceof HomeCalendarView)((HomeCalendarView)view).setExpanded(true,true);
+        else{homeCalendarExpanded=true;showTab(0,false);}
+    }
+
+    /** Fixed-size glyphs stay compact regardless of handwriting font metrics. */
+    private class JournalActionIcon extends View {
+        static final int TRAILING_INSET=4;
+        private final boolean more; private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        JournalActionIcon(boolean more) { super(MainActivity.this); this.more = more; }
+        @Override protected void onDraw(Canvas canvas) {
+            paint.setColor(more ? UiTokens.ink(nightDecoration()) : UiTokens.secondary(nightDecoration()));
+            float cx = getWidth()/2f, cy = getHeight()/2f;
+            if (more) {
+                cx=getWidth()-dp(TRAILING_INSET)-dp(6)-dp(1.5f);
+                for (int i=-1;i<=1;i++) canvas.drawCircle(cx+i*dp(6),cy,dp(1.5f),paint);
+            }
+            else { Path path = new Path(); path.moveTo(cx-dp(3.5f),cy-dp(2));path.lineTo(cx+dp(3.5f),cy-dp(2));path.lineTo(cx,cy+dp(2.5f));path.close();canvas.drawPath(path,paint); }
+        }
+    }
+
+    private void manageDayRecords(final String date) {
+        JSONObject day=days.optJSONObject(date);
+        final List<MealOption> meals=visibleMealsForDay(day==null?new JSONObject():day);
+        // Night meals can be added before a day contains its first snack record.
+        // Keep this UI choice independent of the legacy three-meal preference.
+        addMealIfMissing(meals,"snack");sortMeals(meals);
+        String[] entries=new String[meals.size()];
+        for(int i=0;i<meals.size();i++)entries[i]="编辑"+meals.get(i).title+"记录";
+        showChoiceDialog("管理今日记录",entries,-1,which->{
+            if(which>=0&&which<meals.size())showMealRecordEditor(date,meals.get(which).key);
+        });
+    }
+
+    private AlertDialog showMealRecordEditor(final String date, final String key) {
+        if(date==null||date.compareTo(dateKey(Calendar.getInstance()))>0)return null;
+        final AlertDialog dialog=PaperComponents.dialogBuilder(this,nightDecoration()).setTitle(mealTitle(key)+"记录").create();
+        LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(dp(24),dp(4),dp(24),dp(12));
+        box.setTag("meal_record_body");
+        JSONObject snapshot=NutritionStore.read(prefs,DATA_KEY);
+        JSONObject meal=NutritionStore.meal(snapshot,date,key);
+        String savedText=meal==null?"":meal.optString("text","").trim();
+        final String prompt=savedText.isEmpty()?manualMealPrompt(date,key):null;
+        final EditText text=PaperComponents.input(this,nightDecoration());
+        text.setTag("meal_record_text");text.setMinHeight(dp(88));
+        text.setBackground(null);text.setPadding(0,dp(8),0,dp(8));text.setLineSpacing(dp(3),1.08f);
+        text.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE|InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        text.setMinLines(2);text.setMaxLines(6);text.setHint(prompt);text.setText(savedText);
+        text.setGravity(Gravity.CENTER_VERTICAL|Gravity.LEFT);
+        text.setContentDescription(mealTitle(key)+"记录，直接输入餐食名称");
+        text.setFilters(new android.text.InputFilter[]{(source,start,end,dest,dstart,dend)->{
+            int used=Character.codePointCount(dest,0,dest.length())-Character.codePointCount(dest,dstart,dend);
+            int available=ManualMealText.MAX_LENGTH-used;
+            if(Character.codePointCount(source,start,end)<=available)return null;
+            int cut=start;while(available-->0&&cut<end)cut+=Character.charCount(Character.codePointAt(source,cut));
+            return source.subSequence(start,cut);
+        }});
+        final String[] lastSaved={savedText};
+        final java.util.function.BooleanSupplier saveText=()->{
+            String value=ManualMealText.clean(text.getText().toString());
+            if(value==null){text.setError("餐食名称最多2000字");return false;}
+            if(value.equals(lastSaved[0]))return true;
+            synchronized(NutritionStore.LOCK){
+                JSONObject latest=NutritionStore.read(prefs,DATA_KEY),day=latest.optJSONObject(date);
+                JSONObject current=day==null?null:day.optJSONObject(key);
+                if(current==null&&value.isEmpty()){lastSaved[0]=value;return true;}
+                JSONObject updated=ManualMealText.updatedInlineMeal(current,value);
+                try{
+                    if(updated==null)return false;
+                    if(day==null)day=new JSONObject();day.put(key,updated);latest.put(date,day);
+                    if(!prefs.edit().putString(DATA_KEY,latest.toString()).commit()){text.setError("保存失败，请重试");return false;}
+                    days=latest;lastSaved[0]=value;return true;
+                }catch(JSONException failed){text.setError("保存失败，请重试");return false;}
+            }
+        };
+        box.addView(text,new LinearLayout.LayoutParams(-1,-2));
+
+        LinearLayout grid=new LinearLayout(this);grid.setOrientation(LinearLayout.VERTICAL);grid.setTag("meal_record_grid");
+        box.addView(grid,new LinearLayout.LayoutParams(-1,-2));
+        LinearLayout line=null;int count=0;
+        for(final DayFoodEntries.Entry entry:DayFoodEntries.collect(snapshot.optJSONObject(date))) {
+            if(!key.equals(entry.mealKey)||entry.fileName.isEmpty())continue;
+            if(count%2==0){line=new LinearLayout(this);grid.addView(line,new LinearLayout.LayoutParams(-1,-2));}
+            LinearLayout cell=new LinearLayout(this);cell.setOrientation(LinearLayout.VERTICAL);cell.setTag("meal_record_food");
+            View image=TodayPaperView.mediaPreview(this,entry.fileName,entry.fallbackFile,entry.sticker,nightDecoration(),NutritionStore.displayRotation(entry.item));
+            Runnable openFood=()->{if(!saveText.getAsBoolean())return;dialog.dismiss();if(entry.isFood())foodUi().details(date,key,entry.item);else showPhotoViewer(date,key,entry.fileName);};
+            cell.addView(journalMedia(date,entry,image,openFood),new LinearLayout.LayoutParams(-1,dp(132)));
+            TextView name=label(entry.title,14,UiTokens.ink(nightDecoration()),false);name.setTag("meal_record_name");name.setGravity(Gravity.CENTER);name.setPadding(0,dp(4),0,dp(12));cell.addView(name,new LinearLayout.LayoutParams(-1,-2));
+            name.setMinHeight(dp(48));
+            LinearLayout.LayoutParams cellLp=new LinearLayout.LayoutParams(0,-2,1);cellLp.rightMargin=count%2==0?dp(8):0;line.addView(cell,cellLp);count++;
+        }
+        if(count%2==1)line.addView(new Space(this),new LinearLayout.LayoutParams(0,1,1));
+
+        TextView add=PaperComponents.button(this,"添加图片",nightDecoration(),v->{if(saveText.getAsBoolean()){dialog.dismiss();chooseMealPhotoSource(date,key);}});
+        add.setTag("meal_record_add_image");
+        LinearLayout.LayoutParams addLp=new LinearLayout.LayoutParams(-1,-2);addLp.topMargin=dp(20);box.addView(add,addLp);
+        // Keep these two actions together instead of inheriting AlertController's
+        // extra custom-panel/button-panel gap on some OEM dialog themes.
+        LinearLayout footer=row(Gravity.RIGHT|Gravity.CENTER_VERTICAL);
+        TextView done=label("完成",15,UiTokens.ink(nightDecoration()),false);done.setTag("meal_record_done");
+        done.setGravity(Gravity.CENTER);done.setMinHeight(dp(48));done.setMinWidth(dp(64));done.setPadding(dp(12),0,0,0);
+        done.setOnClickListener(v->{if(saveText.getAsBoolean())dialog.dismiss();});footer.addView(done,new LinearLayout.LayoutParams(-2,-2));
+        LinearLayout.LayoutParams footerLp=new LinearLayout.LayoutParams(-1,-2);footerLp.topMargin=dp(8);box.addView(footer,footerLp);
+        ScrollView scroll=new ScrollView(this);scroll.setVerticalScrollBarEnabled(false);scroll.addView(box);
+        dialog.setView(PaperComponents.dialogContent(this,scroll));
+        // Dismissal/back also flush the inline edit. Merely opening an empty editor writes nothing.
+        box.setFocusableInTouchMode(true);box.requestFocus();
+        // A successor detail/viewer may already be showing when this callback runs.
+        // Actual edits already mark the root dirty; an unchanged read needs no rebuild.
+        dialog.setOnDismissListener(d->{saveText.getAsBoolean();resumeDeferredRootRefresh();});dialog.show();PaperComponents.styleDialog(dialog,nightDecoration());
+        return dialog;
     }
 
     private void renderStickerGalleryPage() {
@@ -2306,11 +2140,8 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
         inRecycleBinPage = false;
-        inHiddenSettingsPage = false;
         inStickerGalleryPage = true;
         inUpdateLogPage = false;
         inAboutSoftwarePage = false;
@@ -2330,7 +2161,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView title = label("贴纸栏", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("美食栏", 30, Color.rgb(28, 28, 30), true); title.setTag("food_gallery_title");
         title.setClickable(true);
         attachPressAnimation(title);
         title.setOnClickListener(new View.OnClickListener() {
@@ -2361,15 +2192,14 @@ public class MainActivity extends Activity {
         top.addView(stickerColumnsPill, colLp);
         installStickyHeader(host, scroll, page, top);
 
-        TextView hint = label(photoCollectionEnabled()
-                        ? "所有餐卡里的贴纸和图片会收在这里，点一下可以查看原图。"
-                        : "所有餐卡里的贴纸会收在这里，点贴纸可以查看原图。", 14,
+        TextView hint = label("首页收下的餐食图片都在这里，点击查看原图，长按可旋转或删除。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
         page.addView(hint);
 
         stickerGalleryList = new LinearLayout(this);
+        stickerGalleryList.setTag("food_gallery_list");
         stickerGalleryList.setOrientation(LinearLayout.VERTICAL);
         page.addView(stickerGalleryList);
         refreshStickerGalleryList();
@@ -2394,14 +2224,16 @@ public class MainActivity extends Activity {
     }
 
     private void closeAiAnalysisPage() {
-        softContentSwap(new Runnable() {
+        if(content.findViewWithTag("ai_chat_read_only")!=null){smoothContentSwap(()->renderAiChatArchivePage(),-1f);return;}
+        if(content.findViewWithTag("ai_chat_archive")!=null){smoothContentSwap(()->renderAiAnalysisPage(),-1f);return;}
+        smoothContentSwap(new Runnable() {
             @Override
             public void run() {
                 mealPhotoPickMode = false;
                 renderCurrent();
                 updateFab();
             }
-        });
+        }, -1f);
     }
 
     private void renderAiAnalysisPage() {
@@ -2410,14 +2242,9 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
         inRecycleBinPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
-        inExperimentalPage = false;
         inStickerGalleryPage = false;
         inAiAnalysisPage = true;
         inBookDetail = false;
@@ -2438,6 +2265,11 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout header = row(Gravity.CENTER_VERTICAL);
+        if(currentTab==3){
+            TextView back=label("‹",38,Color.rgb(34,34,34),true);back.setGravity(Gravity.CENTER);
+            back.setBackground(surfaceRound(dp(25)));back.setContentDescription("返回我");attachPressAnimation(back);
+            back.setOnClickListener(v->closeAiAnalysisPage());header.addView(back,new LinearLayout.LayoutParams(dp(52),dp(52)));
+        }
         TextView title = label("营养师", 34, Color.rgb(28, 28, 30), true);
         title.setClickable(true);
         attachPressAnimation(title);
@@ -2465,7 +2297,7 @@ public class MainActivity extends Activity {
         page.addView(subtitle);
 
         String date = homeDate();
-        JSONObject day = ensureDay(date);
+        JSONObject day = dayReadSnapshot(date);
         FoodMascotView mascot = new FoodMascotView(this);
         mascot.setMessages(aiMascotMessages(day));
         mascot.setClickable(true);
@@ -2540,6 +2372,7 @@ public class MainActivity extends Activity {
         updateFab();
         content.removeAllViews();
         ScrollView scroll = pageScroll();
+        scroll.setTag("ai_chat_archive");
         LinearLayout page = basePage();
         scroll.addView(page);
         content.addView(scroll);
@@ -2552,7 +2385,7 @@ public class MainActivity extends Activity {
         back.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                openAiAnalysisPage();
+                closeAiAnalysisPage();
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
@@ -2577,7 +2410,7 @@ public class MainActivity extends Activity {
                 page.addView(settingRow(displayDate(date), count + "条聊天", "☰", accent, new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
-                        renderAiChatReadOnlyPage(date);
+                        smoothContentSwap(()->renderAiChatReadOnlyPage(date),1f);
                     }
                 }));
             }
@@ -2611,6 +2444,7 @@ public class MainActivity extends Activity {
     private void renderAiChatReadOnlyPage(final String date) {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
+        scroll.setTag("ai_chat_read_only");
         LinearLayout page = basePage();
         scroll.addView(page);
         content.addView(scroll);
@@ -2623,7 +2457,7 @@ public class MainActivity extends Activity {
         back.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                renderAiChatArchivePage();
+                closeAiAnalysisPage();
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
@@ -2654,7 +2488,7 @@ public class MainActivity extends Activity {
     }
 
     private void addAiChatBar(FrameLayout host) {
-        LiquidGlassBarLayout bar = new LiquidGlassBarLayout(this);
+        LiquidGlassBarLayout bar = new LiquidGlassBarLayout(this);aiChatBar=bar;
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(12), dp(10), dp(12), dp(10));
@@ -2742,50 +2576,42 @@ public class MainActivity extends Activity {
         return button;
     }
 
-    private void attachKeyboardLift(final FrameLayout host, final View bar, final int baseBottom) {
-        final Runnable adjust = new Runnable() {
-            @Override
-            public void run() {
-                Rect visible = new Rect();
-                host.getWindowVisibleDisplayFrame(visible);
-                int[] hostLoc = new int[2];
-                host.getLocationOnScreen(hostLoc);
-                int keyboardTopInHost = visible.bottom - hostLoc[1];
-                int keyboard = Math.max(0, host.getHeight() - keyboardTopInHost);
-                int target = keyboard > dp(120)
-                        ? Math.max(baseBottom, host.getHeight() - keyboardTopInHost - dp(4))
-                        : baseBottom;
-                target = Math.max(baseBottom, target);
-                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) bar.getLayoutParams();
-                if (lp != null && Math.abs(lp.bottomMargin - target) > dp(1)) {
-                    lp.bottomMargin = target;
-                    bar.setLayoutParams(lp);
-                    bar.animate().cancel();
-                    bar.setTranslationY(keyboard > dp(120) ? dp(1) : dp(4));
-                    bar.animate().translationY(0f).setDuration(100).start();
-                }
-                if (aiAnalysisScrollView != null) {
-                    int bottomPadding = target + bar.getHeight() + dp(10);
-                    if (Math.abs(aiAnalysisScrollView.getPaddingBottom() - bottomPadding) > dp(2)) {
-                        aiAnalysisScrollView.setPadding(aiAnalysisScrollView.getPaddingLeft(), aiAnalysisScrollView.getPaddingTop(),
-                                aiAnalysisScrollView.getPaddingRight(), bottomPadding);
-                    }
-                }
+    private void attachKeyboardLift(final FrameLayout host,final View bar,final int baseBottom){
+        final ScrollView scrollOwner=aiAnalysisScrollView;
+        final Rect visible=new Rect();final int[] hostLoc=new int[2];
+        final Runnable adjust=()->{
+            if(!host.isAttachedToWindow()||!bar.isAttachedToWindow())return;
+            host.getWindowVisibleDisplayFrame(visible);host.getLocationOnScreen(hostLoc);
+            int keyboardTop=visible.bottom-hostLoc[1],keyboard=Math.max(0,host.getHeight()-keyboardTop);
+            int target=keyboard>dp(120)?Math.max(baseBottom,host.getHeight()-keyboardTop-dp(4)):baseBottom;
+            FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)bar.getLayoutParams();
+            if(lp!=null&&Math.abs(lp.bottomMargin-target)>dp(1)){
+                lp.bottomMargin=target;bar.setLayoutParams(lp);bar.animate().cancel();
+                bar.setTranslationY(keyboard>dp(120)?dp(1):dp(4));bar.animate().translationY(0).setDuration(100).start();
+            }
+            if(scrollOwner!=null&&scrollOwner.isAttachedToWindow()){
+                int bottom=target+bar.getHeight()+dp(10);
+                if(Math.abs(scrollOwner.getPaddingBottom()-bottom)>dp(2))
+                    scrollOwner.setPadding(scrollOwner.getPaddingLeft(),scrollOwner.getPaddingTop(),scrollOwner.getPaddingRight(),bottom);
             }
         };
-        host.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
-            @Override
-            public void onLayoutChange(View v, int left, int top, int right, int bottom,
-                                       int oldLeft, int oldTop, int oldRight, int oldBottom) {
-                adjust.run();
+        final ViewTreeObserver[] observer={null};
+        final ViewTreeObserver.OnGlobalLayoutListener global=()->adjust.run();
+        final Runnable register=()->{
+            if(observer[0]!=null&&observer[0].isAlive())observer[0].removeOnGlobalLayoutListener(global);
+            observer[0]=host.getViewTreeObserver();if(observer[0].isAlive())observer[0].addOnGlobalLayoutListener(global);
+            host.post(adjust);
+        };
+        host.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->adjust.run());
+        host.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener(){
+            public void onViewAttachedToWindow(View view){register.run();}
+            public void onViewDetachedFromWindow(View view){
+                host.removeCallbacks(adjust);
+                if(observer[0]!=null&&observer[0].isAlive())observer[0].removeOnGlobalLayoutListener(global);
+                observer[0]=null;
             }
         });
-        host.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
-            @Override
-            public void onGlobalLayout() {
-                adjust.run();
-            }
-        });
+        if(host.isAttachedToWindow())register.run();
     }
 
     private String[] aiMascotMessages(JSONObject day) {
@@ -2802,291 +2628,13 @@ public class MainActivity extends Activity {
         return messages.toArray(new String[messages.size()]);
     }
 
-    private void refreshTodayDateOnly(final int offset) {
-        String key = homeDate();
-        if (todayTitleView != null) {
-            todayTitleView.setText(homeTitle(key));
-            animateSmallDateTextSwap(todayTitleView, offset);
-        }
-        if (todayDateView != null) {
-            todayDateView.setText(formatHeaderDate(calendarFromKey(key)));
-            animateSmallDateTextSwap(todayDateView, offset);
-        }
-        if (todayHintView != null) {
-            todayHintView.setText(homeHint(key));
-            animateSmallDateTextSwap(todayHintView, offset);
-        }
-        rebuildTodayMeals(true, offset);
-    }
 
-    private void rebuildTodayMeals(boolean animated, int offset) {
-        if (todayMealListView == null) {
-            return;
-        }
-        String key = homeDate();
-        JSONObject day = ensureDay(key);
-        todayMealListView.animate().cancel();
-        final int startHeight = animated ? Math.max(1, todayMealListView.getHeight()) : 0;
-        todayMealListView.removeAllViews();
-        List<MealOption> meals = visibleMealsForDate(key);
-        for (int i = 0; i < meals.size(); i++) {
-            MealOption meal = meals.get(i);
-            todayMealListView.addView(mealEditor(key, day, meal.key, meal.title, i));
-        }
-        if (animated) {
-            int measureWidth = todayMealListView.getWidth();
-            if (measureWidth <= 0) {
-                measureWidth = getResources().getDisplayMetrics().widthPixels - dp(44);
-            }
-            todayMealListView.measure(
-                    View.MeasureSpec.makeMeasureSpec(measureWidth, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-            final int endHeight = Math.max(1, todayMealListView.getMeasuredHeight());
-            if (startHeight > 1 && Math.abs(startHeight - endHeight) > dp(8)) {
-                ViewGroup.LayoutParams lp = todayMealListView.getLayoutParams();
-                lp.height = startHeight;
-                todayMealListView.setLayoutParams(lp);
-                ValueAnimator heightAnimator = ValueAnimator.ofInt(startHeight, endHeight);
-                heightAnimator.setDuration(310);
-                heightAnimator.setInterpolator(new android.view.animation.DecelerateInterpolator(1.55f));
-                heightAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-                    @Override
-                    public void onAnimationUpdate(ValueAnimator animation) {
-                        ViewGroup.LayoutParams current = todayMealListView.getLayoutParams();
-                        current.height = (Integer) animation.getAnimatedValue();
-                        todayMealListView.setLayoutParams(current);
-                    }
-                });
-                heightAnimator.addListener(new android.animation.AnimatorListenerAdapter() {
-                    @Override
-                    public void onAnimationEnd(android.animation.Animator animation) {
-                        ViewGroup.LayoutParams done = todayMealListView.getLayoutParams();
-                        done.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                        todayMealListView.setLayoutParams(done);
-                    }
-                });
-                heightAnimator.start();
-            }
-            todayMealListView.setAlpha(1f);
-            todayMealListView.setTranslationX(0f);
-            if (mealPhotoPickMode) {
-                todayMealListView.setTranslationY(0f);
-            } else {
-                todayMealListView.setTranslationY(-dp(6));
-                todayMealListView.animate()
-                        .alpha(1f)
-                        .translationY(0f)
-                        .setDuration(260)
-                        .setInterpolator(new android.view.animation.DecelerateInterpolator(1.35f))
-                        .start();
-            }
-        }
-    }
 
-    private void animateSmallDateTextSwap(final View view, int offset) {
-        if (view == null) {
-            return;
-        }
-        view.animate().cancel();
-        view.setAlpha(0.78f);
-        view.setTranslationX(dp(8) * (offset > 0 ? 1f : -1f));
-        view.animate()
-                .alpha(1f)
-                .translationX(0f)
-                .setDuration(210)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.5f))
-                .start();
-    }
 
-    private void applyMealPhotoPickModeToExistingRows(final boolean active) {
-        if (todayMealListView == null || todayMealListView.getChildCount() == 0) {
-            rebuildTodayMeals(true, 0);
-            return;
-        }
-        todayMealListView.animate().cancel();
-        todayMealListView.setAlpha(1f);
-        todayMealListView.setTranslationX(0f);
-        todayMealListView.setTranslationY(0f);
-        for (int i = 0; i < todayMealListView.getChildCount(); i++) {
-            View row = todayMealListView.getChildAt(i);
-            View card = row == null ? null : row.findViewWithTag(TAG_MEAL_CARD);
-            View body = card == null ? null : card.findViewWithTag(TAG_MEAL_PHOTO_BODY);
-            TextView title = taggedText(card, TAG_MEAL_PHOTO_TITLE);
-            TextView time = taggedText(card, TAG_MEAL_PHOTO_TIME);
-            View camera = card == null ? null : card.findViewWithTag(TAG_MEAL_PHOTO_CAMERA);
-            prepareMealPhotoPickCard(card, title, time, camera, body, active, true);
-        }
-    }
 
-    private TextView taggedText(View rootView, String tag) {
-        if (rootView == null) {
-            return null;
-        }
-        View view = rootView.findViewWithTag(tag);
-        return view instanceof TextView ? (TextView) view : null;
-    }
 
-    private void prepareMealPhotoPickCard(final View card, TextView title, final TextView time,
-                                          final View camera, final View body,
-                                          final boolean active, boolean animate) {
-        if (card == null) {
-            return;
-        }
-        card.animate().cancel();
-        card.setBackground(active
-                ? mealPickHighlightBackground(dp(spaceByLayout(18, 16, 14)))
-                : mealCardBackground(dp(spaceByLayout(18, 16, 14))));
-        card.setElevation(active ? dp(5) : dp(2 + Math.round(mealCardGlassLevel() / 34f)));
-        card.setMinimumHeight(dp(74));
-        card.setScaleX(1f);
-        card.setScaleY(1f);
-        if (title != null) {
-            title.animate().cancel();
-            title.setGravity(Gravity.CENTER_VERTICAL);
-            title.setTextSize(scaled(23));
-        }
-        if (time != null) {
-            time.animate().cancel();
-            if (active) {
-                if (animate && time.getVisibility() == View.VISIBLE) {
-                    time.animate().alpha(0f).setDuration(180).withEndAction(new Runnable() {
-                        @Override
-                        public void run() {
-                            time.setVisibility(View.INVISIBLE);
-                            time.setAlpha(1f);
-                        }
-                    }).start();
-                } else {
-                    time.setVisibility(View.INVISIBLE);
-                    time.setAlpha(1f);
-                }
-            } else {
-                time.setVisibility(View.VISIBLE);
-                time.setAlpha(animate ? 0f : 1f);
-                if (animate) {
-                    time.animate().alpha(1f).setDuration(220).start();
-                }
-            }
-        }
-        if (camera != null) {
-            camera.animate().cancel();
-            if (active) {
-                camera.setVisibility(View.VISIBLE);
-                if (animate) {
-                    camera.setAlpha(0f);
-                    camera.setScaleX(0.84f);
-                    camera.setScaleY(0.84f);
-                    camera.animate().alpha(1f).scaleX(1f).scaleY(1f)
-                            .setStartDelay(120)
-                            .setDuration(260)
-                            .setInterpolator(new android.view.animation.DecelerateInterpolator(1.35f))
-                            .start();
-                } else {
-                    camera.setAlpha(1f);
-                    camera.setScaleX(1f);
-                    camera.setScaleY(1f);
-                }
-            } else if (animate && camera.getVisibility() == View.VISIBLE) {
-                camera.animate().alpha(0f).scaleX(0.86f).scaleY(0.86f)
-                        .setDuration(180)
-                        .withEndAction(new Runnable() {
-                            @Override
-                            public void run() {
-                                if (!active) {
-                                    camera.setVisibility(View.INVISIBLE);
-                                    camera.setAlpha(1f);
-                                    camera.setScaleX(1f);
-                                    camera.setScaleY(1f);
-                                }
-                            }
-                        }).start();
-            } else {
-                camera.setVisibility(View.INVISIBLE);
-                camera.setAlpha(1f);
-                camera.setScaleX(1f);
-                camera.setScaleY(1f);
-            }
-        }
-        animateMealPhotoBody(body, active, animate);
-    }
 
-    private void animateMealPhotoBody(final View body, final boolean collapse, boolean animate) {
-        if (body == null) {
-            return;
-        }
-        body.animate().cancel();
-        ValueAnimator running = mealPhotoBodyAnimators.remove(body);
-        if (running != null) {
-            running.cancel();
-        }
-        if (!animate) {
-            ViewGroup.LayoutParams lp = body.getLayoutParams();
-            lp.height = collapse ? 0 : ViewGroup.LayoutParams.WRAP_CONTENT;
-            body.setLayoutParams(lp);
-            body.setAlpha(collapse ? 0f : 1f);
-            body.setVisibility(collapse ? View.GONE : View.VISIBLE);
-            return;
-        }
-        body.setVisibility(View.VISIBLE);
-        int startHeight = collapse ? Math.max(body.getHeight(), body.getMeasuredHeight()) : Math.max(0, body.getHeight());
-        int targetHeight = collapse ? 0 : measureBodyHeight(body);
-        if (collapse && startHeight <= 0) {
-            startHeight = measureBodyHeight(body);
-        }
-        ViewGroup.LayoutParams raw = body.getLayoutParams();
-        raw.height = Math.max(0, startHeight);
-        body.setLayoutParams(raw);
-        body.setAlpha(collapse ? 1f : 0f);
-        ValueAnimator animator = ValueAnimator.ofInt(Math.max(0, startHeight), Math.max(0, targetHeight));
-        animator.setDuration(collapse ? 620 : 680);
-        animator.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
-        animator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-            @Override
-            public void onAnimationUpdate(ValueAnimator animation) {
-                ViewGroup.LayoutParams lp = body.getLayoutParams();
-                lp.height = (Integer) animation.getAnimatedValue();
-                body.setLayoutParams(lp);
-                float fraction = animation.getAnimatedFraction();
-                body.setAlpha(collapse ? Math.max(0f, 1f - fraction * 1.08f) : Math.min(1f, fraction * 1.12f));
-            }
-        });
-        animator.addListener(new android.animation.AnimatorListenerAdapter() {
-            @Override
-            public void onAnimationEnd(android.animation.Animator animation) {
-                if (mealPhotoBodyAnimators.get(body) != animation) {
-                    return;
-                }
-                mealPhotoBodyAnimators.remove(body);
-                ViewGroup.LayoutParams lp = body.getLayoutParams();
-                if (collapse) {
-                    lp.height = 0;
-                    body.setVisibility(View.GONE);
-                    body.setAlpha(0f);
-                } else {
-                    lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                    body.setVisibility(View.VISIBLE);
-                    body.setAlpha(1f);
-                }
-                body.setLayoutParams(lp);
-            }
-        });
-        mealPhotoBodyAnimators.put(body, animator);
-        animator.start();
-    }
 
-    private int measureBodyHeight(View body) {
-        int width = body.getWidth();
-        if (width <= 0 && body.getParent() instanceof View) {
-            width = ((View) body.getParent()).getWidth();
-        }
-        if (width <= 0) {
-            width = getResources().getDisplayMetrics().widthPixels - dp(72);
-        }
-        body.measure(
-                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        return Math.max(0, body.getMeasuredHeight());
-    }
 
     private TextView smallTopPill(String text) {
         TextView pill = label(text, 14, accent, true);
@@ -3161,7 +2709,7 @@ public class MainActivity extends Activity {
         final boolean mergeStacks = galleryStackEnabled();
         final String groupMode = stickerGroupMode();
         target.removeAllViews();
-        target.addView(emptyState("正在整理贴纸", "记录较多时会分批载入，不会阻塞页面切换。", "…"));
+        target.addView(emptyState("正在整理美食", "记录较多时会分批载入，不会阻塞页面切换。", "…"));
         stickerGalleryExecutor.execute(new Runnable() {
             @Override
             public void run() {
@@ -3179,9 +2727,7 @@ public class MainActivity extends Activity {
                         }
                         target.removeAllViews();
                         if (groups.isEmpty()) {
-                            target.addView(emptyState("还没有贴纸", includePhotos
-                                    ? "添加贴纸或普通图片后，会在这里集合。"
-                                    : "从相册分享或上传贴纸后，会在这里集合。", "□"));
+                            target.addView(emptyState("还没有美食图片", "拍照或从相册添加餐图，确认保存后会出现在这里。", "□"));
                             target.addView(space(dp(120)));
                             return;
                         }
@@ -3208,6 +2754,7 @@ public class MainActivity extends Activity {
     }
 
     private void showAiAnalysisText(String text, boolean loading) {
+        if(aiChatBar!=null)aiChatBar.markBackdropDirty();
         if (aiAnalysisResultView == null) {
             return;
         }
@@ -3227,6 +2774,7 @@ public class MainActivity extends Activity {
 
     private String aiAnalysisSignature(JSONObject day) {
         StringBuilder sb = new StringBuilder(homeDate());
+        sb.append(NutritionStore.summary(day));
         for (MealOption mealOption : visibleMealsForDate(homeDate())) {
             JSONObject meal = optObj(day, mealOption.key);
             JSONArray photos = meal.optJSONArray("photos");
@@ -3240,40 +2788,6 @@ public class MainActivity extends Activity {
         return String.valueOf(sb.toString().hashCode());
     }
 
-    private List<File> aiVisionFiles(JSONObject day) {
-        List<File> files = new ArrayList<File>();
-        if (!aiVisionEnabled() || !apiVisionSupported()) {
-            return files;
-        }
-        for (MealOption mealOption : visibleMealsForDate(homeDate())) {
-            JSONObject meal = optObj(day, mealOption.key);
-            addAiVisionFiles(files, meal.optJSONArray("photos"), 2);
-            addAiVisionFiles(files, meal.optJSONArray("stickers"), 2);
-            if (files.size() >= 6) {
-                break;
-            }
-        }
-        return files;
-    }
-
-    private void addAiVisionFiles(List<File> files, JSONArray names, int maxPerMeal) {
-        if (names == null || files.size() >= 6) {
-            return;
-        }
-        int added = 0;
-        for (int i = 0; i < names.length() && added < maxPerMeal && files.size() < 6; i++) {
-            String name = names.optString(i, "");
-            if (name.length() == 0) {
-                continue;
-            }
-            File file = new File(getFilesDir(), name);
-            if (file.exists()) {
-                files.add(file);
-                added++;
-            }
-        }
-    }
-
     private String aiNutritionPrompt(String date, JSONObject day) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("你是一蔬一饭的餐饮分析助手，是一个温柔、像朋友一样说话的营养师。");
@@ -3285,14 +2799,12 @@ public class MainActivity extends Activity {
         prompt.append("日期：").append(displayDate(date)).append("。");
         prompt.append("个人信息：").append(aiProfileSummary()).append("。");
         prompt.append("今日记录：").append(caloriePromptSummary(date, day)).append("。");
+        prompt.append("已保存的食物与营养（优先使用，不要重新猜测用户修正值）：").append(NutritionStore.summary(day));
         if (aiRecordAccessEnabled()) {
             String recent = recentDietSummary(date, 7);
             if (recent.length() > 0) {
                 prompt.append("最近几天记录：").append(recent).append("。");
             }
-        }
-        if (aiVisionEnabled()) {
-            prompt.append("如果随请求附带图片或贴纸，请结合画面粗略识别食物；如果模型看不到图片，请直接说明只能按文字粗略估算。");
         }
         return prompt.toString();
     }
@@ -3485,7 +2997,7 @@ public class MainActivity extends Activity {
 
     private void requestAiAnalysis(final String date, boolean force) {
         if (!apiEnabled()) {
-            showGlassToast("请先在更多设置里配置 API", Toast.LENGTH_LONG);
+            showGlassToast("请先在我 > 智能助手 > 调用 API 中配置", Toast.LENGTH_LONG);
             configureApi();
             return;
         }
@@ -3504,17 +3016,20 @@ public class MainActivity extends Activity {
         final String endpoint = apiEndpoint();
         final String key = profile.optString("apiKey", "");
         final String model = apiModelName();
+        final ApiCredentialPolicy.Snapshot authority;
+        final long credentialEpoch;
+        synchronized (NutritionStore.LOCK) {
+            authority = ApiCredentialPolicy.capture(profile);credentialEpoch = apiCredentialEpoch;
+        }
         final String prompt = aiNutritionPrompt(date, day);
-        final List<File> visionFiles = aiVisionFiles(day);
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final String answer = visionFiles.isEmpty()
-                        ? callChatApi(endpoint, key, model, prompt)
-                        : callChatApiWithImages(endpoint, key, model, prompt, visionFiles);
+                final String answer = callChatApiInternal(endpoint, key, model, prompt, null, authority, credentialEpoch);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (!apiRequestCurrent(authority, credentialEpoch)) return;
                         if (aiAnalyzeButtonView != null) {
                             aiAnalyzeButtonView.setText("重新分析");
                             aiAnalyzeButtonView.setEnabled(true);
@@ -3570,7 +3085,11 @@ public class MainActivity extends Activity {
         final String endpoint = apiEndpoint();
         final String key = profile.optString("apiKey", "");
         final String model = apiModelName();
-        final List<File> visionFiles = aiVisionFiles(ensureDay(date));
+        final ApiCredentialPolicy.Snapshot authority;
+        final long credentialEpoch;
+        synchronized (NutritionStore.LOCK) {
+            authority = ApiCredentialPolicy.capture(profile);credentialEpoch = apiCredentialEpoch;
+        }
         final String recordContext = aiRecordAccessEnabled()
                 ? "。用户已开启AI读取记录，下面是最近记录摘要：" + aiReadableRecordSummary(60)
                 + "。记录统计：" + aiRecordStatsSummary(60)
@@ -3589,12 +3108,11 @@ public class MainActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final String answer = visionFiles.isEmpty()
-                        ? callChatApi(endpoint, key, model, prompt)
-                        : callChatApiWithImages(endpoint, key, model, prompt, visionFiles);
+                final String answer = callChatApiInternal(endpoint, key, model, prompt, null, authority, credentialEpoch);
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
+                        if (!apiRequestCurrent(authority, credentialEpoch)) return;
                         appendAiChatMessage(date, "assistant", answer.length() == 0 ? "刚刚没连上模型，等一下再问我。"
                                 : compactAiAnswer(answer, 4, 180));
                         renderAiChatHistory(date);
@@ -3606,11 +3124,12 @@ public class MainActivity extends Activity {
     }
 
     private void renderAiChatHistory(String date) {
+        if(aiChatBar!=null)aiChatBar.markBackdropDirty();
         if (aiChatListView == null) {
             return;
         }
         aiChatListView.removeAllViews();
-        JSONArray chat = ensureDay(date).optJSONArray("aiChat");
+        JSONArray chat = dayReadSnapshot(date).optJSONArray("aiChat");
         if (chat == null || chat.length() == 0) {
             return;
         }
@@ -3633,6 +3152,7 @@ public class MainActivity extends Activity {
     }
 
     private void addTemporaryAiChatLoading() {
+        if(aiChatBar!=null)aiChatBar.markBackdropDirty();
         if (aiChatListView != null) {
             aiChatListView.addView(aiChatBubble("assistant", "我正在想，等我一下下..."));
         }
@@ -3789,22 +3309,6 @@ public class MainActivity extends Activity {
         return "BMI " + String.format(Locale.CHINA, "%.1f", bmi) + " · " + type;
     }
 
-    private View bmiReferenceCard() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setBackground(surfaceRound(dp(20)));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(12);
-        card.setLayoutParams(lp);
-        card.addView(label(bmiTitle(), 18, Color.rgb(32, 32, 32), true));
-        TextView table = label("BMI 对照：低于18.5偏轻，18.5-23.9正常，24-27.9超重，28及以上偏高。", 14,
-                Color.rgb(112, 116, 124), false);
-        table.setPadding(0, dp(6), 0, 0);
-        table.setLineSpacing(dp(2), 1.05f);
-        card.addView(table);
-        return card;
-    }
 
     private View bmiTableView() {
         LinearLayout card = new LinearLayout(this);
@@ -4296,14 +3800,6 @@ public class MainActivity extends Activity {
                 && profile.optString("cloudToken", "").length() > 0;
     }
 
-    private String wechatBindTitle() {
-        if (profile == null || profile.optString("userId", "").length() == 0) {
-            return "创建账号后可绑定";
-        }
-        return profile.optBoolean("cloudWechatBound", false)
-                ? "已绑定，后续云服务会限制一个 ID 绑定一个微信"
-                : "暂未开放，需接入微信授权后启用";
-    }
 
     private void showProfileBodyEditDialog() {
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
@@ -4357,17 +3853,10 @@ public class MainActivity extends Activity {
     }
 
     private void showCreateAccountHint() {
-        showSimpleInfoDialog("创建账号", "第一次编辑昵称并保存后，会联网生成唯一 ID。ID 创建后不可修改，后续会用于绑定微信和云服务。");
+        showSimpleInfoDialog("创建账号", "第一次编辑昵称并保存后，会联网生成唯一 ID。ID 创建后不可修改，可用于账号登录和云服务。");
     }
 
-    private void showWechatAccountUnavailableDialog() {
-        showSimpleInfoDialog("绑定微信", "暂未开放，敬请期待！");
-    }
 
-    private void showWechatLoginUnavailableDialog() {
-        showSimpleInfoDialog(hasCloudIdentity() ? "切换登录待接入" : "登录待接入",
-                "微信登录需要微信开放平台授权。后续接入后，如果微信已绑定 ID，会恢复对应账号；如果没有绑定，会提示该微信没有绑定账号。");
-    }
 
     private void showSetPasswordDialog(final boolean hasExistingPassword) {
         if (activeOverlay != null) closeActiveOverlay(false);
@@ -4784,6 +4273,23 @@ public class MainActivity extends Activity {
     }
 
     private View stickerGalleryThumb(final StickerEntry entry, int size) {
+        if (entry.journalMedia) {
+            FrameLayout frame = new FrameLayout(this); frame.setClipChildren(false); frame.setClipToPadding(false);
+            View image = TodayPaperView.mediaPreview(this, entry.fileName, entry.sourceFile, entry.sticker,
+                    nightDecoration(), entry.displayRotation);
+            image.setTag("food_gallery_image"); image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            FrameLayout.LayoutParams imageLp = new FrameLayout.LayoutParams(-1,-1);
+            imageLp.setMargins(dp(4),dp(4),dp(4),dp(4));frame.addView(image,imageLp);
+            JSONObject meal = NutritionStore.meal(days, entry.date, entry.mealKey);
+            String source = entry.sourceFile.isEmpty() ? entry.fileName : entry.sourceFile;
+            String array = NutritionStore.contains(meal == null ? null : meal.optJSONArray("stickers"), source) ? "stickers" : "photos";
+            PhotoAction action = bindMediaControls(frame,entry.date,entry.mealKey,source,array,"贴纸",20,
+                    () -> showPhotoViewer(entry.date,entry.mealKey,source));
+            action.foodId = entry.foodId; action.mediaContent = image;
+            installStandaloneMediaLongPress(frame);
+            frame.setContentDescription(entry.mealTitle + "，" + entry.dishName + "，点击查看原图，长按旋转或删除");
+            return frame;
+        }
         if (entry.stackCount > 1 && entry.stackFiles != null && entry.stackFiles.size() > 1) {
             View stack = mediaStackView(entry.date, entry.mealKey, new ArrayList<String>(entry.stackFiles),
                     "stickers", "贴纸", true, size);
@@ -4825,82 +4331,29 @@ public class MainActivity extends Activity {
     }
     private List<StickerEntry> collectStickerEntries(JSONObject sourceDays, boolean includePhotos,
                                                      boolean mergeStacks) {
-        List<StickerEntry> result = new ArrayList<StickerEntry>();
-        List<String> dates = new ArrayList<String>();
-        JSONArray names = sourceDays.names();
-        if (names != null) {
-            for (int i = 0; i < names.length(); i++) {
-                String date = names.optString(i);
-                if (date.length() > 0) {
-                    dates.add(date);
-                }
+        return collectJournalFoodImages(sourceDays);
+    }
+
+    /** Same read-only projection as the home; confirmed alpha replaces its source photograph. */
+    private List<StickerEntry> collectJournalFoodImages(JSONObject sourceDays) {
+        List<StickerEntry> entries = new ArrayList<StickerEntry>();
+        List<String> dates = new ArrayList<String>(); JSONArray keys = sourceDays.names();
+        for(int i=0;keys!=null&&i<keys.length();i++)dates.add(keys.optString(i));
+        Collections.sort(dates,Collections.reverseOrder());
+        for(String date:dates)for(DayFoodEntries.Entry item:DayFoodEntries.collect(sourceDays.optJSONObject(date))){
+            if(!NutritionStore.safeName(item.fileName))continue;
+            String file=item.fileName;boolean sticker=item.sticker;
+            if(!new File(getFilesDir(),file).isFile()){
+                if(!NutritionStore.safeName(item.fallbackFile)||!new File(getFilesDir(),item.fallbackFile).isFile())continue;
+                file=item.fallbackFile;sticker=false;
             }
+            StickerEntry entry=new StickerEntry(date,item.mealKey,item.mealTitle,file);
+            entry.journalMedia=true;entry.sticker=sticker;entry.dishName=item.title;
+            entry.sourceFile=item.isFood()?item.item.optString("sourcePhoto"):file;
+            entry.foodId=item.isFood()?item.item.optString("id"):"";
+            entry.displayRotation=NutritionStore.displayRotation(item.item);entries.add(entry);
         }
-        Collections.sort(dates, new Comparator<String>() {
-            @Override
-            public int compare(String a, String b) {
-                return b.compareTo(a);
-            }
-        });
-        File filesRoot = getFilesDir();
-        for (String date : dates) {
-            JSONObject day = sourceDays.optJSONObject(date);
-            if (day == null) {
-                continue;
-            }
-            for (int mealIndex = 0; mealIndex < AVAILABLE_MEAL_KEYS.length; mealIndex++) {
-                String mealKey = AVAILABLE_MEAL_KEYS[mealIndex];
-                String mealTitle = AVAILABLE_MEAL_TITLES[mealIndex];
-                JSONObject mealObj = day.optJSONObject(mealKey);
-                if (mealObj == null) {
-                    continue;
-                }
-                JSONArray stickers = mealObj.optJSONArray("stickers");
-                if (stickers != null) {
-                    Set<String> skipStacked = new HashSet<String>();
-                    for (int i = 0; i < stickers.length(); i++) {
-                        String fileName = stickers.optString(i);
-                        if (fileName.length() == 0 || skipStacked.contains(fileName)
-                                || !new File(filesRoot, fileName).isFile()) {
-                            continue;
-                        }
-                        List<String> group = mergeStacks
-                                ? mediaStackGroup(mealObj, "stickers", stickers, fileName)
-                                : new ArrayList<String>();
-                        if (group.isEmpty()) {
-                            group.add(fileName);
-                        }
-                        List<String> existingGroup = new ArrayList<String>();
-                        for (String grouped : group) {
-                            if (new File(filesRoot, grouped).isFile()) {
-                                existingGroup.add(grouped);
-                            }
-                        }
-                        group = existingGroup;
-                        if (group.isEmpty()) {
-                            continue;
-                        }
-                        String displayName = group.get(group.size() - 1);
-                        skipStacked.addAll(group);
-                        StickerEntry se = new StickerEntry(date, mealKey, mealTitle, displayName, group.size());
-                        se.stackFiles = new ArrayList<String>(group);
-                        result.add(se);
-                    }
-                }
-                if (includePhotos) {
-                    JSONArray photos = mealObj.optJSONArray("photos");
-                    if (photos != null) {
-                        for (int i = 0; i < photos.length(); i++) {
-                            String fileName = photos.optString(i);
-                            if (fileName.length() > 0 && new File(filesRoot, fileName).isFile()) {
-                                result.add(new StickerEntry(date, mealKey, mealTitle, fileName));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return result;
+        return entries;
     }
 
     private List<StickerGroup> groupStickerEntries(List<StickerEntry> entries, String mode) {
@@ -4924,49 +4377,6 @@ public class MainActivity extends Activity {
         return groups;
     }
 
-    private List<String> mediaStackGroup(JSONObject meal, String arrayKey, JSONArray arr, String fileName) {
-        List<String> group = new ArrayList<String>();
-        if (meal == null || arr == null || fileName == null || fileName.length() == 0) {
-            return group;
-        }
-        List<String> ordered = new ArrayList<String>();
-        for (int i = 0; i < arr.length(); i++) {
-            String name = arr.optString(i);
-            if (name.length() > 0) {
-                ordered.add(name);
-            }
-        }
-        if (!ordered.contains(fileName)) {
-            return group;
-        }
-        JSONObject stacks = meal.optJSONObject(mediaStackKey(arrayKey));
-        if (stacks == null || stacks.length() == 0) {
-            group.add(fileName);
-            return group;
-        }
-        group.add(fileName);
-        boolean changed = true;
-        while (changed) {
-            changed = false;
-            for (String candidate : ordered) {
-                if (group.contains(candidate)) {
-                    continue;
-                }
-                String target = stacks.optString(candidate, "");
-                if (group.contains(target)) {
-                    group.add(candidate);
-                    changed = true;
-                }
-            }
-        }
-        Collections.sort(group, new Comparator<String>() {
-            @Override
-            public int compare(String a, String b) {
-                return ordered.indexOf(a) - ordered.indexOf(b);
-            }
-        });
-        return group;
-    }
 
     private String stickerGroupKey(String date, String mode) {
         Calendar cal = calendarFromKey(date);
@@ -5003,395 +4413,103 @@ public class MainActivity extends Activity {
         return showYear ? String.format(Locale.CHINA, "%04d年%s", cal.get(Calendar.YEAR), base) : base;
     }
 
-    private View mealEditor(final String date, JSONObject day, final String mealKey, String title, int index) {
-        LinearLayout wrap = row(Gravity.TOP);
-        wrap.setClipChildren(false);
-        wrap.setClipToPadding(false);
-        wrap.setPadding(0, dp(index == 0 ? spaceByLayout(4, 3, 2) : spaceByLayout(18, 13, 8)), 0, 0);
 
-        if (timelineVisible()) {
-            TextView dot = new TextView(this);
-            dot.setText("•");
-            dot.setTextColor(Color.rgb(255, 229, 53));
-            dot.setTextSize(28);
-            dot.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(22), dp(36));
-            dotLp.leftMargin = -dp(18);
-            wrap.addView(dot, dotLp);
-        }
 
-        final LinearLayout cardAndAction = new LinearLayout(this);
-        cardAndAction.setOrientation(LinearLayout.HORIZONTAL);
-        cardAndAction.setClipChildren(false);
-        cardAndAction.setClipToPadding(false);
-        wrap.addView(cardAndAction, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        LinearLayout leftActionPanel = new LinearLayout(this);
-        leftActionPanel.setOrientation(LinearLayout.VERTICAL);
-        leftActionPanel.setVisibility(View.GONE);
-        leftActionPanel.setAlpha(0f);
-        LinearLayout.LayoutParams leftActionLp = new LinearLayout.LayoutParams(dp(spaceByLayout(56, 52, 48)), ViewGroup.LayoutParams.MATCH_PARENT);
-        leftActionLp.rightMargin = dp(spaceByLayout(8, 6, 5));
-        cardAndAction.addView(leftActionPanel, leftActionLp);
 
-        final LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setClipChildren(false);
-        card.setClipToPadding(false);
-        card.setPadding(dp(spaceByLayout(16, 14, 12)), dp(spaceByLayout(16, 13, 10)),
-                dp(spaceByLayout(16, 14, 12)), dp(spaceByLayout(16, 12, 9)));
-        card.setBackground(mealPhotoPickMode
-                ? mealPickHighlightBackground(dp(spaceByLayout(18, 16, 14)))
-                : mealCardBackground(dp(spaceByLayout(18, 16, 14))));
-        card.setElevation(dp(2 + Math.round(mealCardGlassLevel() / 34f)));
-        card.setClickable(true);
-        card.setTag(TAG_MEAL_CARD);
-        attachPressAnimation(card);
-        card.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (mealPhotoPickMode) {
-                    chooseMealPhotoSource(date, mealKey);
-                }
-            }
+
+
+
+    private void chooseMealForText() {
+        final String date=homeDate();
+        final String[] keys={"breakfast","lunch","dinner","snack"};
+        showChoiceDialog("手写餐食",new String[]{"早餐","午餐","晚餐","夜宵"},-1,which->{
+            if(which>=0&&which<keys.length)showManualMealTextEditor(date,keys[which]);
         });
-        cardAndAction.addView(card, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+    }
 
-        LinearLayout actionPanel = new LinearLayout(this);
-        actionPanel.setOrientation(LinearLayout.VERTICAL);
-        actionPanel.setVisibility(View.GONE);
-        actionPanel.setAlpha(0f);
-        LinearLayout.LayoutParams actionLp = new LinearLayout.LayoutParams(dp(spaceByLayout(56, 52, 48)), ViewGroup.LayoutParams.MATCH_PARENT);
-        actionLp.leftMargin = dp(spaceByLayout(8, 6, 5));
-        cardAndAction.addView(actionPanel, actionLp);
-        cardAndAction.setTag(actionPanel);
+    private AlertDialog showManualMealTextEditor(final String date,final String key) {
+        return showManualMealTextEditor(date,key,null);
+    }
 
-        JSONObject meal = optObj(day, mealKey);
-        String emoji = meal.optString("emoji", "");
-        String text = meal.optString("text", "");
-        JSONArray existingPhotos = meal.optJSONArray("photos");
-        JSONArray existingStickers = meal.optJSONArray("stickers");
-        final boolean hasPhotosForMeal = existingPhotos != null && existingPhotos.length() > 0;
-        final boolean hasStickersForMeal = existingStickers != null && existingStickers.length() > 0;
-        final boolean skipped = meal.optBoolean("skipped", false);
-        String time = text.trim().length() > 0 ? displayShortTime(meal.optString("time", "")) : "";
-        final View[] mealTouchTargets = new View[1];
-
-        LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        String titleText = title;
-        if (!skipped && emoji.length() > 0) {
-            titleText = isMoodOnlyMeal(mealKey) ? title + " " + emoji : emoji + " " + title;
-        }
-        TextView mealTitle = label(titleText, 23, Color.rgb(26, 26, 26), true);
-        mealTitle.setTag(TAG_MEAL_PHOTO_TITLE);
-        top.addView(mealTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        final TextView timeText = label(time.length() > 0 ? time : "未记录", 13, Color.rgb(112, 112, 112), false);
-        timeText.setTag(TAG_MEAL_PHOTO_TIME);
-        timeText.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        FrameLayout trailing = new FrameLayout(this);
-        trailing.addView(timeText, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        final ImageView cameraButton = new ImageView(this);
-        disableForceDark(cameraButton);
-        cameraButton.setImageResource(R.drawable.ic_camera);
-        cameraButton.setColorFilter(nightDecoration()
-                ? Color.rgb(238, 241, 245)
-                : blendColor(accent, Color.WHITE, 0.62f));
-        cameraButton.setImageAlpha(nightDecoration() ? 176 : 200);
-        cameraButton.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        cameraButton.setPadding(dp(9), dp(9), dp(9), dp(9));
-        cameraButton.setBackground(round(adjustAlpha(accentSoft, nightDecoration() ? 42 : 56),
-                dp(19), adjustAlpha(accent, 24), dp(1)));
-        cameraButton.setTag(TAG_MEAL_PHOTO_CAMERA);
-        cameraButton.setContentDescription("拍照");
-        cameraButton.setVisibility(mealPhotoPickMode ? View.VISIBLE : View.INVISIBLE);
-        cameraButton.setClickable(true);
-        attachPressAnimation(cameraButton);
-        cameraButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (mealPhotoPickMode && !mealPhotoPickAwaitingResult) {
-                    launchMealCamera(date, mealKey);
+    private AlertDialog showManualMealTextEditor(final String date,final String key,final String shownPrompt) {
+        if(date==null||date.compareTo(dateKey(Calendar.getInstance()))>0)return null;
+        final EditText input=PaperComponents.input(this,nightDecoration());
+        input.setTag("manual_food_text");input.setContentDescription("餐食名称，不上传图片");
+        input.setHint(shownPrompt==null?manualMealPrompt(date,key):shownPrompt);
+        input.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE|InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        input.setMinLines(2);input.setMaxLines(5);input.setMinHeight(dp(72));
+        JSONObject existing=NutritionStore.meal(NutritionStore.read(prefs,DATA_KEY),date,key);
+        input.setText(existing==null?"":existing.optString("text"));input.setSelection(input.length());
+        LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(dp(24),dp(4),dp(24),dp(12));
+        box.addView(input,new LinearLayout.LayoutParams(-1,-2));
+        TextView hint=label("snack".equals(key)?"例如：热牛奶、小点心，可以分行记录多样餐食。":"例如：番茄鸡蛋面、青菜，可以分行记录多样餐食。",12,UiTokens.secondary(nightDecoration()),false);
+        hint.setTag("manual_food_examples");
+        hint.setPadding(0,dp(12),0,0);box.addView(hint);
+        final AlertDialog dialog=PaperComponents.dialogBuilder(this,nightDecoration()).setTitle("记录"+mealTitle(key))
+                .setView(box).setNegativeButton("取消",null).setPositiveButton("保存",null).create();
+        dialog.setOnShowListener(ignored->{
+            PaperComponents.styleDialog(dialog,nightDecoration());
+            input.requestFocus();
+            if(dialog.getWindow()!=null)dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE|WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+                if(ManualMealText.normalize(input.getText().toString())==null){input.setError("请填写餐食名称，最多2000字");return;}
+                boolean saved=false;
+                synchronized(NutritionStore.LOCK){
+                    JSONObject latest=NutritionStore.read(prefs,DATA_KEY),day=latest.optJSONObject(date);
+                    if(day==null)day=new JSONObject();
+                    JSONObject meal=ManualMealText.updatedMeal(day.optJSONObject(key),input.getText().toString());
+                    try{if(meal!=null){day.put(key,meal);latest.put(date,day);saved=prefs.edit().putString(DATA_KEY,latest.toString()).commit();if(saved)days=latest;}}catch(JSONException ignoredSave){}
                 }
-            }
-        });
-        FrameLayout.LayoutParams cameraLp = new FrameLayout.LayoutParams(dp(38), dp(38));
-        cameraLp.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL;
-        trailing.addView(cameraButton, cameraLp);
-        top.addView(trailing, new LinearLayout.LayoutParams(dp(82), dp(40)));
-        card.addView(top);
+                if(!saved){input.setError("保存失败，请重试");return;}
+                boolean snackReminder="snack".equals(key)&&ManualMealPrompts.snackRecordedStreak(days,date)>3;
+                dialog.dismiss();renderCurrent();
+                if(snackReminder)showGlassToast("夜晚的小美好也要适量，吃饱就好，别忘了休息~",Toast.LENGTH_LONG);
+            });
+        });dialog.show();return dialog;
+    }
 
-        final LinearLayout photoPickBody = new LinearLayout(this);
-        photoPickBody.setOrientation(LinearLayout.VERTICAL);
-        photoPickBody.setClipChildren(true);
-        photoPickBody.setClipToPadding(true);
-        photoPickBody.setTag(TAG_MEAL_PHOTO_BODY);
-        card.addView(photoPickBody, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        final TextView photoStatus = label(hasPhotosForMeal ? "photo×" + existingPhotos.length() : "",
-                13, Color.rgb(150, 150, 150), false);
-        photoStatus.setVisibility(View.GONE);
-        final TextView stickerStatus = label(hasStickersForMeal ? "sticker×" + existingStickers.length() : "",
-                13, Color.rgb(150, 150, 150), false);
-        stickerStatus.setVisibility(View.GONE);
-        if (skipped) {
-            LinearLayout skippedLine = row(Gravity.CENTER_VERTICAL);
-            TextView skippedText = label(skippedReminder(date, mealKey, title), 17, Color.rgb(150, 150, 150), false);
-            skippedText.setPadding(0, dp(spaceByLayout(8, 5, 3)), 0, 0);
-            skippedText.setLineSpacing(dp(2), 1.08f);
-            skippedText.setSingleLine(false);
-            skippedText.setHorizontallyScrolling(false);
-            skippedText.setMaxLines(5);
-            skippedLine.addView(skippedText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            TextView skippedMark = label("饿肚肚", 13, Color.rgb(156, 156, 156), false);
-            skippedMark.setPadding(dp(8), 0, 0, 0);
-            LinearLayout.LayoutParams markLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            markLp.topMargin = -dp(spaceByLayout(2, 1, 0));
-            skippedLine.addView(skippedMark, markLp);
-            photoPickBody.addView(skippedLine, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            mealTouchTargets[0] = skippedText;
+    /** UI-only text; neither absence reminders nor examples become saved meal content. */
+    private String manualMealPrompt(String date,String key) {
+        JSONObject snapshot=NutritionStore.read(prefs,DATA_KEY);
+        String group="meal";List<String> pool;
+        if("snack".equals(key)) {
+            if(ManualMealPrompts.snackRecordedStreak(snapshot,date)>3) {
+                group="snack_moderation";
+                pool=java.util.Arrays.asList("夜晚的小美好也要适量，吃饱就好~", "最近夜宵有点勤，少量享用，也给休息留点时间~", "今晚轻轻吃一点，把夜晚过得舒服些~");
+            } else pool=mealHintList(key);
         } else {
-            final EditText input = new EditText(this);
-            applyGlobalTextTypeface(input, false);
-            input.setText(text);
-            input.setHint(mealHint(mealKey, title));
-            input.setTextSize(scaled(17));
-            input.setTextColor(themedTextColor(Color.rgb(35, 35, 35)));
-            input.setHintTextColor(themedTextColor(Color.rgb(170, 170, 170)));
-            boolean compactContent = text.trim().length() > 0 || hasPhotosForMeal || hasStickersForMeal;
-            input.setMinLines(compactContent ? 1 : spaceByLayout(4, 3, 2));
-            input.setMinHeight(0);
-            input.setMinimumHeight(0);
-            input.setGravity(Gravity.TOP | Gravity.LEFT);
-            input.setPadding(0, dp(spaceByLayout(8, 5, 3)), 0, 0);
-            input.setBackgroundColor(Color.TRANSPARENT);
-            input.setSingleLine(false);
-            input.setHorizontallyScrolling(false);
-            input.setMaxLines(6);
-            input.setOnTouchListener(new View.OnTouchListener() {
-                @Override
-                public boolean onTouch(View v, MotionEvent event) {
-                    if (mealPhotoPickMode && event.getActionMasked() == MotionEvent.ACTION_UP) {
-                        chooseMealPhotoSource(date, mealKey);
-                        return true;
-                    }
-                    return false;
-                }
-            });
-            input.addTextChangedListener(new TextWatcher() {
-                @Override
-                public void beforeTextChanged(CharSequence s, int start, int count, int after) {
-                }
-
-                @Override
-                public void onTextChanged(CharSequence s, int start, int before, int count) {
-                    setMealText(date, mealKey, s.toString());
-                    boolean currentSkipped = optObj(ensureDay(date), mealKey).optBoolean("skipped", false);
-                    if (s.toString().trim().length() > 0) {
-                        timeText.setText(displayShortTime(nowTime()));
-                    } else if (currentSkipped) {
-                        timeText.setText("饿肚肚");
-                    } else {
-                        timeText.setText("未记录");
-                    }
-                }
-
-                @Override
-                public void afterTextChanged(Editable s) {
-                }
-            });
-            LinearLayout contentLine = row(Gravity.CENTER_VERTICAL);
-            contentLine.addView(input, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            if (hasPhotosForMeal) {
-                photoStatus.setPadding(dp(8), 0, 0, 0);
-                LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                statusLp.topMargin = -dp(spaceByLayout(2, 1, 0));
-                contentLine.addView(photoStatus, statusLp);
-            }
-            if (hasStickersForMeal && stickerCollapseEnabled()) {
-                stickerStatus.setPadding(dp(8), 0, 0, 0);
-                LinearLayout.LayoutParams stickerStatusLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                stickerStatusLp.topMargin = -dp(spaceByLayout(2, 1, 0));
-                contentLine.addView(stickerStatus, stickerStatusLp);
-            }
-            photoPickBody.addView(contentLine, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            mealTouchTargets[0] = input;
+            String absence=ManualMealPrompts.absenceGroup(ManualMealPrompts.skippedStreak(snapshot,date,key));
+            if(absence.isEmpty())pool=mealHintList(key);
+            else{group=absence;pool=skipReminderList(absence);}
         }
-        View stickersView = addMealStickers(photoPickBody, meal, date, mealKey);
-        View photosView = addMealPhotos(photoPickBody, meal, date, mealKey);
-        PhotoCollapseController photoController = null;
-        if (photosView != null) {
-            photoController = bindPhotoCollapse(date, mealKey, photosView, photoStatus, existingPhotos.length());
-        }
-        PhotoCollapseController stickerController = null;
-        if (stickersView != null && stickerCollapseEnabled()) {
-            stickerController = bindMediaCollapse(date, mealKey, stickersView, stickerStatus, existingStickers.length(), "sticker");
-        }
-        if (mealPhotoPickMode) {
-            prepareMealPhotoPickCard(card, mealTitle, timeText, cameraButton, photoPickBody, true, false);
-            mealTouchTargets[0] = card;
-        }
-        bindMealSwipe(date, mealKey, card, leftActionPanel, actionPanel,
-                photoController != null ? photoController : stickerController, card, mealTouchTargets[0]);
-        return wrap;
-    }
-
-    private boolean isMoodOnlyMeal(String mealKey) {
-        return "afternoon_tea".equals(mealKey) || "snack".equals(mealKey);
-    }
-
-    private boolean populateMealActionPanel(final LinearLayout actionPanel, final String date,
-                                            final String mealKey, final String title, int mode) {
-        actionPanel.removeAllViews();
-        int actionWidth = dp(spaceByLayout(52, 48, 44));
-        if (mode > 0) {
-            final String extraKey = quickExtraMealKey(date, mealKey);
-            if (extraKey != null) {
-                TextView add = mealSwipeActionButton(("afternoon_tea".equals(extraKey) ? "☕\n加\n下\n午\n茶" : "🌙\n加\n夜\n宵"),
-                        accent);
-                add.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        if (addDayExtraMeal(date, extraKey)) {
-                            showGlassToast("已为今天添加" + mealTitle(extraKey), Toast.LENGTH_SHORT);
-                            playHapticFeedback(true);
-                            renderCurrent();
-                        }
-                    }
-                });
-                actionPanel.addView(add, new LinearLayout.LayoutParams(actionWidth, ViewGroup.LayoutParams.MATCH_PARENT));
-                return true;
-            }
-            if (canRemoveDayExtraMeal(date, mealKey)) {
-                TextView remove = mealSwipeActionButton("×\n删\n除", Color.rgb(214, 112, 126));
-                remove.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        if (removeDayExtraMeal(date, mealKey)) {
-                            showGlassToast("已删除今天的" + mealTitle(mealKey), Toast.LENGTH_SHORT);
-                            playHapticFeedback(true);
-                            renderCurrent();
-                        }
-                    }
-                });
-                actionPanel.addView(remove, new LinearLayout.LayoutParams(actionWidth, ViewGroup.LayoutParams.MATCH_PARENT));
-                return true;
-            }
-            return false;
-        }
-        if (isMoodOnlyMeal(mealKey)) {
-            TextView happy = mealMoodActionButton("😊\n开心", accent);
-            happy.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    setSpecialMealMood(date, mealKey, "😊", "happy");
-                }
-            });
-            TextView sad = mealMoodActionButton("😢\n伤心", Color.rgb(214, 112, 126));
-            sad.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    setSpecialMealMood(date, mealKey, "😢", "sad");
-                }
-            });
-            LinearLayout.LayoutParams happyLp = new LinearLayout.LayoutParams(actionWidth, 0, 1);
-            happyLp.bottomMargin = dp(5);
-            actionPanel.addView(happy, happyLp);
-            actionPanel.addView(sad, new LinearLayout.LayoutParams(actionWidth, 0, 1));
-        } else {
-            TextView skipMeal = mealSwipeActionButton("😢\n饿\n肚\n肚", accent);
-            skipMeal.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    boolean nowSkipped = toggleMealSkipped(date, mealKey);
-                    showGlassToast(nowSkipped ? skippedReminder(date, mealKey, title) : "已撤销没吃" + title, Toast.LENGTH_SHORT);
-                    renderCurrent();
-                }
-            });
-            actionPanel.addView(skipMeal, new LinearLayout.LayoutParams(actionWidth, ViewGroup.LayoutParams.MATCH_PARENT));
-        }
-        return true;
-    }
-
-    private TextView mealSwipeActionButton(String text, int color) {
-        TextView button = label(text, 12, color, true);
-        button.setGravity(Gravity.CENTER);
-        button.setLineSpacing(0, 0.88f);
-        button.setBackground(round(nightDecoration() ? Color.rgb(37, 38, 42) : Color.WHITE,
-                dp(22), adjustAlpha(color, 112), dp(2)));
-        attachPressAnimation(button);
-        return button;
-    }
-
-    private TextView mealMoodActionButton(String text, int color) {
-        TextView button = label(text, 11, color, true);
-        button.setGravity(Gravity.CENTER);
-        button.setLineSpacing(0, 0.92f);
-        button.setBackground(round(nightDecoration() ? Color.rgb(37, 38, 42) : Color.WHITE,
-                dp(18), adjustAlpha(color, 118), dp(2)));
-        attachPressAnimation(button);
-        return button;
-    }
-
-    private void setSpecialMealMood(String date, String mealKey, String emoji, String mood) {
-        JSONObject meal = optObj(ensureDay(date), mealKey);
-        try {
-            meal.put("emoji", emoji);
-            meal.put("snackMood", mood);
-            meal.put("moodTime", nowTime());
-            meal.put("skipped", false);
-            saveDays();
-        } catch (JSONException ignored) {
-        }
-        showGlassToast("happy".equals(mood) ? mealTitle(mealKey) + "开心一下" : mealTitle(mealKey) + "有点小负担", Toast.LENGTH_SHORT);
-        renderCurrent();
-    }
-
-    private void focusFirstEmptyMeal() {
-        String date = homeDate();
-        JSONObject day = ensureDay(date);
-        List<MealOption> meals = visibleMealsForDate(date);
-        for (int i = 0; i < meals.size(); i++) {
-            MealOption option = meals.get(i);
-            JSONObject meal = optObj(day, option.key);
-            JSONArray photos = meal.optJSONArray("photos");
-            if (meal.optString("text", "").trim().length() == 0
-                    && (photos == null || photos.length() == 0)
-                    && !meal.optBoolean("skipped", false)) {
-                showGlassToast("去写" + option.title + "吧", Toast.LENGTH_SHORT);
-                return;
-            }
-        }
-        showGlassToast("今天的饭饭已经很完整啦", Toast.LENGTH_SHORT);
+        String memoryKey=key+":"+group;
+        String chosen=ManualMealPrompts.choose(pool,manualMealPromptHistory.get(memoryKey),manualMealPromptRandom);
+        manualMealPromptHistory.put(memoryKey,chosen);
+        return chosen.replace("%s",mealTitle(key));
     }
 
     private void chooseMealForPhoto() {
         final String date = homeDate();
-        final List<MealOption> meals = visibleMealsForDate(date);
-        if (meals.isEmpty()) {
-            showGlassToast("还没有可记录的餐别", Toast.LENGTH_SHORT);
-            return;
-        }
-        String[] names = new String[meals.size()];
-        for (int i = 0; i < meals.size(); i++) {
-            names[i] = "给" + meals.get(i).title + "添加图片/贴纸";
-        }
-        showChoiceDialog("添加图片/贴纸", names, 0, new ChoiceHandler() {
+        final String[] keys = {"breakfast", "lunch", "dinner", "snack"};
+        showChoiceDialog("添加图片", new String[]{"早餐", "午餐", "晚餐", "夜宵"}, 0, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
-                if (which >= 0 && which < meals.size()) {
-                    chooseMealPhotoSource(date, meals.get(which).key);
+                if (which >= 0 && which < keys.length) {
+                    chooseMealPhotoSource(date, keys[which]);
                 }
             }
         });
     }
 
     private void renderBooks() {
+        content.addView(buildBooksRoot(),new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private View buildBooksRoot() {
         FrameLayout host = new FrameLayout(this);
+        host.setTag("main_peer_footprints");
         disableForceDark(host);
-        content.addView(host, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
         scroll.addView(page);
@@ -5399,43 +4517,50 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView title = label("足迹", 34, Color.rgb(28, 28, 30), true);
-        title.setClickable(true);
-        attachPressAnimation(title);
-        title.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (footprintCalendarMerged() && !calendarHidden()) {
-                    showFootprintsCalendar(true);
-                }
-            }
-        });
+        TextView title = label("足迹", 28, Color.rgb(28, 28, 30), true);
+        title.setTag("footprints_title");
         top.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         top.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1));
+        TextView favorites=label("收藏",15,accent,true);favorites.setTag("footprints_favorites");
+        favorites.setMinHeight(dp(48));favorites.setGravity(Gravity.CENTER);favorites.setPadding(dp(16),0,dp(12),0);
+        favorites.setContentDescription("查看收藏记录");attachPressAnimation(favorites);
+        favorites.setOnClickListener(v->openFavoriteRecordsPage(true));
+        top.addView(favorites,new LinearLayout.LayoutParams(-2,dp(48)));
         installStickyHeader(host, scroll, page, top);
 
-        TextView subtitle = label("每天都会变成一本小本子，打开就能看见那天的三餐足迹。", 14,
+        TextView subtitle = label("每天都会变成一本小本子，打开就能看见那天的三餐足迹。", 13,
                 Color.rgb(116, 122, 130), false);
         subtitle.setPadding(0, dp(8), 0, dp(20));
         page.addView(subtitle);
+                TextView weekReport = label("这一周的味道  ↗", 14, UiTokens.ink(nightDecoration()), true);
+        weekReport.setTag("v2_week_report");
+        weekReport.setMinHeight(dp(56)); weekReport.setGravity(Gravity.CENTER_VERTICAL);
+        weekReport.setPadding(dp(20), dp(12), dp(20), dp(12));
+        weekReport.setBackground(round(accentSoft, dp(UiTokens.CARD_RADIUS), UiTokens.line(nightDecoration()), dp(1)));
+        weekReport.setOnClickListener(v -> foodUi().weekly(homeDate()));
+        LinearLayout.LayoutParams reportLp = new LinearLayout.LayoutParams(-1, -2);
+        reportLp.topMargin = dp(8); reportLp.bottomMargin = dp(UiTokens.SECTION_GAP);
+        page.addView(weekReport, reportLp);
+
 
         List<String> dates = recordedDates();
         if (dates.isEmpty()) {
-            page.addView(emptyState("还没有吃饭本子", "今天写一餐，第一个本子就会出现。", "😀"));
+            page.addView(emptyState("还没有吃饭记录本呢(●'◡'●)", "今天写一餐，第一个记录本就会出现。", ""));
             page.addView(space(dp(120)));
             animateIn(page);
-            return;
+            return host;
         }
 
         if (footprintExpanded()) {
             addBookGrid(page, dates);
             page.addView(space(dp(120)));
             animateIn(page);
-            return;
+            return host;
         }
 
         HorizontalScrollView rowScroll = new BookScrollView(this);
+        rowScroll.setTag("footprints_book_carousel");
         rowScroll.setHorizontalScrollBarEnabled(false);
         rowScroll.setClipToPadding(false);
         rowScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -5471,6 +4596,7 @@ public class MainActivity extends Activity {
             page.addView(recordRow(date));
         }
         page.addView(space(dp(120)));
+        return host;
     }
 
     private void addBookGrid(LinearLayout page, List<String> dates) {
@@ -5562,28 +4688,6 @@ public class MainActivity extends Activity {
         rowScroll.postDelayed(depth, 260);
     }
 
-    private void showFootprintsCalendar(final boolean calendar) {
-        if (calendar && calendarHidden()) {
-            return;
-        }
-        if (!footprintCalendarMerged() && currentTab == 1 && calendar) {
-            return;
-        }
-        final int target = calendar ? 2 : 1;
-        if (currentTab == target) {
-            return;
-        }
-        currentTab = target;
-        playTabFeedback();
-        updateNav(true);
-        updateFab();
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderCurrent();
-            }
-        }, 0f);
-    }
 
     private void attachBookEdgeElastic(final HorizontalScrollView rowScroll, final LinearLayout books) {
         if (rowScroll instanceof BookScrollView) {
@@ -5654,26 +4758,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void snapBookCarousel(final HorizontalScrollView rowScroll, LinearLayout books) {
-        if (books.getChildCount() == 0) {
-            return;
-        }
-        float center = rowScroll.getScrollX() + rowScroll.getWidth() * 0.46f;
-        int nearest = 0;
-        float nearestDistance = Float.MAX_VALUE;
-        for (int i = 0; i < books.getChildCount(); i++) {
-            View child = books.getChildAt(i);
-            float childCenter = child.getLeft() + child.getWidth() / 2f;
-            float distance = Math.abs(childCenter - center);
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearest = i;
-            }
-        }
-        View target = books.getChildAt(nearest);
-        int scrollX = Math.max(0, (int) (target.getLeft() + target.getWidth() / 2f - rowScroll.getWidth() * 0.46f));
-        rowScroll.smoothScrollTo(scrollX, 0);
-    }
 
     private View bookCard(final String date, int color) {
         LinearLayout wrap = new LinearLayout(this);
@@ -5698,23 +4782,14 @@ public class MainActivity extends Activity {
         FrameLayout cover = new FrameLayout(this);
         final int[] palette = bookPalette(date, color);
         cover.setBackground(new BookCoverDrawable(date, palette, bookCoverStyle()));
+        cover.setClipToOutline(true);
         cover.setElevation(dp(3));
-        addBookCalorieBadge(cover, date, false);
-        TextView emoji = label(primaryDayEmoji(date), 22, Color.WHITE, true);
-        emoji.setGravity(Gravity.CENTER);
-        emoji.setShadowLayer(dp(2), 0, dp(1), adjustAlpha(Color.BLACK, 56));
-        emoji.setBackground(round(adjustAlpha(Color.WHITE, 74), dp(16), adjustAlpha(Color.WHITE, 50), dp(1)));
-        FrameLayout.LayoutParams emojiLp = new FrameLayout.LayoutParams(dp(40), dp(40), Gravity.RIGHT | Gravity.BOTTOM);
-        emojiLp.setMargins(0, 0, dp(10), dp(10));
-        cover.addView(emoji, emojiLp);
+        cover.setTag("footprint_plain_cover");
         wrap.addView(cover, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(176)));
 
         TextView name = label(displayDate(date), 15, Color.rgb(116, 116, 116), true);
         name.setPadding(dp(2), dp(10), 0, 0);
         wrap.addView(name);
-        TextView count = label(mealCount(date) + " 个足迹  •", 14, palette[0], true);
-        count.setPadding(dp(2), dp(3), 0, 0);
-        wrap.addView(count);
         return wrap;
     }
 
@@ -5747,18 +4822,9 @@ public class MainActivity extends Activity {
         FrameLayout cover = new FrameLayout(this);
         final int[] palette = bookPalette(date, color);
         cover.setBackground(new BookCoverDrawable(date, palette, bookCoverStyle()));
+        cover.setClipToOutline(true);
         cover.setElevation(dp(2));
-        addBookCalorieBadge(cover, date, columns >= 5);
-
-        int emojiSize = Math.max(dp(24), Math.min(dp(36), Math.round(width * 0.30f)));
-        TextView emoji = label(primaryDayEmoji(date), columns >= 5 ? 15 : 18, Color.WHITE, true);
-        emoji.setGravity(Gravity.CENTER);
-        emoji.setShadowLayer(dp(2), 0, dp(1), adjustAlpha(Color.BLACK, 56));
-        emoji.setBackground(round(adjustAlpha(Color.WHITE, 74), emojiSize / 2, adjustAlpha(Color.WHITE, 50), dp(1)));
-        FrameLayout.LayoutParams emojiLp = new FrameLayout.LayoutParams(emojiSize, emojiSize, Gravity.RIGHT | Gravity.BOTTOM);
-        int inset = Math.max(dp(5), Math.round(width * 0.08f));
-        emojiLp.setMargins(0, 0, inset, inset);
-        cover.addView(emoji, emojiLp);
+        cover.setTag("footprint_plain_cover");
         wrap.addView(cover, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, coverHeight));
 
         TextView name = label(displayMonthDay(date), columns >= 5 ? 10 : 12, Color.rgb(116, 116, 116), true);
@@ -5769,40 +4835,9 @@ public class MainActivity extends Activity {
         return wrap;
     }
 
-    private void addBookCalorieBadge(FrameLayout cover, String date, boolean compactBadge) {
-        if ((!footprintShowCaloriesEnabled() && !footprintShowSpendingEnabled()) || cover == null) {
-            return;
-        }
-        JSONObject day = days == null ? null : days.optJSONObject(date);
-        int calories = dayTotalCalories(day);
-        int costCents = dayTotalCostCents(day);
-        StringBuilder text = new StringBuilder();
-        if (footprintShowCaloriesEnabled()) {
-            text.append(calories > 0 ? calories + " kcal" : "-- kcal");
-        }
-        if (footprintShowSpendingEnabled()) {
-            if (text.length() > 0) {
-                text.append("\n");
-            }
-            text.append(costCents > 0 ? "¥" + formatCostCents(costCents) : "¥--");
-        }
-        TextView badge = label(text.toString(), compactBadge ? 9 : 11,
-                themedTextColor(Color.rgb(72, 68, 64)), true);
-        badge.setGravity(Gravity.CENTER);
-        badge.setLineSpacing(0f, 0.94f);
-        badge.setPadding(dp(compactBadge ? 5 : 8), 0, dp(compactBadge ? 5 : 8), 0);
-        badge.setBackground(round(nightDecoration() ? Color.argb(144, 36, 38, 43)
-                        : Color.argb(154, 255, 255, 255), dp(12),
-                nightDecoration() ? Color.argb(52, 255, 255, 255) : Color.argb(72, 255, 255, 255), dp(1)));
-        badge.setElevation(dp(3));
-        boolean twoLines = footprintShowCaloriesEnabled() && footprintShowSpendingEnabled();
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                dp(twoLines ? (compactBadge ? 34 : 40) : (compactBadge ? 22 : 26)), Gravity.CENTER);
-        cover.addView(badge, lp);
-    }
 
     private int dayTotalCalories(JSONObject day) {
+        if (NutritionStore.totals(day).optInt("count") > 0) return FoodUi.displayCalories(day);
         if (day == null) {
             return 0;
         }
@@ -6066,12 +5101,14 @@ public class MainActivity extends Activity {
         rowLp.bottomMargin = dp(10);
         row.setLayoutParams(rowLp);
 
-        TextView icon = label(primaryDayEmoji(date), 28, Color.rgb(30, 30, 30), true);
+        View icon = new SettingIconView(this,"notebook",accent);
         row.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(48)));
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
         TextView title = label(displayDate(date), 18, Color.rgb(30, 30, 30), true);
-        TextView summary = label(daySummary(date), 13, Color.rgb(120, 120, 120), false);
+        List<String> foodNames=new ArrayList<String>();
+        for(DayFoodEntries.Entry entry:DayFoodEntries.collect(days.optJSONObject(date)))if(foodNames.size()<3)foodNames.add(entry.title);
+        TextView summary = label(TextUtils.join("、",foodNames), 13, Color.rgb(120, 120, 120), false);
         texts.addView(title);
         texts.addView(summary);
         row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -6085,7 +5122,12 @@ public class MainActivity extends Activity {
     }
 
     private void openBookDetail(final String date, final View source) {
-        if (bookFlipAnimationEnabled()) {
+        cancelReturnFeedback();
+        preservePendingHomeReturn();
+        cancelPendingBookClose();bookEntryDate=date;bookShelfScrollY=currentContentScrollY();bookShelfScrollX=0;
+        View carousel=content==null?null:content.findViewWithTag("footprints_book_carousel");
+        if(carousel instanceof HorizontalScrollView)bookShelfScrollX=((HorizontalScrollView)carousel).getScrollX();
+        if (ValueAnimator.areAnimatorsEnabled()) {
             animateBookOpen(date, source);
             return;
         }
@@ -6098,9 +5140,12 @@ public class MainActivity extends Activity {
     }
 
     private void animateBookOpen(final String date, View source) {
-        playPageFlipSound();
+        if (bookOpeningOverlay != null) bookOpeningOverlay.finish();
+        if(bookFlipAnimationEnabled())playPageFlipSound();
         final BookOpenView overlay = new BookOpenView(this, date);
-        overlay.setClickable(true);
+        bookOpeningOverlay = overlay;
+        // Opening is presentation only: close, navigation and paper gestures stay available.
+        overlay.setClickable(false);
         overlay.setSource(source);
         overlay.setAlpha(1f);
         renderBookDetail(date, false);
@@ -6117,26 +5162,52 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void closeBookDetail() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                inBookDetail = false;
-                if (returnToFavoriteRecordsAfterBook) {
-                    returnToFavoriteRecordsAfterBook = false;
-                    renderFavoriteRecordsPage();
-                } else {
-                    renderCurrent();
-                }
-            }
-        }, -1f);
+    private void renderBookReturn(boolean favorites){
+        inBookDetail=false;returnToFavoriteRecordsAfterBook=false;
+        // The cover owns this transition; its destination must not run animateIn too.
+        boolean previous=suppressEntryAnimation,previousReturn=cachedRootReturn;suppressEntryAnimation=true;cachedRootReturn=true;
+        try{if(favorites)renderFavoriteRecordsPage();else renderCurrent();}
+        finally{suppressEntryAnimation=previous;cachedRootReturn=previousReturn;}
     }
-
+    private void closeBookDetail(){
+        if(bookClosePending||bookOpeningOverlay!=null&&bookOpeningOverlay.closing)return;
+        if(!inBookDetail)return;
+        if(afterReturnFeedback(()->closeBookDetail()))return;
+        cancelThemeModeTransition();
+        if(!ValueAnimator.areAnimatorsEnabled()){
+            boolean favorites=returnToFavoriteRecordsAfterBook;if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();renderBookReturn(favorites);return;
+        }
+        final BookDetailSwipeFrame frame=bookDetailSwipeFrame;final long generation=++bookCloseGeneration;bookClosePending=true;backSwipeTracking=false;
+        Runnable close=()->{
+            if(generation!=bookCloseGeneration||!bookClosePending||!inBookDetail||frame!=bookDetailSwipeFrame)return;
+            bookClosePending=false;animateBookClose();
+        };
+        if(frame==null)close.run();else frame.finishForClosing(close);
+    }
+    private void animateBookClose(){
+        boolean favorites=returnToFavoriteRecordsAfterBook;BookOpenView overlay=bookOpeningOverlay;
+        if(overlay!=null&&(overlay.pageImage==null||overlay.pageImage.isRecycled()||!overlay.date.equals(bookDetailDate))){overlay.finish();overlay=null;}
+        if(overlay==null){
+            overlay=new BookOpenView(this,bookDetailDate);bookOpeningOverlay=overlay;overlay.setVisibility(View.INVISIBLE);
+            root.addView(overlay,new FrameLayout.LayoutParams(-1,-1));
+            overlay.measure(View.MeasureSpec.makeMeasureSpec(root.getWidth(),View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(root.getHeight(),View.MeasureSpec.EXACTLY));overlay.layout(0,0,root.getWidth(),root.getHeight());
+            if(!overlay.preparePaper()){overlay.finish();renderBookReturn(favorites);return;}
+            overlay.progress=1;overlay.current.set(overlay.target);
+        }
+        if(!overlay.beginClosing(favorites)){overlay.finish();if(inBookDetail)renderBookReturn(favorites);}
+    }
+    private View findBookCover(View node,String date){
+        if(node==null||date==null)return null;
+        if("footprint_plain_cover".equals(node.getTag())&&node.getBackground() instanceof BookCoverDrawable&&date.equals(((BookCoverDrawable)node.getBackground()).date))return node;
+        if(node instanceof ViewGroup){ViewGroup group=(ViewGroup)node;for(int i=0;i<group.getChildCount();i++){View found=findBookCover(group.getChildAt(i),date);if(found!=null)return found;}}
+        return null;
+    }
     private void renderBookDetail(final String date) {
         renderBookDetail(date, true);
     }
 
     private void renderBookDetail(final String date, boolean animatePage) {
+        cancelPendingBookClose();if(!inBookDetail)bookEntryDate=date;
         inBookDetail = true;
         inPreferencesPage = false;
         inPhotoViewer = false;
@@ -6163,7 +5234,7 @@ public class MainActivity extends Activity {
 
     private LinearLayout bookDetailTopBar(final String date) {
         LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView close = label("×", 38, Color.rgb(34, 34, 34), false);
+        TextView close = label("×", 38, Color.rgb(34, 34, 34), false);close.setTag("book_detail_close");
         close.setGravity(Gravity.CENTER);
         close.setBackground(surfaceRound(dp(28)));
         attachPressAnimation(close);
@@ -6174,7 +5245,7 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(close, new LinearLayout.LayoutParams(dp(58), dp(58)));
-        TextView title = label("吃饭本子" + primaryDayEmoji(date), 28, Color.rgb(24, 24, 24), true);
+        TextView title = label("吃饭记录本", 28, Color.rgb(24, 24, 24), true);
         bookDetailTitleView = title;
         title.setPadding(dp(16), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -6197,19 +5268,30 @@ public class MainActivity extends Activity {
             return;
         }
         if (bookDetailTitleView != null) {
-            bookDetailTitleView.setText("吃饭本子" + primaryDayEmoji(date));
+            bookDetailTitleView.setText("吃饭记录本");
         }
     }
 
+    private final class CenteredNotebookPage extends LinearLayout {
+        CenteredNotebookPage(){super(MainActivity.this);setOrientation(VERTICAL);setGravity(Gravity.CENTER_VERTICAL);}
+        @Override protected void onMeasure(int widthSpec,int heightSpec){
+            int height=MeasureSpec.getSize(heightSpec),header=dp(spaceByLayout(112,106,102));
+            int navTop=navHost!=null&&navHost.getTop()>header?navHost.getTop():height-dp(110);
+            int bottom=Math.max(dp(100),height-navTop+dp(12));
+            setPadding(dp(spaceByLayout(22,20,18)),header,dp(spaceByLayout(22,20,18)),bottom);
+            if(getChildCount()>0){View child=getChildAt(0);LinearLayout.LayoutParams lp=(LinearLayout.LayoutParams)child.getLayoutParams();lp.height=Math.min(dp(spaceByLayout(486,468,450)),Math.max(dp(160),height-header-bottom));lp.topMargin=0;}
+            super.onMeasure(widthSpec,heightSpec);
+        }
+    }
     private View buildBookDetailPage(final String date, boolean animatePage) {
-        LinearLayout page = new LinearLayout(this);
+        LinearLayout page = new CenteredNotebookPage();
         disableForceDark(page);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setClipToPadding(true);
         int horizontal = dp(spaceByLayout(22, 20, 18));
         page.setPadding(horizontal, dp(spaceByLayout(112, 106, 102)), horizontal, dp(18));
 
-        JSONObject day = ensureDay(date);
+        JSONObject day = dayReadSnapshot(date);
         addNotebookDetail(page, date, day);
         if (animatePage) {
             animateIn(page);
@@ -6230,28 +5312,13 @@ public class MainActivity extends Activity {
         return dates.get(nextIndex);
     }
 
-    private void openAdjacentBookDetail(String date, final int offset) {
-        final String nextDate = adjacentBookDate(date, offset);
-        if (nextDate == null) {
-            showGlassToast("没有相邻本子了", Toast.LENGTH_SHORT);
-            return;
-        }
-        playPageSwipeFeedback();
-        if (bookDetailSwipeFrame != null) {
-            bookDetailSwipeFrame.slideToDate(nextDate, offset);
-            return;
-        }
-        if (content == null || content.getChildCount() == 0) {
-            renderBookDetail(nextDate, false);
-            return;
-        }
-        renderBookDetail(nextDate, false);
-    }
 
     private void addNotebookDetail(LinearLayout page, String date, JSONObject day) {
-        FrameLayout paper = new FrameLayout(this);
+        RoundedClipFrameLayout paper = new RoundedClipFrameLayout(this);
+        paper.setClipRadius(dp(UiTokens.NOTEBOOK_RADIUS_DP));
         disableForceDark(paper);
         paper.setBackground(new NotebookPageDrawable());
+        paper.setClipToOutline(true);
         paper.setTag(TAG_BOOK_NOTEBOOK_PAGE);
         paper.setElevation(dp(3));
 
@@ -6259,6 +5326,8 @@ public class MainActivity extends Activity {
         paperScroll.setFillViewport(true);
         paperScroll.setVerticalFadingEdgeEnabled(true);
         paperScroll.setFadingEdgeLength(dp(22));
+        paperScroll.setVerticalScrollBarEnabled(true);
+        paperScroll.setContentDescription("记录本内页，可上下滚动查看完整记录，左右滑动翻页");
 
         LinearLayout notebook = new LinearLayout(this);
         notebook.setOrientation(LinearLayout.VERTICAL);
@@ -6268,7 +5337,7 @@ public class MainActivity extends Activity {
         paper.addView(paperScroll, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout.LayoutParams paperLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(spaceByLayout(540, 520, 500)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(spaceByLayout(486, 468, 450)));
         paperLp.topMargin = dp(18);
         page.addView(paper, paperLp);
 
@@ -6320,72 +5389,23 @@ public class MainActivity extends Activity {
             calorie.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    JSONObject target = ensureDay(date);
-                    if (target.optBoolean("manualCaloriesOverride", false)) {
-                        showManualMealStatsDialog(date);
-                        return;
-                    }
-                    target.remove("calories");
-                    target.remove("calorieSignature");
-                    target.remove("caloriePending");
-                    saveDays();
-                    showGlassToast("正在重新估算热量...", Toast.LENGTH_SHORT);
-                    requestCalorieEstimate(date, target, true);
-                    renderBookDetail(date, false);
+                    foodUi().dayNutrition(date);
                 }
             });
             notebook.addView(calorie);
         }
-        requestCalorieEstimateIfNeeded(date, day);
+        TextView remaining=label("上滑查看余下记录 ↓",11,UiTokens.secondary(nightDecoration()),false);
+        remaining.setTag("notebook_remaining_hint");remaining.setGravity(Gravity.END);
+        remaining.setPadding(dp(6),dp(3),dp(6),dp(3));remaining.setBackground(round(UiTokens.card(nightDecoration()),dp(8),0,0));
+        remaining.setClickable(false);remaining.setFocusable(false);remaining.setVisibility(View.GONE);
+        FrameLayout.LayoutParams hintLp=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.END);
+        hintLp.rightMargin=dp(22);hintLp.bottomMargin=dp(3);paper.addView(remaining,hintLp);
+        Runnable updateRemaining=()->remaining.setVisibility(paperScroll.canScrollVertically(1)?View.VISIBLE:View.GONE);
+        paperScroll.setOnScrollChangeListener((v,x,y,oldX,oldY)->updateRemaining.run());
+        paperScroll.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->updateRemaining.run());
+        notebook.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->updateRemaining.run());
     }
 
-    private View notebookMealRow(String date, JSONObject day, MealOption mealOption, boolean last) {
-        JSONObject meal = optObj(day, mealOption.key);
-        String text = meal.optString("text", "").trim();
-        boolean skipped = meal.optBoolean("skipped", false);
-        JSONArray photos = meal.optJSONArray("photos");
-        int photoCount = photos == null ? 0 : photos.length();
-        if (skipped) {
-            text = skippedReminder(date, mealOption.key, mealOption.title);
-        } else if (text.length() == 0 && photoCount > 0) {
-            text = "留下了 " + photoCount + " 张图片";
-        } else if (text.length() == 0) {
-            text = "还没有记录";
-        }
-        String time = displayShortTime(meal.optString("time", ""));
-        if (time.length() == 0 && (skipped || text.trim().length() > 0 || photoCount > 0)) {
-            time = displayShortTime(meal.optString("skipTime", ""));
-        }
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(dp(10), dp(4), dp(8), last ? dp(0) : dp(18));
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        row.setLayoutParams(rowLp);
-
-        LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView question = label(mealQuestion(mealOption), 18, Color.rgb(86, 74, 64), true);
-        styleBookText(question, true, 1);
-        top.addView(question, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView timeView = label(time, 13, Color.rgb(142, 132, 120), false);
-        styleBookText(timeView, false, 0);
-        top.addView(timeView);
-        row.addView(top);
-
-        TextView body = label(text, 17, Color.rgb(76, 72, 70), false);
-        styleBookText(body, false, 2);
-        body.setPadding(0, dp(6), 0, 0);
-        body.setLineSpacing(dp(2), 1.08f);
-        row.addView(body);
-        if (photoCount > 0) {
-            TextView photoHint = label("photo×" + photoCount, 12, Color.rgb(158, 150, 138), false);
-            styleBookText(photoHint, false, 0);
-            photoHint.setPadding(0, dp(4), 0, 0);
-            row.addView(photoHint);
-        }
-        return row;
-    }
 
     private String notebookMealCountLine(JSONObject day) {
         int eaten = notebookEatenCount(day);
@@ -6399,12 +5419,7 @@ public class MainActivity extends Activity {
         int eaten = 0;
         for (MealOption mealOption : visibleMealsForDay(day)) {
             JSONObject meal = optObj(day, mealOption.key);
-            JSONArray photos = meal.optJSONArray("photos");
-            JSONArray stickers = meal.optJSONArray("stickers");
-            if (!meal.optBoolean("skipped", false)
-                    && (meal.optString("text", "").trim().length() > 0
-                    || (photos != null && photos.length() > 0)
-                    || (stickers != null && stickers.length() > 0))) {
+            if (FoodRecordText.hasMeal(meal)) {
                 eaten++;
             }
         }
@@ -6418,24 +5433,10 @@ public class MainActivity extends Activity {
             if (meal.optBoolean("skipped", false)) {
                 continue;
             }
-            String text = meal.optString("text", "").trim();
-            JSONArray photos = meal.optJSONArray("photos");
-            JSONArray stickers = meal.optJSONArray("stickers");
-            int photoCount = photos == null ? 0 : photos.length();
-            int stickerCount = stickers == null ? 0 : stickers.length();
-            if (text.length() == 0 && photoCount == 0 && stickerCount == 0) {
+            if (!FoodRecordText.hasMeal(meal)) {
                 continue;
             }
-            StringBuilder line = new StringBuilder();
-            line.append(mealPeriodName(mealOption.key)).append("吃了");
-            if (text.length() > 0) {
-                line.append(text);
-            } else if (stickerCount > 0) {
-                line.append(stickerCount).append("张贴纸");
-            } else {
-                line.append(photoCount).append("张图片");
-            }
-            lines.add(line.toString());
+            lines.add(FoodRecordText.story(mealPeriodName(mealOption.key),meal));
         }
         if (lines.isEmpty()) {
             lines.add("等一口好味道落进本子里。");
@@ -6454,6 +5455,7 @@ public class MainActivity extends Activity {
         notebook.addView(title);
 
         FrameLayout board = new FrameLayout(this);
+        board.setTag("notebook_media_board");
         board.setClipChildren(false);
         board.setClipToPadding(false);
         boolean straight = "straight".equals(bookStickerLayout());
@@ -6482,7 +5484,9 @@ public class MainActivity extends Activity {
             int pad = Math.max(0, stickerFramePadding() - dp(1));
             image.setPadding(pad, pad, pad, pad);
             if (!straight) {
-                image.setRotation(new float[]{-9f, 5f, -4f, 8f, -7f, 4f, -3f, 7f}[i % 8]);
+                image.setRotation(item.displayRotation + new float[]{-9f, 5f, -4f, 8f, -7f, 4f, -3f, 7f}[i % 8]);
+            } else {
+                image.setRotation(item.displayRotation);
             }
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size);
             int row = i / columns;
@@ -6496,52 +5500,22 @@ public class MainActivity extends Activity {
 
     private List<NotebookMedia> dayNotebookMedia(JSONObject day) {
         List<NotebookMedia> items = new ArrayList<NotebookMedia>();
-        boolean includePhotos = bookPhotoBoardEnabled();
-        for (MealOption mealOption : visibleMealsForDay(day)) {
-            JSONObject meal = optObj(day, mealOption.key);
-            if (meal.optBoolean("skipped", false)) {
-                continue;
+        java.util.HashSet<String> displayed = new java.util.HashSet<String>();
+        for (NotebookMediaEntries.Entry entry : NotebookMediaEntries.collect(day, true)) {
+            String file = entry.fileName;
+            boolean sticker = entry.sticker;
+            if (!new File(getFilesDir(), file).isFile() && NutritionStore.safeName(entry.fallbackFile)
+                    && new File(getFilesDir(), entry.fallbackFile).isFile()) {
+                file = entry.fallbackFile; sticker = false;
             }
-            addNotebookMedia(items, meal.optJSONArray("stickers"), true);
-            if (includePhotos) {
-                addNotebookMedia(items, meal.optJSONArray("photos"), false);
-            }
+            if (!new File(getFilesDir(), file).isFile()) continue;
+            if (!displayed.add(entry.mealKey + "/" + file)) continue;
+            items.add(new NotebookMedia(file, sticker, entry.displayRotation));
         }
         return items;
     }
 
-    private void addNotebookMedia(List<NotebookMedia> items, JSONArray array, boolean sticker) {
-        if (array == null) {
-            return;
-        }
-        for (int i = 0; i < array.length(); i++) {
-            String name = safeBackupFileName(array.optString(i));
-            if (name.length() > 0) {
-                items.add(new NotebookMedia(name, sticker));
-            }
-        }
-    }
 
-    private List<String> dayStickerNames(JSONObject day) {
-        List<String> names = new ArrayList<String>();
-        for (MealOption mealOption : visibleMealsForDay(day)) {
-            JSONObject meal = optObj(day, mealOption.key);
-            if (meal.optBoolean("skipped", false)) {
-                continue;
-            }
-            JSONArray stickers = meal.optJSONArray("stickers");
-            if (stickers == null) {
-                continue;
-            }
-            for (int i = 0; i < stickers.length(); i++) {
-                String name = safeBackupFileName(stickers.optString(i));
-                if (name.length() > 0) {
-                    names.add(name);
-                }
-            }
-        }
-        return names;
-    }
 
     private String notebookDayStory(String date, JSONObject day) {
         List<String> pieces = new ArrayList<String>();
@@ -6551,17 +5525,11 @@ public class MainActivity extends Activity {
             if (meal.optBoolean("skipped", false)) {
                 continue;
             }
-            String text = meal.optString("text", "").trim();
-            JSONArray photos = meal.optJSONArray("photos");
-            JSONArray stickers = meal.optJSONArray("stickers");
-            int photoCount = photos == null ? 0 : photos.length();
-            int stickerCount = stickers == null ? 0 : stickers.length();
-            if (text.length() == 0 && photoCount == 0 && stickerCount == 0) {
+            if (!FoodRecordText.hasMeal(meal)) {
                 continue;
             }
             eaten++;
-            String value = text.length() > 0 ? text : (stickerCount > 0 ? "留下了" + stickerCount + "张贴纸" : "留下了" + photoCount + "张图片");
-            pieces.add(mealPeriodName(mealOption.key) + "吃了" + value);
+            pieces.add(FoodRecordText.story(mealPeriodName(mealOption.key),meal));
         }
         if (pieces.isEmpty()) {
             return "今天还没有写下吃了什么，等一口好味道落进本子里。";
@@ -6617,15 +5585,19 @@ public class MainActivity extends Activity {
 
     private String notebookMediaLine(JSONObject day) {
         List<String> pieces = new ArrayList<String>();
+        List<NotebookMediaEntries.Entry> media = NotebookMediaEntries.collect(day, true);
         for (MealOption mealOption : visibleMealsForDay(day)) {
             JSONObject meal = optObj(day, mealOption.key);
             if (meal.optBoolean("skipped", false)) {
                 continue;
             }
-            JSONArray photos = meal.optJSONArray("photos");
-            JSONArray stickers = meal.optJSONArray("stickers");
-            int photoCount = photos == null ? 0 : photos.length();
-            int stickerCount = stickers == null ? 0 : stickers.length();
+            // Structured meals already say what was eaten above the image board.
+            JSONArray foodItems=meal.optJSONArray("foodItems");
+            if(foodItems!=null&&foodItems.length()>0)continue;
+            int photoCount = 0, stickerCount = 0;
+            for (NotebookMediaEntries.Entry entry : media) if (mealOption.key.equals(entry.mealKey)) {
+                if (entry.sticker) stickerCount++; else photoCount++;
+            }
             if (photoCount > 0 || stickerCount > 0) {
                 StringBuilder item = new StringBuilder(mealPeriodName(mealOption.key));
                 if (photoCount > 0) {
@@ -6651,80 +5623,25 @@ public class MainActivity extends Activity {
     }
 
     private String calorieLine(JSONObject day) {
+        JSONObject nutrients = NutritionStore.totals(day);
+        if (nutrients.optInt("count") > 0 && !day.optBoolean("manualCaloriesOverride")) {
+            return "今日约 " + dayTotalCalories(day) + " kcal · 蛋白质 " + Math.round(nutrients.optDouble("proteinG"))
+                    + "g · 碳水 " + Math.round(nutrients.optDouble("carbsG")) + "g · 脂肪 "
+                    + Math.round(nutrients.optDouble("fatG")) + "g（AI估算）";
+        }
         if (day != null && day.optBoolean("manualCaloriesOverride", false)) {
             int manual = dayTotalCalories(day);
             return manual > 0 ? "今日摄入热量 " + manual + " kcal（手动记录）" : "";
-        }
-        if (!calorieRecognitionEnabled()) {
-            return "";
         }
         int calories = day.optInt("calories", 0);
         if (calories > 0) {
             return "今日摄入热量约 " + calories + " kcal（AI 估算）";
         }
-        return apiEnabled() ? "今日摄入热量正在等待 AI 估算..." : "";
-    }
-
-    private void requestCalorieEstimateIfNeeded(final String date, final JSONObject day) {
-        requestCalorieEstimate(date, day, false);
-    }
-
-    private void requestCalorieEstimate(final String date, final JSONObject day, boolean force) {
-        if (day != null && day.optBoolean("manualCaloriesOverride", false)) {
-            return;
-        }
-        final String summary = caloriePromptSummary(date, day);
-        final String signature = String.valueOf(summary.hashCode());
-        if (!calorieRecognitionEnabled() || !apiEnabled() || day.optBoolean("caloriePending", false)) {
-            return;
-        }
-        if (!force && day.optInt("calories", 0) > 0
-                && signature.equals(day.optString("calorieSignature", ""))) {
-            return;
-        }
-        if (summary.trim().length() == 0) {
-            return;
-        }
-        try {
-            day.put("caloriePending", true);
-            saveDays();
-        } catch (JSONException ignored) {
-        }
-        final String endpoint = apiEndpoint();
-        final String key = profile.optString("apiKey", "");
-        final String model = apiModelName();
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                String prompt = "请根据下面这一天的饮食记录，粗略估算总摄入热量。只返回一个整数数字，不要单位，不要解释。记录：" + summary;
-                String text = callChatApi(endpoint, key, model, prompt);
-                final int calories = parseFirstPositiveInt(text);
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        JSONObject target = ensureDay(date);
-                        try {
-                            target.remove("caloriePending");
-                            if (calories > 0) {
-                                target.put("calories", calories);
-                                target.put("calorieSignature", signature);
-                                saveDays();
-                                if (inBookDetail && date.equals(bookDetailDate)) {
-                                    renderBookDetail(date, false);
-                                }
-                            } else {
-                                saveDays();
-                            }
-                        } catch (JSONException ignored) {
-                        }
-                    }
-                });
-            }
-        }).start();
+        return ""; // Historical estimates remain readable, but never launch the removed estimator.
     }
 
     private String caloriePromptSummary(String date, JSONObject day) {
-        StringBuilder sb = new StringBuilder();
+        StringBuilder sb = new StringBuilder(NutritionStore.summary(day));
         for (MealOption mealOption : visibleMealsForDay(day)) {
             JSONObject meal = optObj(day, mealOption.key);
             String dining = date.length() > 0 ? mealDiningText(date, mealOption.key)
@@ -6770,29 +5687,6 @@ public class MainActivity extends Activity {
         return sb.toString();
     }
 
-    private int parseFirstPositiveInt(String text) {
-        if (text == null) {
-            return 0;
-        }
-        StringBuilder digits = new StringBuilder();
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (c >= '0' && c <= '9') {
-                digits.append(c);
-            } else if (digits.length() > 0) {
-                break;
-            }
-        }
-        if (digits.length() == 0) {
-            return 0;
-        }
-        try {
-            return Math.max(0, Math.min(99999, Integer.parseInt(digits.toString())));
-        } catch (Exception e) {
-            return 0;
-        }
-    }
-
     private String mealPeriodName(String key) {
         if ("breakfast".equals(key)) {
             return "早上";
@@ -6812,18 +5706,6 @@ public class MainActivity extends Activity {
         return mealTitle(key);
     }
 
-    private String mealQuestion(MealOption meal) {
-        if ("breakfast".equals(meal.key)) {
-            return "早餐吃了什么？";
-        }
-        if ("lunch".equals(meal.key)) {
-            return "中午吃了什么？";
-        }
-        if ("dinner".equals(meal.key)) {
-            return "晚上吃了什么？";
-        }
-        return meal.title + "吃了什么？";
-    }
 
     private String displayShortTime(String time) {
         if (time == null) {
@@ -6840,24 +5722,7 @@ public class MainActivity extends Activity {
         return value;
     }
 
-    private Typeface bookDetailTypeface(boolean bold) {
-        String style = bookFontStyle();
-        int weight = bold ? Typeface.BOLD : Typeface.NORMAL;
-        Typeface typeface = isDownloadableBookFont(style) ? downloadedBookTypeface(style) : null;
-        if (typeface != null) {
-            return Typeface.create(typeface, weight);
-        }
-        if (isDownloadableBookFont(style)) {
-            return Typeface.create(Typeface.DEFAULT, weight);
-        }
-        if ("slim".equals(style)) {
-            return Typeface.create("sans-serif-condensed", weight);
-        }
-        if (!"default".equals(style)) {
-            return Typeface.create("casual", weight);
-        }
-        return Typeface.create(Typeface.DEFAULT, weight);
-    }
+    private Typeface bookDetailTypeface(boolean bold) { return AppTypography.typeface(this,bold); }
 
     private boolean isDownloadableBookFont(String style) {
         return "xiaolai".equals(style) || "yozai".equals(style) || "wenkai".equals(style)
@@ -6892,6 +5757,7 @@ public class MainActivity extends Activity {
     }
 
     private Typeface downloadedBookTypeface(String style) {
+        if ("xiaolai".equals(style)) return AppTypography.defaultTypeface(this,false);
         if (downloadedTypefaceCache.containsKey(style)) {
             return downloadedTypefaceCache.get(style);
         }
@@ -7054,6 +5920,7 @@ public class MainActivity extends Activity {
                         @Override
                         public void run() {
                             downloadedTypefaceCache.put(style, downloaded);
+                            AppTypography.invalidate();
                             progress.setIndeterminate(false);
                             progress.setProgress(100);
                             percent.setText("100%");
@@ -7154,590 +6021,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void renderCalendar() {
-        syncSelectedDateToViewingMonth();
-        FrameLayout host = new FrameLayout(this);
-        disableForceDark(host);
-        content.addView(host, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        ScrollView scroll = pageScroll();
-        LinearLayout page = basePage();
-        scroll.addView(page);
-        host.addView(scroll, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView title = label("日历", 34, Color.rgb(28, 28, 30), true);
-        title.setClickable(true);
-        attachPressAnimation(title);
-        title.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (footprintCalendarMerged()) {
-                    showFootprintsCalendar(false);
-                }
-            }
-        });
-        top.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        top.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1));
-        if (settingsHidden()) {
-            TextView settings = label("⚙", 22, Color.rgb(178, 182, 188), false);
-            settings.setGravity(Gravity.CENTER);
-            settings.setBackground(round(nightDecoration() ? Color.argb(70, 70, 74, 80) : Color.argb(118, 246, 248, 250),
-                    dp(20), nightDecoration() ? Color.argb(60, 210, 216, 225) : Color.TRANSPARENT, nightDecoration() ? dp(1) : 0));
-            settings.setAlpha(0.62f);
-            settings.setClickable(true);
-            attachPressAnimation(settings);
-            settings.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    showTab(3, true);
-                }
-            });
-            top.addView(settings, new LinearLayout.LayoutParams(dp(42), dp(42)));
-        }
-        installStickyHeader(host, scroll, page, top);
-
-        calendarCardHost = new FrameLayout(this);
-        calendarCardHost.setClipChildren(false);
-        calendarCardHost.setClipToPadding(false);
-        calendarCardHost.setPadding(0, 0, 0, 0);
-        calendarCardHost.setBackgroundColor(Color.TRANSPARENT);
-        disableForceDark(calendarCardHost);
-        calendarCardView = newCalendarCardView();
-        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        cardLp.topMargin = dp(spaceByLayout(26, 23, 20));
-        page.addView(calendarCardHost, cardLp);
-        calendarCardHost.addView(calendarCardView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        calendarSummaryView = new LinearLayout(this);
-        calendarSummaryView.setOrientation(LinearLayout.VERTICAL);
-        calendarSummaryView.setPadding(dp(16), dp(14), dp(16), dp(14));
-        calendarSummaryView.setBackground(surfaceRound(dp(18)));
-        bindCalendarSummarySwipe();
-        LinearLayout.LayoutParams summaryLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        summaryLp.topMargin = dp(calendarCollapsed ? 9 : 18);
-        page.addView(calendarSummaryView, summaryLp);
-        refreshCalendarOnly(false);
-        page.addView(space(dp(120)));
-        animateIn(page);
-    }
-
-    private TextView arrowButton(String value) {
-        TextView v = label(value, 30, Color.WHITE, true);
-        v.setGravity(Gravity.CENTER);
-        v.setBackground(round(accent, dp(22), Color.rgb(197, 239, 203), dp(3)));
-        v.setElevation(dp(3));
-        attachPressAnimation(v);
-        return v;
-    }
-
-    private CalendarSwipeLayout newCalendarCardView() {
-        CalendarSwipeLayout card = new CalendarSwipeLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(18), dp(calendarCollapsed ? 14 : 18), dp(18), dp(calendarCollapsed ? 12 : 18));
-        card.setBackground(round(surfaceColor(), dp(22),
-                nightDecoration() ? surfaceStrokeColor() : Color.argb(36, 80, 92, 108), dp(1)));
-        card.setElevation(0f);
-        disableForceDark(card);
-        return card;
-    }
-
-    private void refreshCalendarOnly(boolean animate) {
-        if (calendarCardView == null || calendarSummaryView == null || calendarCardHost == null) {
-            renderCurrent();
-            return;
-        }
-        if (animate && calendarSlideDirection != 0) {
-            slideCalendarCard(calendarSlideDirection);
-            calendarSlideDirection = 0;
-            return;
-        }
-        if (animate && calendarCardView.getChildCount() > 0) {
-            calendarCardView.animate().cancel();
-            final int startHeight = Math.max(1, Math.max(calendarCardView.getHeight(), calendarCardView.getMeasuredHeight()));
-            rebuildCalendarCard();
-            rebuildCalendarSummary();
-            ViewGroup.LayoutParams measureLp = calendarCardView.getLayoutParams();
-            measureLp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-            calendarCardView.setLayoutParams(measureLp);
-            int measureWidth = calendarCardView.getWidth();
-            if (measureWidth <= 0) {
-                measureWidth = getResources().getDisplayMetrics().widthPixels - dp(44);
-            }
-            calendarCardView.measure(
-                    View.MeasureSpec.makeMeasureSpec(measureWidth, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-            final int endHeight = Math.max(1, calendarCardView.getMeasuredHeight());
-            ViewGroup.LayoutParams lp = calendarCardView.getLayoutParams();
-            lp.height = startHeight;
-            calendarCardView.setLayoutParams(lp);
-            animateCalendarHeight(startHeight, endHeight);
-            calendarSummaryView.setAlpha(0.9f);
-            calendarSummaryView.setTranslationY(dp(5));
-            calendarSummaryView.animate().alpha(1f).translationY(0f).setDuration(280).start();
-            return;
-        }
-        rebuildCalendarCard();
-        rebuildCalendarSummary();
-        if (animate) {
-            calendarCardView.setAlpha(0.97f);
-            calendarCardView.setTranslationY(dp(4));
-            calendarCardView.animate().alpha(1f).translationY(0f).setDuration(230).start();
-            calendarSummaryView.setAlpha(0.97f);
-            calendarSummaryView.animate().alpha(1f).setDuration(230).start();
-        }
-    }
-
-    private void slideCalendarCard(final int direction) {
-        if (calendarSliding) {
-            return;
-        }
-        calendarSliding = true;
-        final LinearLayout oldCard = calendarCardView;
-        oldCard.animate().cancel();
-        for (int i = calendarCardHost.getChildCount() - 1; i >= 0; i--) {
-            View child = calendarCardHost.getChildAt(i);
-            if (child != oldCard) {
-                calendarCardHost.removeViewAt(i);
-            }
-        }
-
-        final int width = Math.max(1, Math.max(calendarCardHost.getWidth(),
-                getResources().getDisplayMetrics().widthPixels - dp(44)));
-        final int oldHeight = measuredViewHeight(oldCard, width);
-        CalendarSwipeLayout nextCard = newCalendarCardView();
-        calendarCardView = nextCard;
-        rebuildCalendarCard();
-        rebuildCalendarSummary();
-        final int nextHeight = measuredViewHeight(nextCard, width);
-        ViewGroup.LayoutParams hostLp = calendarCardHost.getLayoutParams();
-        hostLp.height = Math.max(oldHeight, nextHeight);
-        calendarCardHost.setLayoutParams(hostLp);
-
-        final float travel = (width + dp(14)) * direction;
-        nextCard.setTranslationX(travel);
-        nextCard.setAlpha(1f);
-        calendarCardHost.addView(nextCard, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        oldCard.animate()
-                .translationX(-travel)
-                .alpha(0.98f)
-                .setDuration(520)
-                .setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator())
-                .withEndAction(new Runnable() {
-                    @Override
-                    public void run() {
-                        calendarCardHost.removeView(oldCard);
-                        calendarCardView.setTranslationX(0f);
-                        calendarCardView.setAlpha(1f);
-                        ViewGroup.LayoutParams done = calendarCardHost.getLayoutParams();
-                        done.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                        calendarCardHost.setLayoutParams(done);
-                        calendarSliding = false;
-                    }
-                }).start();
-        nextCard.animate()
-                .translationX(0f)
-                .alpha(1f)
-                .setDuration(520)
-                .setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator())
-                .start();
-        calendarSummaryView.setAlpha(0.96f);
-        calendarSummaryView.setTranslationY(dp(2));
-        calendarSummaryView.animate()
-                .alpha(1f)
-                .translationY(0f)
-                .setDuration(380)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.35f))
-                .start();
-    }
-
-    private int measuredViewHeight(View view, int width) {
-        if (view.getHeight() > 0) {
-            return view.getHeight();
-        }
-        view.measure(
-                View.MeasureSpec.makeMeasureSpec(Math.max(1, width), View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        return Math.max(1, view.getMeasuredHeight());
-    }
-
-    private void animateCalendarHeight(final int startHeight, final int endHeight) {
-        final long start = System.currentTimeMillis();
-        final long duration = 380;
-        calendarCardView.post(new Runnable() {
-            @Override
-            public void run() {
-                float t = Math.min(1f, (System.currentTimeMillis() - start) / (float) duration);
-                float eased = t < 0.5f ? 4f * t * t * t : 1f - (float) Math.pow(-2f * t + 2f, 3) / 2f;
-                int h = startHeight + Math.round((endHeight - startHeight) * eased);
-                ViewGroup.LayoutParams lp = calendarCardView.getLayoutParams();
-                lp.height = h;
-                calendarCardView.setLayoutParams(lp);
-                if (t < 1f) {
-                    calendarCardView.post(this);
-                } else {
-                    ViewGroup.LayoutParams done = calendarCardView.getLayoutParams();
-                    done.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-                    calendarCardView.setLayoutParams(done);
-                }
-            }
-        });
-    }
-
-    private void rebuildCalendarCard() {
-        calendarCardView.removeAllViews();
-        calendarCardView.setPadding(dp(18), dp(calendarCollapsed ? 14 : 18), dp(18), dp(calendarCollapsed ? 12 : 18));
-        LinearLayout monthRow = row(Gravity.CENTER_VERTICAL);
-        TextView prev = arrowButton("‹");
-        prev.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (calendarCollapsed) {
-                    moveWeek(-1);
-                } else {
-                    moveMonth(-1);
-                }
-            }
-        });
-        monthRow.addView(prev, new LinearLayout.LayoutParams(dp(58), dp(46)));
-        TextView month = label(String.format(Locale.CHINA, "%04d年%02d月", viewingYear, viewingMonth + 1),
-                25, Color.rgb(25, 25, 25), true);
-        month.setGravity(Gravity.CENTER);
-        monthRow.addView(month, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView next = arrowButton("›");
-        next.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (calendarCollapsed) {
-                    moveWeek(1);
-                } else {
-                    moveMonth(1);
-                }
-            }
-        });
-        monthRow.addView(next, new LinearLayout.LayoutParams(dp(58), dp(46)));
-        calendarCardView.addView(monthRow);
-
-        GridView grid = new GridView(this);
-        grid.setNumColumns(7);
-        grid.setVerticalSpacing(dp(calendarCollapsed ? 4 : 8));
-        grid.setHorizontalSpacing(dp(6));
-        grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
-        grid.setSelector(android.R.color.transparent);
-        grid.setVerticalScrollBarEnabled(false);
-        final List<CalendarCell> cells = calendarCells(calendarCollapsed);
-        grid.setAdapter(new CalendarAdapter(cells));
-        final float[] gridDownX = new float[1];
-        final float[] gridDownY = new float[1];
-        final boolean[] calendarGestureMoved = new boolean[]{false};
-        grid.setOnTouchListener(new View.OnTouchListener() {
-            @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                    gridDownX[0] = event.getX();
-                    gridDownY[0] = event.getY();
-                    calendarGestureMoved[0] = false;
-                    v.setLongClickable(true);
-                } else if (event.getAction() == MotionEvent.ACTION_MOVE) {
-                    float dx = Math.abs(event.getX() - gridDownX[0]);
-                    float dy = Math.abs(event.getY() - gridDownY[0]);
-                    if (dx > dp(6) || dy > dp(6)) {
-                        calendarGestureMoved[0] = true;
-                        v.setLongClickable(false);
-                    }
-                } else if (event.getAction() == MotionEvent.ACTION_UP
-                        || event.getAction() == MotionEvent.ACTION_CANCEL) {
-                    v.postDelayed(new Runnable() {
-                        @Override
-                        public void run() {
-                            calendarGestureMoved[0] = false;
-                            grid.setLongClickable(true);
-                        }
-                    }, 140);
-                }
-                return false;
-            }
-        });
-        grid.setOnItemClickListener(new AdapterView.OnItemClickListener() {
-            @Override
-            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-                if (calendarGestureMoved[0] || calendarSliding) {
-                    return;
-                }
-                CalendarCell cell = cells.get(position);
-                if (cell.date.length() > 0) {
-                    selectedCalendarDate = cell.date;
-                    syncViewingMonthToSelected();
-                    refreshCalendarOnly(true);
-                }
-            }
-        });
-        grid.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
-            @Override
-            public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
-                if (calendarGestureMoved[0] || calendarSliding) {
-                    return true;
-                }
-                final CalendarCell cell = cells.get(position);
-                if (cell.date.length() == 0) {
-                    return true;
-                }
-                showMoodEmojiPicker(cell.date, new Runnable() {
-                    @Override
-                    public void run() {
-                        selectedCalendarDate = cell.date;
-                        syncViewingMonthToSelected();
-                        refreshCalendarOnly(true);
-                    }
-                });
-                return true;
-            }
-        });
-        calendarCardView.addView(grid, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(calendarCollapsed ? spaceByLayout(112, 106, 100) : spaceByLayout(430, 400, 370))));
-    }
-
-    private void rebuildCalendarSummary() {
-        ViewGroup.LayoutParams rawLp = calendarSummaryView.getLayoutParams();
-        if (rawLp instanceof LinearLayout.LayoutParams) {
-            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) rawLp;
-            int wanted = dp(calendarCollapsed ? 9 : 18);
-            if (lp.topMargin != wanted) {
-                lp.topMargin = wanted;
-                calendarSummaryView.setLayoutParams(lp);
-            }
-        }
-        calendarSummaryView.removeAllViews();
-        calendarSummaryView.addView(label(displayDate(selectedCalendarDate) + " " + dayEmoji(selectedCalendarDate), 20,
-                Color.rgb(35, 35, 35), true));
-        addCalendarMealSummaryRows(calendarSummaryView, selectedCalendarDate);
-    }
-
-    private void bindCalendarSummarySwipe() {
-        calendarSummaryView.setOnTouchListener(new View.OnTouchListener() {
-            float downX;
-            float downY;
-            boolean horizontal;
-
-            @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-                    downX = event.getRawX();
-                    downY = event.getRawY();
-                    horizontal = false;
-                    ViewParent parent = v.getParent();
-                    if (parent != null) {
-                        parent.requestDisallowInterceptTouchEvent(false);
-                    }
-                    return true;
-                }
-                if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
-                    float dx = event.getRawX() - downX;
-                    float dy = event.getRawY() - downY;
-                    float absX = Math.abs(dx);
-                    float absY = Math.abs(dy);
-                    if (!horizontal && absX > dp(12) && absX > absY * 1.12f) {
-                        horizontal = true;
-                        ViewParent parent = v.getParent();
-                        if (parent != null) {
-                            parent.requestDisallowInterceptTouchEvent(true);
-                        }
-                    }
-                    return horizontal;
-                }
-                if (event.getActionMasked() == MotionEvent.ACTION_UP
-                        || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-                    float dx = event.getRawX() - downX;
-                    float dy = event.getRawY() - downY;
-                    if (horizontal && Math.abs(dx) > dp(42) && Math.abs(dx) > Math.abs(dy) * 1.12f) {
-                        moveCalendarSummaryDay(dx < 0 ? 1 : -1);
-                        return true;
-                    }
-                    v.performClick();
-                    return true;
-                }
-                return true;
-            }
-        });
-    }
-
-    private void moveCalendarSummaryDay(int delta) {
-        if (calendarSliding || calendarSummaryView == null || calendarCardView == null) {
-            return;
-        }
-        Calendar selected = calendarFromKey(selectedCalendarDate);
-        selected.add(Calendar.DAY_OF_MONTH, delta);
-        selectedCalendarDate = dateKey(selected);
-        syncViewingMonthToSelected();
-        rebuildCalendarCard();
-        slideCalendarSummary(delta > 0 ? 1 : -1);
-        playHapticFeedback(calendarHapticEnabled());
-    }
-
-    private void slideCalendarSummary(final int direction) {
-        final int travel = Math.max(dp(72), Math.round(calendarSummaryView.getWidth() * 0.18f)) * direction;
-        calendarSummaryView.animate().cancel();
-        calendarSummaryView.animate()
-                .translationX(-travel)
-                .alpha(0.18f)
-                .setDuration(120)
-                .setInterpolator(new android.view.animation.AccelerateInterpolator())
-                .withEndAction(new Runnable() {
-                    @Override
-                    public void run() {
-                        rebuildCalendarSummary();
-                        calendarSummaryView.setTranslationX(travel);
-                        calendarSummaryView.setAlpha(0.2f);
-                        calendarSummaryView.animate()
-                                .translationX(0f)
-                                .alpha(1f)
-                                .setDuration(230)
-                                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.35f))
-                                .start();
-                    }
-                })
-                .start();
-    }
-
-    private void addCalendarMealSummaryRows(LinearLayout parent, String date) {
-        JSONObject day = optObj(days, date);
-        List<MealOption> meals = visibleMealsForDate(date);
-        boolean hasAny = false;
-        for (MealOption meal : meals) {
-            JSONObject mealObj = optObj(day, meal.key);
-            if (mealObj.optBoolean("skipped", false)) {
-                continue;
-            }
-            String text = calendarMealSummaryText(mealObj);
-            String dining = mealDiningText(date, meal.key);
-            boolean emptyMeal = "未记录".equals(text) && dining.length() == 0;
-            if (emptyMeal && mealCount(date) == 0 && dayDiningMethodsText(date).length() == 0) {
-                continue;
-            }
-            LinearLayout row = row(Gravity.CENTER_VERTICAL);
-            row.setPadding(0, dp(5), 0, 0);
-            TextView body = label(meal.title + "：" + text, 14,
-                    "未记录".equals(text) ? Color.rgb(150, 154, 160) : Color.rgb(96, 100, 108), false);
-            body.setSingleLine(false);
-            body.setMaxLines(3);
-            row.addView(body, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            if (dining.length() > 0) {
-                TextView tag = calendarDetailDiningTag(dining);
-                LinearLayout.LayoutParams tagLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(22));
-                tagLp.leftMargin = dp(6);
-                row.addView(tag, tagLp);
-            }
-            parent.addView(row);
-            hasAny = true;
-        }
-        if (!hasAny) {
-            TextView empty = label(daySummary(date), 15, Color.rgb(120, 124, 132), false);
-            empty.setPadding(0, dp(5), 0, 0);
-            parent.addView(empty);
-        }
-    }
-
-    private String calendarMealSummaryText(JSONObject mealObj) {
-        if (mealObj.optBoolean("skipped", false)) {
-            return "未记录";
-        }
-        String text = mealObj.optString("text", "").trim();
-        if (text.length() > 0) {
-            return text;
-        }
-        JSONArray stickers = mealObj.optJSONArray("stickers");
-        JSONArray photos = mealObj.optJSONArray("photos");
-        if (stickers != null && stickers.length() > 0) {
-            return "有贴纸记录";
-        }
-        if (photos != null && photos.length() > 0) {
-            return "有图片记录";
-        }
-        return "未记录";
-    }
-
-    private TextView calendarDetailDiningTag(String text) {
-        TextView tag = label(text, 11, blendColor(accent, Color.rgb(72, 78, 86), 0.42f), true);
-        tag.setGravity(Gravity.CENTER);
-        tag.setSingleLine(true);
-        tag.setPadding(dp(7), 0, dp(7), 0);
-        tag.setMinWidth(dp(38));
-        tag.setBackground(round(adjustAlpha(accentSoft, nightDecoration() ? 44 : 58),
-                dp(11), adjustAlpha(accent, 58), dp(1)));
-        return tag;
-    }
-
-    private void moveMonth(int delta) {
-        if (calendarSliding) {
-            return;
-        }
-        calendarSlideDirection = delta > 0 ? 1 : -1;
-        viewingMonth += delta;
-        if (viewingMonth < 0) {
-            viewingMonth = 11;
-            viewingYear--;
-        } else if (viewingMonth > 11) {
-            viewingMonth = 0;
-            viewingYear++;
-        }
-        selectedCalendarDate = preferredDateForViewingMonth();
-        refreshCalendarOnly(true);
-    }
-
-    private void moveWeek(int delta) {
-        if (calendarSliding) {
-            return;
-        }
-        calendarSlideDirection = delta > 0 ? 1 : -1;
-        Calendar selected = calendarFromKey(selectedCalendarDate);
-        selected.add(Calendar.DAY_OF_MONTH, delta * 7);
-        selectedCalendarDate = dateKey(selected);
-        syncViewingMonthToSelected();
-        refreshCalendarOnly(true);
-    }
-
-    private List<CalendarCell> calendarCells(boolean collapsed) {
-        List<CalendarCell> cells = new ArrayList<CalendarCell>();
-        String[] week = {"一", "二", "三", "四", "五", "六", "日"};
-        for (String s : week) {
-            cells.add(new CalendarCell("", s, true));
-        }
-
-        if (collapsed) {
-            Calendar selected = calendarFromKey(selectedCalendarDate);
-            int dayOfWeek = selected.get(Calendar.DAY_OF_WEEK);
-            int mondayIndex = dayOfWeek == Calendar.SUNDAY ? 6 : dayOfWeek - Calendar.MONDAY;
-            selected.add(Calendar.DAY_OF_MONTH, -mondayIndex);
-            for (int i = 0; i < 7; i++) {
-                boolean outMonth = selected.get(Calendar.YEAR) != viewingYear
-                        || selected.get(Calendar.MONTH) != viewingMonth;
-                cells.add(new CalendarCell(dateKey(selected),
-                        String.valueOf(selected.get(Calendar.DAY_OF_MONTH)), false, outMonth));
-                selected.add(Calendar.DAY_OF_MONTH, 1);
-            }
-            return cells;
-        }
-
-        Calendar cal = Calendar.getInstance();
-        cal.set(viewingYear, viewingMonth, 1);
-        int firstDay = cal.get(Calendar.DAY_OF_WEEK);
-        int mondayIndex = firstDay == Calendar.SUNDAY ? 6 : firstDay - Calendar.MONDAY;
-        for (int i = 0; i < mondayIndex; i++) {
-            cells.add(new CalendarCell("", "", false));
-        }
-        int max = cal.getActualMaximum(Calendar.DAY_OF_MONTH);
-        for (int d = 1; d <= max; d++) {
-            Calendar day = Calendar.getInstance();
-            day.set(viewingYear, viewingMonth, d);
-            cells.add(new CalendarCell(dateKey(day), String.valueOf(d), false));
-        }
-        while (cells.size() % 7 != 0) {
-            cells.add(new CalendarCell("", "", false));
-        }
-        return cells;
-    }
 
     private String holidayLabel(String date) {
         if (date == null || date.length() == 0) {
@@ -7805,29 +6088,6 @@ public class MainActivity extends Activity {
         return "";
     }
 
-    private void syncSelectedDateToViewingMonth() {
-        Calendar selected = calendarFromKey(selectedCalendarDate);
-        if (selected.get(Calendar.YEAR) != viewingYear || selected.get(Calendar.MONTH) != viewingMonth) {
-            selectedCalendarDate = preferredDateForViewingMonth();
-        }
-    }
-
-    private void syncViewingMonthToSelected() {
-        Calendar selected = calendarFromKey(selectedCalendarDate);
-        viewingYear = selected.get(Calendar.YEAR);
-        viewingMonth = selected.get(Calendar.MONTH);
-    }
-
-    private String preferredDateForViewingMonth() {
-        Calendar today = Calendar.getInstance();
-        if (today.get(Calendar.YEAR) == viewingYear && today.get(Calendar.MONTH) == viewingMonth) {
-            return dateKey(today);
-        }
-        Calendar first = Calendar.getInstance();
-        first.set(viewingYear, viewingMonth, 1);
-        return dateKey(first);
-    }
-
     private Calendar calendarFromKey(String key) {
         Calendar cal = Calendar.getInstance();
         try {
@@ -7845,290 +6105,16 @@ public class MainActivity extends Activity {
         return homeDateKey;
     }
 
-    private String homeTitle(String date) {
-        int offset = dayOffsetFromToday(date);
-        if (offset == 0) {
-            return "今日";
-        } else if (offset == -1) {
-            return "昨天";
-        } else if (offset == -2) {
-            return "前天";
-        } else if (offset < -2) {
-            return "以往";
-        } else if (offset == 1) {
-            return "明天";
-        } else if (offset == 2) {
-            return "后天";
-        }
-        return "以后";
-    }
 
-    private int dayOffsetFromToday(String date) {
-        Calendar target = calendarFromKey(date);
-        Calendar today = Calendar.getInstance();
-        target.set(Calendar.HOUR_OF_DAY, 0);
-        target.set(Calendar.MINUTE, 0);
-        target.set(Calendar.SECOND, 0);
-        target.set(Calendar.MILLISECOND, 0);
-        today.set(Calendar.HOUR_OF_DAY, 0);
-        today.set(Calendar.MINUTE, 0);
-        today.set(Calendar.SECOND, 0);
-        today.set(Calendar.MILLISECOND, 0);
-        long diff = target.getTimeInMillis() - today.getTimeInMillis();
-        return (int) (diff / (24L * 60L * 60L * 1000L));
-    }
 
-    private void chooseHomeDate() {
-        final Calendar[] picked = new Calendar[]{calendarFromKey(homeDate())};
-        if (dateKey(picked[0]).compareTo(dateKey(Calendar.getInstance())) > 0) {
-            picked[0] = Calendar.getInstance();
-        }
 
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(16));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        TextView title = label("切换日期", 22, Color.rgb(28, 28, 30), true);
-        title.setPadding(0, 0, 0, dp(6));
-        box.addView(title);
 
-        LinearLayout dateRow = row(Gravity.CENTER_VERTICAL);
-        dateRow.setPadding(dp(9), dp(9), dp(9), dp(9));
-        dateRow.setBackground(round(nightDecoration() ? Color.rgb(28, 29, 32) : Color.rgb(248, 250, 252),
-                dp(22), surfaceStrokeColor(), dp(1)));
-        final TextView yearText = datePartLabel("");
-        final TextView monthText = datePartLabel("");
-        final TextView dayText = datePartLabel("");
-        updateDatePartLabels(picked[0], yearText, monthText, dayText);
-        bindDatePart(yearText, picked, Calendar.YEAR, yearText, monthText, dayText);
-        bindDatePart(monthText, picked, Calendar.MONTH, yearText, monthText, dayText);
-        bindDatePart(dayText, picked, Calendar.DAY_OF_MONTH, yearText, monthText, dayText);
-        LinearLayout.LayoutParams partLp = new LinearLayout.LayoutParams(0, dp(52), 1);
-        partLp.rightMargin = dp(8);
-        dateRow.addView(datePartBox(yearText), partLp);
-        LinearLayout.LayoutParams monthLp = new LinearLayout.LayoutParams(0, dp(52), 1);
-        monthLp.rightMargin = dp(8);
-        dateRow.addView(datePartBox(monthText), monthLp);
-        dateRow.addView(datePartBox(dayText), new LinearLayout.LayoutParams(0, dp(52), 1));
-        box.addView(dateRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        actions.setPadding(0, dp(16), 0, 0);
-        TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        TextView save = dialogButton("切换", accent, Color.WHITE);
-        cancel.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-            }
-        });
-        save.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (dateKey(picked[0]).compareTo(dateKey(Calendar.getInstance())) > 0) {
-                    picked[0] = Calendar.getInstance();
-                }
-                homeDateKey = dateKey(picked[0]);
-                playCalendarFeedback();
-                dialog.dismiss();
-                renderCurrent();
-            }
-        });
-        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(78), dp(42));
-        cancelLp.rightMargin = dp(10);
-        actions.addView(cancel, cancelLp);
-        actions.addView(save, new LinearLayout.LayoutParams(dp(78), dp(42)));
-        box.addView(actions);
-        showRoundedDialog(dialog, box);
-    }
 
-    private void attachHomeDateSwipe(final TextView dateView) {
-        final float[] downX = new float[1];
-        final float[] downY = new float[1];
-        final boolean[] moved = new boolean[]{false};
-        dateView.setOnTouchListener(new View.OnTouchListener() {
-            @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                if (!v.isEnabled()) {
-                    return false;
-                }
-                if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                    clearCurrentTextFocus();
-                    downX[0] = event.getRawX();
-                    downY[0] = event.getRawY();
-                    moved[0] = false;
-                    ViewParent parent = v.getParent();
-                    while (parent != null) {
-                        parent.requestDisallowInterceptTouchEvent(true);
-                        parent = parent.getParent();
-                    }
-                    v.animate().scaleX(0.985f).scaleY(0.985f).setDuration(115).start();
-                    return true;
-                } else if (event.getAction() == MotionEvent.ACTION_MOVE) {
-                    float dx = event.getRawX() - downX[0];
-                    float dy = event.getRawY() - downY[0];
-                    if (Math.abs(dx) > dp(10) || Math.abs(dy) > dp(10)) {
-                        moved[0] = true;
-                    }
-                    return true;
-                } else if (event.getAction() == MotionEvent.ACTION_UP) {
-                    float dx = event.getRawX() - downX[0];
-                    float dy = event.getRawY() - downY[0];
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(205).start();
-                    if (Math.abs(dx) > dp(42) && Math.abs(dx) > Math.abs(dy) * 1.65f) {
-                        changeHomeDateBy(dx < 0 ? 1 : -1);
-                        return true;
-                    }
-                    if (!moved[0]) {
-                        v.performClick();
-                    }
-                    return true;
-                } else if (event.getAction() == MotionEvent.ACTION_CANCEL) {
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(205).start();
-                    return true;
-                }
-                return true;
-            }
-        });
-    }
 
-    private void changeHomeDateBy(final int offset) {
-        Calendar cal = calendarFromKey(homeDate());
-        cal.add(Calendar.DAY_OF_MONTH, offset);
-        if (dateKey(cal).compareTo(dateKey(Calendar.getInstance())) > 0) {
-            showGlassToast("还不能记录未来的饭饭", Toast.LENGTH_SHORT);
-            return;
-        }
-        homeDateKey = dateKey(cal);
-        playCalendarFeedback();
-        if (currentTab == 0 && !inStickerGalleryPage && !inBookDetail && !inPhotoViewer) {
-            refreshTodayDateOnly(offset);
-        } else {
-            renderCurrent();
-        }
-    }
 
-    private TextView datePartLabel(String text) {
-        TextView part = label(text, 18, Color.rgb(28, 28, 30), true);
-        part.setGravity(Gravity.CENTER);
-        part.setCameraDistance(dp(1200));
-        part.setBackground(round(nightDecoration() ? Color.rgb(30, 31, 34) : Color.WHITE, dp(16), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        attachPressAnimation(part);
-        return part;
-    }
 
-    private FrameLayout datePartBox(TextView part) {
-        FrameLayout box = new FrameLayout(this);
-        disableForceDark(box);
-        box.addView(part, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        return box;
-    }
 
-    private void bindDatePart(final TextView target, final Calendar[] picked, final int field,
-                              final TextView yearText, final TextView monthText, final TextView dayText) {
-        final float[] downY = new float[1];
-        target.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showGlassToast("上下滑动调整", Toast.LENGTH_SHORT);
-            }
-        });
-        target.setOnTouchListener(new View.OnTouchListener() {
-            @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                    clearCurrentTextFocus();
-                    downY[0] = event.getRawY();
-                    v.animate().scaleX(0.98f).scaleY(0.98f).setDuration(80).start();
-                    return false;
-                } else if (event.getAction() == MotionEvent.ACTION_UP
-                        || event.getAction() == MotionEvent.ACTION_CANCEL) {
-                    float dy = event.getRawY() - downY[0];
-                    if (Math.abs(dy) > dp(16)) {
-                        final String oldText = target instanceof TextView ? ((TextView) target).getText().toString() : "";
-                        if (changeDatePart(picked[0], field, dy < 0 ? 1 : -1)) {
-                            updateDatePartLabels(picked[0], yearText, monthText, dayText);
-                            animateDatePartChange(target, oldText, dy < 0 ? 1 : -1);
-                            playCalendarFeedback();
-                        } else {
-                            showGlassToast("还不能选择未来日期", Toast.LENGTH_SHORT);
-                        }
-                        v.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
-                        return true;
-                    }
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
-                }
-                return false;
-            }
-        });
-    }
-
-    private void animateDatePartChange(final View target, String oldText, int direction) {
-        target.animate().cancel();
-        final TextView ghost = label(oldText, 18, Color.rgb(28, 28, 30), true);
-        ghost.setGravity(Gravity.CENTER);
-        ghost.setCameraDistance(dp(1200));
-        ghost.setBackground(round(nightDecoration() ? Color.rgb(30, 31, 34) : Color.WHITE,
-                dp(16), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        final ViewGroup parent = target.getParent() instanceof FrameLayout ? (ViewGroup) target.getParent() : null;
-        if (parent != null && oldText.length() > 0) {
-            parent.addView(ghost, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            ghost.setPivotY(direction < 0 ? parent.getHeight() : 0f);
-            ghost.animate()
-                    .rotationX(-direction * 72f)
-                    .translationY(-direction * dp(16))
-                    .alpha(0f)
-                    .setDuration(260)
-                    .setInterpolator(new android.view.animation.AccelerateInterpolator(1.15f))
-                    .withEndAction(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (ghost.getParent() instanceof ViewGroup) {
-                                ((ViewGroup) ghost.getParent()).removeView(ghost);
-                            }
-                        }
-                    }).start();
-        }
-        target.setPivotY(direction < 0 ? 0f : target.getHeight());
-        target.setRotationX(direction * 74f);
-        target.setTranslationY(dp(24) * direction);
-        target.setAlpha(0.18f);
-        target.setScaleX(0.98f);
-        target.setScaleY(0.98f);
-        target.animate()
-                .translationY(0f)
-                .rotationX(0f)
-                .alpha(1f)
-                .scaleX(1f)
-                .scaleY(1f)
-                .setDuration(360)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.55f))
-                .start();
-    }
-
-    private boolean changeDatePart(Calendar cal, int field, int amount) {
-        Calendar candidate = (Calendar) cal.clone();
-        if (field == Calendar.DAY_OF_MONTH) {
-            candidate.add(Calendar.DAY_OF_MONTH, amount);
-        } else {
-            int day = candidate.get(Calendar.DAY_OF_MONTH);
-            candidate.set(Calendar.DAY_OF_MONTH, 1);
-            candidate.add(field, amount);
-            candidate.set(Calendar.DAY_OF_MONTH, Math.min(day, candidate.getActualMaximum(Calendar.DAY_OF_MONTH)));
-        }
-        if (dateKey(candidate).compareTo(dateKey(Calendar.getInstance())) > 0) {
-            return false;
-        }
-        cal.setTimeInMillis(candidate.getTimeInMillis());
-        return true;
-    }
-
-    private void updateDatePartLabels(Calendar cal, TextView yearText, TextView monthText, TextView dayText) {
-        yearText.setText(String.format(Locale.CHINA, "%04d年", cal.get(Calendar.YEAR)));
-        monthText.setText(String.format(Locale.CHINA, "%02d月", cal.get(Calendar.MONTH) + 1));
-        dayText.setText(String.format(Locale.CHINA, "%02d日", cal.get(Calendar.DAY_OF_MONTH)));
-    }
 
     private void renderMe() {
         content.removeAllViews();
@@ -8138,55 +6124,34 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
         inRecycleBinPage = false;
-        inHiddenSettingsPage = false;
         inUpdateLogPage = false;
         inAboutSoftwarePage = false;
         inBookDetail = false;
         inPhotoViewer = false;
+        content.addView(buildMeRoot(),new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private View buildMeRoot() {
         FrameLayout host = new FrameLayout(this);
+        host.setTag("main_peer_me");
+        host.setContentDescription("我");
         disableForceDark(host);
-        content.addView(host, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
         scroll.addView(page);
         host.addView(scroll, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        View meHeader;
-        if (settingsHidden()) {
-            LinearLayout top = row(Gravity.CENTER_VERTICAL);
-            TextView back = label("‹", 38, Color.rgb(34, 34, 34), true);
-            back.setGravity(Gravity.CENTER);
-            back.setBackground(surfaceRound(dp(25)));
-            attachPressAnimation(back);
-            back.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    showTab(2, true);
-                }
-            });
-            top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-            TextView title = label("我", 34, Color.rgb(28, 28, 30), true);
-            title.setPadding(dp(14), 0, 0, 0);
-            top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            meHeader = top;
-        } else {
-            TextView title = label("我", 34, Color.rgb(28, 28, 30), true);
-            meHeader = title;
-        }
+        View meHeader=label("我",34,Color.rgb(28,28,30),true);
         installStickyHeader(host, scroll, page, meHeader);
 
         LinearLayout profileCard = row(Gravity.CENTER_VERTICAL);
-        int profileVerticalPadding = globalFontFollowsBookEnabled()
-                ? spaceByLayout(18, 17, 16) : spaceByLayout(22, 20, 18);
+        int profileVerticalPadding = spaceByLayout(18, 17, 16);
         profileCard.setPadding(dp(spaceByLayout(20, 18, 16)), dp(profileVerticalPadding),
                 dp(spaceByLayout(20, 18, 16)), dp(profileVerticalPadding));
-        profileCard.setBackground(new ProfileCardDrawable(accent, accentSoft, textureMode, nightDecoration(), profileGlassCardEnabled()));
+        profileCard.setBackground(PaperComponents.rounded(this, nightDecoration()));
         LinearLayout.LayoutParams profileLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         profileLp.topMargin = dp(spaceByLayout(26, 23, 20));
@@ -8243,7 +6208,8 @@ public class MainActivity extends Activity {
         idView.setBackground(round(adjustAlpha(accentSoft, nightDecoration() ? 62 : 148),
                 dp(12), adjustAlpha(accent, nightDecoration() ? 84 : 62), dp(1)));
         idView.setSingleLine(true);
-        LinearLayout.LayoutParams idLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(24));
+        idView.setMinHeight(dp(24));
+        LinearLayout.LayoutParams idLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         idLp.leftMargin = dp(8);
         nameRow.addView(idView, idLp);
         TextView signatureView = pill(profileTagline(), profilePillBackground(), profileTaglineColor(), 13);
@@ -8267,19 +6233,17 @@ public class MainActivity extends Activity {
         names.addView(signatureView, signatureLp);
 
         section(page, "偏好设置");
-        page.addView(settingRow("主题", "选择应用的整体颜色和气质", "@theme", Color.rgb(168, 50, 196), new View.OnClickListener() {
+        page.addView(settingRow("个性化", "主题、字体与食物贴纸轮廓", "@theme", Color.rgb(168, 50, 196), new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 openThemeSettingsPage();
             }
         }));
-        page.addView(settingRow("字体大小", fontSizeTitle(), "@font", Color.rgb(45, 166, 217), new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseFontSize();
-            }
-        }));
-        page.addView(settingRow("个性化", "全局、今日、足迹和其他设置", "@personalize", Color.rgb(232, 136, 67), new View.OnClickListener() {
+        View assistantEntry=settingRow("智能助手", "调用 API · 餐图识别 · 营养师", "@smart", accent,
+                v -> smoothContentSwap(() -> renderSmartAssistantPage(), 1f));
+        assistantEntry.setTag("me_smart_assistant");
+        page.addView(assistantEntry);
+        page.addView(settingRow("其他设置", "提醒、记录本与照片查看", "@personalize", Color.rgb(232, 136, 67), new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 openPreferencesPage();
@@ -8315,6 +6279,7 @@ public class MainActivity extends Activity {
         page.addView(version, versionLp);
         page.addView(space(dp(120)));
         animateIn(page);
+        return host;
     }
 
     private void openPreferencesPage() {
@@ -8525,13 +6490,20 @@ public class MainActivity extends Activity {
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(host, scroll, page, top);
 
-        TextView intro = label("本软件提供的自定义字体均来自 GitHub 开源字体项目，字体文件按需下载使用。各项目遵循其仓库内标注的开源许可。",
+        TextView intro = label("默认小赖手写已内置，可离线使用；其他字体按需下载。字体来自 GitHub 开源项目，版权和许可归对应作者，小赖字体 OFL 1.1 授权随安装包提供。",
                 15, nightDecoration() ? Color.rgb(158, 162, 170) : Color.rgb(118, 122, 130), false);
         intro.setPadding(dp(2), dp(16), dp(2), dp(18));
         intro.setLineSpacing(dp(4), 1.08f);
         page.addView(intro);
 
         addFontSourceLink(page, "小赖手写", "https://github.com/lxgw/kose-font");
+        page.addView(settingRow("内置字体授权","小赖手写 v3.126 · SIL OFL 1.1","@info",accent,v->{
+            try(InputStream in=getAssets().open("licenses/Xiaolai-OFL-1.1.txt")){
+                TextView licenseText=PaperComponents.text(this,FoodAnalysisClient.readLimited(in,16384),13,UiTokens.ink(nightDecoration()),false);
+                licenseText.setPadding(dp(18),dp(8),dp(18),dp(18));ScrollView licenseScroll=new ScrollView(this);licenseScroll.addView(licenseText);
+                PaperComponents.dialogBuilder(this,nightDecoration()).setTitle("小赖字体授权").setView(licenseScroll).setPositiveButton("完成",null).show();
+            }catch(Exception e){showGlassToast("字体授权暂时无法读取",Toast.LENGTH_SHORT);}
+        }));
         addFontSourceLink(page, "悠哉手写", "https://github.com/lxgw/yozai-font");
         addFontSourceLink(page, "文楷手写", "https://github.com/lxgw/LxgwWenKai");
         addFontSourceLink(page, "霞鹜漫黑", "https://github.com/lxgw/LxgwMarkerGothic");
@@ -8581,27 +6553,24 @@ public class MainActivity extends Activity {
     }
 
     private void openStickerGalleryPage() {
-        if (stickerGalleryHidden()) {
-            return;
-        }
-        softContentSwap(new Runnable() {
+        smoothContentSwap(new Runnable() {
             @Override
             public void run() {
                 renderStickerGalleryPage();
             }
-        });
+        },1f,true);
     }
 
     private void closeStickerGalleryPage() {
         stickerGalleryLoadGeneration++;
-        softContentSwap(new Runnable() {
+        smoothContentSwap(new Runnable() {
             @Override
             public void run() {
                 inStickerGalleryPage = false;
                 updateFab();
                 renderCurrent();
             }
-        });
+        }, -1f,true);
     }
 
     private void openUpdateLogPage() {
@@ -8619,10 +6588,7 @@ public class MainActivity extends Activity {
             public void run() {
                 inUpdateLogPage = false;
                 inStickerSettingsPage = false;
-                inStackSettingsPage = false;
-                inFootprintSettingsPage = false;
                 inDataSecurityPage = false;
-                inHiddenSettingsPage = false;
                 inStickerGalleryPage = false;
                 if (resumeAboutAfterUpdateLog) {
                     resumeAboutAfterUpdateLog = false;
@@ -8634,15 +6600,25 @@ public class MainActivity extends Activity {
         }, -1f);
     }
 
+    private void showBeginnerGuide(){
+        try(InputStream in=getAssets().open("help/getting-started.md")){
+            String guide=FoodAnalysisClient.readLimited(in,64*1024);
+            guide=guide.replaceAll("(?m)^#{1,6}\\s+","").replace("**","");
+            TextView body=label(guide,15,UiTokens.ink(nightDecoration()),false);
+            body.setTextIsSelectable(true);body.setPadding(dp(22),dp(8),dp(22),dp(20));body.setLineSpacing(dp(3),1.08f);
+            ScrollView scroll=new ScrollView(this);scroll.addView(body);
+            AlertDialog dialog=PaperComponents.dialogBuilder(this,nightDecoration()).setTitle("新手教程")
+                .setView(scroll).setPositiveButton("完成",null).create();
+            dialog.show();PaperComponents.styleDialog(dialog,nightDecoration());
+        }catch(Exception unavailable){showGlassToast("内置教程读取失败，请重试",Toast.LENGTH_SHORT);}
+    }
+
     private void renderUpdateLogPage() {
         inPreferencesPage = false;
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
         inUpdateLogPage = true;
         inAboutSoftwarePage = false;
         inBookDetail = false;
@@ -8678,7 +6654,7 @@ public class MainActivity extends Activity {
         tutorial.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                openUpdateUrl(OPENLIST_TUTORIAL_URL);
+                showBeginnerGuide();
             }
         });
         top.addView(tutorial, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)));
@@ -8698,6 +6674,8 @@ public class MainActivity extends Activity {
         page.addView(space(dp(120)));
         animateIn(page);
     }
+
+    private void openMealReminderSettingsPage(){smoothContentSwap(()->renderMealReminderSettingsPage(),1f);}
 
     private void openHintManagerPage() {
         smoothContentSwap(new Runnable() {
@@ -8753,23 +6731,7 @@ public class MainActivity extends Activity {
         }, -1f);
     }
 
-    private void openStackSettingsPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderStackSettingsPage();
-            }
-        }, 1f);
-    }
 
-    private void closeStackSettingsPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderPreferencesPage();
-            }
-        }, -1f);
-    }
 
     private void openFootprintSettingsPage() {
         smoothContentSwap(new Runnable() {
@@ -8807,14 +6769,6 @@ public class MainActivity extends Activity {
         }, -1f);
     }
 
-    private void openMoreSettingsPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderMoreSettingsPage();
-            }
-        }, 1f);
-    }
 
     private void closeMoreSettingsPage() {
         smoothContentSwap(new Runnable() {
@@ -8825,23 +6779,7 @@ public class MainActivity extends Activity {
         }, -1f);
     }
 
-    private void openExperimentalPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderExperimentalPage();
-            }
-        }, 1f);
-    }
 
-    private void closeExperimentalPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderPreferencesPage();
-            }
-        }, -1f);
-    }
 
     private void openDataSecurityPage() {
         smoothContentSwap(new Runnable() {
@@ -8897,7 +6835,10 @@ public class MainActivity extends Activity {
         }, -1f);
     }
 
-    private void openFavoriteRecordsPage() {
+    private void openFavoriteRecordsPage(){openFavoriteRecordsPage(false);}
+
+    private void openFavoriteRecordsPage(boolean fromBooks) {
+        favoriteRecordsFromBooks=fromBooks;
         smoothContentSwap(new Runnable() {
             @Override
             public void run() {
@@ -8910,46 +6851,15 @@ public class MainActivity extends Activity {
         smoothContentSwap(new Runnable() {
             @Override
             public void run() {
-                renderDataSecurityPage();
+                if(favoriteRecordsFromBooks){favoriteRecordsFromBooks=false;renderCurrent();}
+                else renderDataSecurityPage();
             }
         }, -1f);
     }
 
-    private void openHiddenSettingsPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderHiddenSettingsPage();
-            }
-        }, 1f);
-    }
 
-    private void closeHiddenSettingsPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderPreferencesPage();
-            }
-        }, -1f);
-    }
 
-    private void openHomeManagerPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderHomeManagerPage();
-            }
-        }, 1f);
-    }
 
-    private void closeHomeManagerPage() {
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderPreferencesPage();
-            }
-        }, -1f);
-    }
 
     private void openInterfaceLayoutPage() {
         smoothContentSwap(new Runnable() {
@@ -8964,7 +6874,7 @@ public class MainActivity extends Activity {
         smoothContentSwap(new Runnable() {
             @Override
             public void run() {
-                renderPreferencesPage();
+                renderNotebookSettingsPage();
             }
         }, -1f);
     }
@@ -8979,14 +6889,11 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
+        inNotebookSettingsPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
-        inExperimentalPage = false;
+        inSmartAssistantPage = false;
         inApiOfficialSitesPage = false;
         inUpdateLogPage = false;
         inBookDetail = false;
@@ -9010,85 +6917,45 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("个性化", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("其他设置", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
         section(page, "全局");
-        page.addView(settingRow("启动页面", startTabTitle(), "@start", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseStartTab();
-            }
-        }));
         page.addView(settingRow("震动", vibrationSummary(), "@vibration", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 openVibrationPage();
             }
         }));
-        page.addView(settingRow("界面布局", "今日与足迹布局", "@layout", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openInterfaceLayoutPage();
-            }
-        }));
+        page.addView(settingRow("三餐提醒",mealNotificationsEnabled()?"已开启 · "+mealNotificationTime("breakfastNotificationTime","08:00")+" / "+mealNotificationTime("lunchNotificationTime","12:00")+" / "+mealNotificationTime("dinnerNotificationTime","18:30"):"设置早餐、午餐和晚餐提醒", "@reminder",accent,v->openMealReminderSettingsPage()));
 
-        section(page, "今日");
-        page.addView(settingRow("餐次管理", activeMeals().size() + "个餐次", "@meals", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openHomeManagerPage();
-            }
-        }));
-        page.addView(settingRow("图片与贴纸", photoBgTitle() + " · " + stickerFrameTitle(), "@media", accent, new View.OnClickListener() {
+        section(page, "照片与文案");
+
+        page.addView(settingRow("照片查看", "原图背景 · " + photoBgTitle(), "@media", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 openStickerSettingsPage();
             }
         }));
-        page.addView(settingRow("提示词管理", promptCountText(), "@prompt", accent, new View.OnClickListener() {
+        page.addView(settingRow("未用餐文案", "管理未用餐时的记录本文字", "@prompt", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 openHintManagerPage();
             }
         }));
 
-        section(page, "足迹");
-        page.addView(settingRow("记录本封面", bookCoverStyleTitle(), "@cover", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openFootprintSettingsPage();
-            }
-        }));
-        page.addView(settingRow("笔记页面", "纸张 · 翻页", "@page", accent, new View.OnClickListener() {
+        section(page, "记录本");
+        page.addView(settingRow("记录本", "书架、封面、阅读与分享", "@page", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 openNotebookSettingsPage();
             }
         }));
 
-        section(page, "其他");
-        page.addView(settingRow("更多设置", "通知与 AI 功能", "@spark", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openMoreSettingsPage();
-            }
-        }));
-        page.addView(settingRow("隐藏设置", settingsHidden() ? "开" : "关", "@hide", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openHiddenSettingsPage();
-            }
-        }));
-        page.addView(settingRow("实验性功能", "待开发中...", "@spark", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openExperimentalPage();
-            }
-        }));
-        page.addView(settingRow("恢复默认设置", "恢复刚下载时的个性化布局", "@reset", Color.rgb(132, 136, 144), new View.OnClickListener() {
+        section(page, "恢复出厂");
+        page.addView(settingRow("恢复出厂设置", "恢复当前界面的外观，不改记录和功能配置", "@reset", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 confirmResetPersonalizationDefaults();
@@ -9107,13 +6974,9 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
+        inNotebookSettingsPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inInterfaceLayoutPage = true;
-        inExperimentalPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
@@ -9135,44 +6998,26 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("界面布局", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("书架布局", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("统一调整今日页与足迹页的布局显示。", 14,
+        TextView hint = label("设置迹页记录本的排列、间距和日期显示。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         page.addView(hint);
 
-        section(page, "今日");
-        page.addView(settingRow("文本框", mealCardGlassTitle(), "@textbox", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseMealCardGlass();
-            }
-        }));
-        page.addView(settingRow("左侧条痕", timelineTitle(), "@stripe", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseTimelineStyle();
-            }
-        }));
 
-        section(page, "足迹");
-        page.addView(settingRow("笔记字体", bookFontTitle(), "@font", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseBookFont();
-            }
-        }));
-        page.addView(settingRow("页面布局", footprintLayoutTitle(), "@grid", accent, new View.OnClickListener() {
+
+        section(page, "书架");
+        page.addView(settingRow("排列方式", footprintLayoutTitle(), "@grid", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chooseFootprintLayout();
             }
         }));
-        page.addView(settingRow("每行本数", footprintColumns() + "本", "@columns", accent, new View.OnClickListener() {
+        if(footprintExpanded()) page.addView(settingRow("每行本数", footprintColumns() + "本", "@columns", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chooseFootprintColumns();
@@ -9191,22 +7036,10 @@ public class MainActivity extends Activity {
                     return setProfileBoolean("footprintDateSections", !footprintDateSectionsEnabled());
                 }
             }));
-            page.addView(settingsToggleRow("显示热量", footprintShowCaloriesEnabled(), new ToggleHandler() {
-                @Override
-                public boolean onToggle() {
-                    return setProfileBoolean("footprintShowCalories", !footprintShowCaloriesEnabled());
-                }
-            }));
-            page.addView(settingsToggleRow("显示消费", footprintShowSpendingEnabled(), new ToggleHandler() {
-                @Override
-                public boolean onToggle() {
-                    return setProfileBoolean("footprintShowSpending", !footprintShowSpendingEnabled());
-                }
-            }));
         }
         TextView footprintHint = label(footprintExpanded()
-                        ? "显示日期会按年份和月份分组；热量、消费和间距只作用于展开布局。"
-                        : "每行本数、显示日期、显示热量、显示消费和本子间距仅在展开布局中生效。",
+                        ? "显示日期会按年份和月份分组；每行本数和间距作用于网格书架。"
+                        : "每行本数、显示日期和本子间距仅在网格书架中生效。",
                 13, nightDecoration() ? Color.rgb(146, 150, 158) : Color.rgb(132, 136, 144), false);
         footprintHint.setPadding(dp(4), dp(8), dp(4), 0);
         page.addView(footprintHint);
@@ -9220,7 +7053,7 @@ public class MainActivity extends Activity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(22), dp(20), dp(22), dp(18));
         box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        box.addView(label("恢复默认设置？", 22, Color.rgb(28, 28, 30), true));
+        box.addView(label("恢复出厂设置？", 22, Color.rgb(28, 28, 30), true));
         TextView message = label("这只会恢复个性化布局、主题、字体、分享样式等界面设置，不会删除吃饭记录、图片、贴纸、头像和昵称。",
                 15, Color.rgb(92, 96, 104), false);
         message.setPadding(0, dp(10), 0, dp(16));
@@ -9256,33 +7089,21 @@ public class MainActivity extends Activity {
             profile.put("font", 100);
             profile.put("layout", "medium");
             profile.put("layoutLevel", 50);
-            profile.put("decoration", "green");
+            profile.put("decoration", "yellow");
             profile.put("startTab", 0);
             profile.put("photoBg", "black");
-            profile.put("timeline", "bold");
-            profile.put("mealCardAlpha", 245);
-            profile.put("mealCardGlass", 18);
+
             profile.put("hideSettings", false);
             profile.put("navHaptic", true);
             profile.put("calendarHaptic", true);
             profile.put("pageSwipeHaptic", true);
             profile.put("mediaEditHaptic", true);
             profile.put("vibrationLevel", 2);
-            profile.put("mediaStacking", false);
-            profile.put("galleryStack", true);
-            profile.put("apiEnabled", false);
-            profile.put("aiAnalysisEnabled", false);
-            profile.put("aiAutoAnalysis", false);
-            profile.put("aiVisionEnabled", false);
-            profile.put("aiRecordAccess", false);
-            profile.put("aiChatMemory", false);
-            profile.put("calorieRecognition", false);
-            profile.put("photoCollection", false);
-            profile.put("uploadCutout", true);
+
             profile.put("stickerFrame", "soft");
             profile.put("stickerColumns", 4);
             profile.put("stickerGroupMode", "day");
-            profile.put("footprintLayout", "original");
+            profile.put("footprintLayout", "expanded");
             profile.put("footprintColumns", 4);
             profile.put("footprintDateSections", false);
             profile.put("footprintShowCalories", false);
@@ -9290,7 +7111,7 @@ public class MainActivity extends Activity {
             profile.put("footprintGap", 10);
             profile.put("favoriteRecordsExpanded", false);
             profile.put("bookCoverStyle", "food");
-            profile.put("bookFont", "default");
+            profile.put("bookFont", "xiaolai");
             profile.put("notebookPageStyle", "cream");
             profile.put("bookStoryLayout", "split");
             profile.put("bookStickerLayout", "tilt");
@@ -9300,13 +7121,10 @@ public class MainActivity extends Activity {
             profile.put("bookFlipSoundMode", "soft");
             profile.put("bookShareMode", "fullscreen");
             profile.put("bookSharePaperOnly", false);
-            profile.put("profileGlassCard", false);
-            profile.put("navGlass", false);
-            profile.put("headerTransparent", false);
-            profile.put("globalFontFollowsBook", false);
+
+            profile.put("nightMode", false);
+            profile.put("foodStickerBorder", "dashed");
             profile.put("followSystemNight", false);
-            profile.put("autoCloudSync", false);
-            profile.put("meals", new JSONArray(DEFAULT_MEAL_KEYS));
             saveProfile();
             applyDecoration();
             updateSystemBars();
@@ -9322,66 +7140,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void renderHomeManagerPage() {
-        inPreferencesPage = true;
-        inHintManagerPage = false;
-        inVibrationPage = false;
-        inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
-        inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = true;
-        inBookDetail = false;
-        inPhotoViewer = false;
-        updateFab();
-        content.removeAllViews();
-        ScrollView scroll = pageScroll();
-        LinearLayout page = basePage();
-        scroll.addView(page);
-        content.addView(scroll);
-
-        LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView back = label("‹", 38, Color.rgb(34, 34, 34), true);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(surfaceRound(dp(25)));
-        attachPressAnimation(back);
-        back.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                closeHomeManagerPage();
-            }
-        });
-        top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("首页管理", 30, Color.rgb(28, 28, 30), true);
-        title.setPadding(dp(14), 0, 0, 0);
-        top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        installStickyHeader(scroll, page, top);
-
-        TextView hint = label("自定义今日页显示哪些餐次，关闭后对应餐卡会从首页隐藏。",
-                14, nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
-        hint.setPadding(0, dp(12), 0, dp(12));
-        hint.setLineSpacing(dp(2), 1.05f);
-        page.addView(hint);
-
-        section(page, "餐次");
-        for (final MealOption meal : allMealOptions()) {
-            page.addView(mealToggleRow(meal));
-        }
-        page.addView(space(dp(120)));
-        animateIn(page);
-    }
 
     private void renderVibrationPage() {
         inPreferencesPage = true;
         inHintManagerPage = false;
         inVibrationPage = true;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
@@ -9423,28 +7188,6 @@ public class MainActivity extends Activity {
                 return ok;
             }
         }));
-        page.addView(settingsToggleRow("日历振动", calendarHapticEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !calendarHapticEnabled();
-                boolean ok = setProfileBoolean("calendarHaptic", next);
-                if (ok && next) {
-                    playHapticFeedback(true);
-                }
-                return ok;
-            }
-        }));
-        page.addView(settingsToggleRow("滑动页面振动", pageSwipeHapticEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !pageSwipeHapticEnabled();
-                boolean ok = setProfileBoolean("pageSwipeHaptic", next);
-                if (ok && next) {
-                    playHapticFeedback(true);
-                }
-                return ok;
-            }
-        }));
         page.addView(settingsToggleRow("图片/贴纸编辑振动", mediaEditHapticEnabled(), new ToggleHandler() {
             @Override
             public boolean onToggle() {
@@ -9465,11 +7208,7 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = true;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
@@ -9491,198 +7230,34 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("图片与贴纸", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("照片查看", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("管理今日页图片、相册贴纸、贴纸栏和整理方式。", 14,
+        TextView hint = label("设置打开原图时的背景。记录本小图边框在记录本中设置，食物贴纸轮廓在个性化中设置。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
         page.addView(hint);
 
         section(page, "图片");
-        page.addView(settingRow("图片背景", photoBgTitle(), "@image", accent, new View.OnClickListener() {
+        page.addView(settingRow("原图背景", photoBgTitle(), "@image", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 choosePhotoBackground();
             }
         }));
 
-        section(page, "贴纸");
-        page.addView(settingsToggleRow("上传贴纸", uploadCutoutEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                return setProfileBoolean("uploadCutout", !uploadCutoutEnabled());
-            }
-        }));
-        page.addView(settingsToggleRow("贴纸上滑收缩", stickerCollapseEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !stickerCollapseEnabled();
-                boolean ok = setProfileBoolean("stickerCollapse", next);
-                if (ok) {
-                    showGlassToast(next ? "贴纸可以上滑收缩啦" : "已关闭贴纸上滑收缩", Toast.LENGTH_SHORT);
-                }
-                return ok;
-            }
-        }));
-        TextView importHint = label("开启上传贴纸后，右下角图片按钮会直接打开相册导入贴纸；也可以从系统分享面板把图片分享到一蔬一饭。", 14,
-                nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
-        importHint.setPadding(dp(4), dp(8), dp(4), dp(4));
-        importHint.setLineSpacing(dp(2), 1.05f);
-        page.addView(importHint);
 
-        section(page, "贴纸栏");
-        page.addView(photoCollectionRow());
-        page.addView(settingsToggleRow("合并贴纸", galleryStackEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !galleryStackEnabled();
-                boolean ok = setProfileBoolean("galleryStack", next);
-                if (ok) {
-                    showGlassToast(next ? "贴纸栏会合并叠放贴纸" : "贴纸栏会逐张显示贴纸", Toast.LENGTH_SHORT);
-                }
-                return ok;
-            }
-        }));
-
-        section(page, "样式");
-        page.addView(settingRow("贴纸边框", stickerFrameTitle(), "@sticker", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseStickerFrame();
-            }
-        }));
-        page.addView(settingsToggleRow("允许叠放图片/贴纸", mediaStackingEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !mediaStackingEnabled();
-                boolean ok = setProfileBoolean("mediaStacking", next);
-                if (ok && !next) {
-                    clearAllMediaStacks();
-                    showGlassToast("已取消已有叠放", Toast.LENGTH_SHORT);
-                }
-                return ok;
-            }
-        }));
         page.addView(space(dp(120)));
         animateIn(page);
     }
 
-    private void renderStackSettingsPage() {
-        inPreferencesPage = true;
-        inHintManagerPage = false;
-        inVibrationPage = false;
-        inStickerSettingsPage = false;
-        inStackSettingsPage = true;
-        inFootprintSettingsPage = false;
-        inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
-        inBookDetail = false;
-        inPhotoViewer = false;
-        updateFab();
-        content.removeAllViews();
-        ScrollView scroll = pageScroll();
-        LinearLayout page = basePage();
-        scroll.addView(page);
-        content.addView(scroll);
-
-        LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView back = label("‹", 38, Color.rgb(34, 34, 34), true);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(surfaceRound(dp(25)));
-        attachPressAnimation(back);
-        back.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                closeStackSettingsPage();
-            }
-        });
-        top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("叠放图片", 30, Color.rgb(28, 28, 30), true);
-        title.setPadding(dp(14), 0, 0, 0);
-        top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        installStickyHeader(scroll, page, top);
-
-        TextView hint = label("开启后，整理图片/贴纸时拖到另一张上会合成一组，只显示最上层图片和数量角标；点一下可展开或收回。",
-                14, nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
-        hint.setPadding(0, dp(12), 0, dp(12));
-        hint.setLineSpacing(dp(2), 1.05f);
-        page.addView(hint);
-
-        section(page, "整理方式");
-        page.addView(settingsToggleRow("允许叠放图片/贴纸", mediaStackingEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !mediaStackingEnabled();
-                boolean ok = setProfileBoolean("mediaStacking", next);
-                if (ok && !next) {
-                    clearAllMediaStacks();
-                    showGlassToast("已取消已有叠放", Toast.LENGTH_SHORT);
-                }
-                return ok;
-            }
-        }));
-        page.addView(space(dp(120)));
-        animateIn(page);
-    }
 
     private void renderFootprintSettingsPage() {
-        inPreferencesPage = true;
-        inHintManagerPage = false;
-        inVibrationPage = false;
-        inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = true;
-        inNotebookSettingsPage = false;
-        inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
-        inBookDetail = false;
-        inPhotoViewer = false;
-        updateFab();
-        content.removeAllViews();
-        ScrollView scroll = pageScroll();
-        LinearLayout page = basePage();
-        scroll.addView(page);
-        content.addView(scroll);
-
-        LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView back = label("‹", 38, Color.rgb(34, 34, 34), true);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(surfaceRound(dp(25)));
-        attachPressAnimation(back);
-        back.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                closeFootprintSettingsPage();
-            }
-        });
-        top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("记录本封面", 30, Color.rgb(28, 28, 30), true);
-        title.setPadding(dp(14), 0, 0, 0);
-        top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        installStickyHeader(scroll, page, top);
-
-        TextView hint = label("选择足迹页面每天记录本的封面样式，可以直接预览后切换。",
-                14, nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
-        hint.setPadding(0, dp(12), 0, dp(12));
-        hint.setLineSpacing(dp(2), 1.05f);
-        page.addView(hint);
-
-        section(page, "封面");
-        page.addView(settingRow("本子封面", bookCoverStyleTitle(), "@cover", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseBookCoverStyle();
-            }
-        }));
-
-        page.addView(space(dp(120)));
-        animateIn(page);
+        // Existing cover-picker callbacks return to the consolidated settings.
+        int y=currentContentScrollY();renderNotebookSettingsPage();restoreScrollPosition(currentPageScroll(),y);
     }
 
     private void renderNotebookSettingsPage() {
@@ -9690,19 +7265,16 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inNotebookSettingsPage = true;
+        inInterfaceLayoutPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
-        inExperimentalPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag("notebook_settings_page");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -9718,19 +7290,25 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("笔记页面", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("记录本", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("设置吃饭本子打开后的样式、页面和贴纸摆放。", 14,
+        TextView hint = label("书架、封面纸张、阅读和分享在这里统一设置。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
         page.addView(hint);
 
-        section(page, "格式");
-        page.addView(settingRow("衔接动画", bookTransitionModeTitle(), "@transition", accent, new View.OnClickListener() {
+        section(page,"书架");
+        page.addView(settingRow("书架布局",footprintLayoutTitle()+" · 排列与日期显示","@grid",accent,v->openInterfaceLayoutPage()));
+        section(page,"封面与纸张");
+        page.addView(settingRow("封面样式",bookCoverStyleTitle(),"@cover",accent,v->chooseBookCoverStyle()));
+        page.addView(settingRow("纸张样式",notebookPageStyleTitle(),"@page",accent,v->chooseNotebookPageStyle()));
+        page.addView(settingRow("记录本图片边框",stickerFrameTitle(),"@sticker",accent,v->chooseStickerFrame()));
+        section(page, "阅读");
+        page.addView(settingRow("翻页", bookTransitionModeTitle(), "@transition", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chooseBookTransitionMode();
@@ -9745,14 +7323,7 @@ public class MainActivity extends Activity {
             }));
         }
 
-        section(page, "外观");
-        page.addView(settingRow("纸张样式", notebookPageStyleTitle(), "@page", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                chooseNotebookPageStyle();
-            }
-        }));
-        section(page, "记录");
+        section(page, "阅读内容");
         final View storyLayoutRow = settingRow("记录方式", bookStoryLayoutTitle(), "@writing", accent, null);
         storyLayoutRow.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -9761,7 +7332,7 @@ public class MainActivity extends Activity {
             }
         });
         page.addView(storyLayoutRow);
-        final View stickerLayoutRow = settingRow("贴纸摆放", bookStickerLayoutTitle(), "@stickerlayout", accent, null);
+        final View stickerLayoutRow = settingRow("记录本图片摆放", bookStickerLayoutTitle(), "@stickerlayout", accent, null);
         stickerLayoutRow.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -9769,12 +7340,6 @@ public class MainActivity extends Activity {
             }
         });
         page.addView(stickerLayoutRow);
-        page.addView(settingRow("图片摆放", bookPhotoBoardEnabled() ? "开" : "关", "@photolayout", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                confirmBookPhotoBoard();
-            }
-        }));
 
         section(page, "分享");
         page.addView(settingRow("分享界面选项", bookShareModeTitle(), "@share", accent, new View.OnClickListener() {
@@ -9792,14 +7357,10 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = true;
         inCloudSyncPage = false;
         inRecycleBinPage = false;
         inFavoriteRecordsPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
@@ -9853,12 +7414,6 @@ public class MainActivity extends Activity {
                 openCloudSyncPage();
             }
         }));
-        page.addView(settingRow("删除数据", "二次确认后清空记录和餐卡图片", "@delete", Color.rgb(224, 96, 86), new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                confirmClearData();
-            }
-        }));
         page.addView(settingRow("恢复数据", "从本地备份文件读取并覆盖当前数据", "@restore", Color.rgb(82, 156, 112), new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -9871,6 +7426,9 @@ public class MainActivity extends Activity {
                 openRecycleBinPage();
             }
         }));
+
+        section(page,"谨慎操作");
+        page.addView(settingRow("删除数据", "二次确认后清空记录和餐卡图片", "@delete", Color.rgb(224, 96, 86), v->confirmClearData()));
 
         page.addView(space(dp(120)));
         animateIn(page);
@@ -10004,6 +7562,7 @@ public class MainActivity extends Activity {
 
         FrameLayout cover = new FrameLayout(this);
         cover.setBackground(new BookCoverDrawable(date, bookPalette(date, accent), bookCoverStyle()));
+        cover.setTag("footprint_plain_cover");cover.setClipToOutline(true);
         FavoriteStarView star = new FavoriteStarView(this);
         star.setFavorite(true);
         FrameLayout.LayoutParams starLp = new FrameLayout.LayoutParams(dp(30), dp(30), Gravity.RIGHT | Gravity.TOP);
@@ -10050,13 +7609,9 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
         inCloudSyncPage = true;
         inRecycleBinPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
@@ -10083,7 +7638,7 @@ public class MainActivity extends Activity {
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("同步会包含头像、昵称、个性签名、三餐记录、日历、小本本、图片贴纸和 AI 记录，但不会同步更多设置里的 API Key。", 14,
+        TextView hint = label("同步会包含头像、昵称、个性签名、三餐记录、日历、小本本、图片贴纸和 AI 记录，但不会同步本机的 API Key。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
@@ -10126,12 +7681,8 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
         inRecycleBinPage = true;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
@@ -10374,6 +7925,8 @@ public class MainActivity extends Activity {
             saveDays();
             removeRecycleAt(index);
             showGlassToast("已恢复", Toast.LENGTH_SHORT);
+            NutritionStore.restoreBundle(this, item.optString("date", homeDate()), item.optString("mealKey", "breakfast"), item.optJSONArray("foodItems"));
+            days = readJson(DATA_KEY);
             rerenderPreservingScroll(new Runnable() {
                 @Override
                 public void run() {
@@ -10456,6 +8009,9 @@ public class MainActivity extends Activity {
                     meal.put(arrayKey, media);
                 }
                 media.put(fileName);
+                saveDays();
+                NutritionStore.restoreBundle(this, item.optString("date", homeDate()), item.optString("mealKey", "breakfast"), item.optJSONArray("foodItems"));
+                days = readJson(DATA_KEY);
                 removeRecycleAt(i);
             } catch (JSONException ignored) {
             }
@@ -10547,6 +8103,11 @@ public class MainActivity extends Activity {
         if (file.exists() && file.isFile()) {
             file.delete();
         }
+        JSONArray foods=item.optJSONArray("foodItems");
+        for(int i=0;foods!=null&&i<foods.length();i++){
+            JSONObject food=foods.optJSONObject(i);String name=food==null?"":safeBackupFileName(food.optString("cutoutFile"));
+            if(name.length()>0 && !referencedMediaFileNames(days).contains(name)) new File(getFilesDir(),name).delete();
+        }
     }
 
     private void removeRecycleAt(int index) {
@@ -10567,24 +8128,34 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void renderHiddenSettingsPage() {
+
+    /** API callbacks return to the settings section they came from. */
+    private void renderMoreSettingsPage() { renderCurrentAssistantSettingsPage(); }
+
+    private void renderSmartAssistantPage() {
+        renderAssistantSettingsPage("");
+    }
+
+    private void renderFoodRecognitionSettingsPage() { renderAssistantSettingsPage("food"); }
+
+    private void renderNutritionistSettingsPage() { renderAssistantSettingsPage("nutritionist"); }
+
+    private void renderCurrentAssistantSettingsPage() { renderAssistantSettingsPage(smartAssistantSection); }
+
+    private void renderAssistantSettingsPage(String sectionKey) {
+        smartAssistantSection = sectionKey;
+        clearPreferencesSubPageFlags();
         inPreferencesPage = true;
-        inHintManagerPage = false;
-        inVibrationPage = false;
-        inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
-        inDataSecurityPage = false;
-        inHiddenSettingsPage = true;
-        inHomeManagerPage = false;
-        inInterfaceLayoutPage = false;
-        inExperimentalPage = false;
+        inSmartAssistantPage = true;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        boolean food = "food".equals(sectionKey), nutritionist = "nutritionist".equals(sectionKey);
+        boolean child = food || nutritionist;
+        page.setTag(food ? "food_recognition_settings_page" : nutritionist ? "nutritionist_settings_page" : "smart_assistant_page");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -10593,85 +8164,41 @@ public class MainActivity extends Activity {
         back.setGravity(Gravity.CENTER);
         back.setBackground(surfaceRound(dp(25)));
         attachPressAnimation(back);
-        back.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                closeHiddenSettingsPage();
-            }
+        back.setContentDescription(child ? "返回智能助手" : "返回我");
+        back.setOnClickListener(v -> {
+            if (child) smoothContentSwap(() -> renderSmartAssistantPage(), -1f);
+            else returnToMeRoot();
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("隐藏设置", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label(food ? "餐图识别" : nutritionist ? "营养师" : "智能助手", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("这里可以隐藏不常用入口，也可以决定足迹和日历是否合并显示。隐藏后点击对应标题或底栏不会跳转，也不会提示。",
-                14, nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
+        TextView hint = label(food ? "图片抠图在本机完成；菜名和营养估算需要配置你自己的视觉 API，并在发送餐图前同意上传。"
+                : nutritionist ? "开启后，在今日页再次点击底栏“今日”可进行饮食分析与问答，与餐图识别分别设置。"
+                : "餐图识别负责图片与营养估算；营养师负责饮食分析与问答。两者独立开关，共用本机 API 配置。", 14,
+                nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
         page.addView(hint);
-
-        section(page, "入口");
-        page.addView(hiddenSettingsRow());
-        page.addView(settingsToggleRow("隐藏贴纸栏", stickerGalleryHidden(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                return setProfileBoolean("hideStickerGallery", !stickerGalleryHidden());
-            }
-        }));
-        page.addView(settingsToggleRow("隐藏日历", calendarHidden(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !calendarHidden();
-                if (next && settingsHidden()) {
-                    showSimpleInfoDialog("不能同时隐藏", "日历和“我/设置”不能同时隐藏，否则会找不到设置入口。请先关闭隐藏设置。");
-                    return false;
-                }
-                if (setProfileBoolean("hideCalendar", next)) {
-                    if (next && profile.optInt("startTab", 0) == 2) {
-                        try {
-                            profile.put("startTab", 0);
-                            saveProfile();
-                        } catch (JSONException ignored) {
-                        }
-                    }
-                    buildNav();
-                    updateNav(false);
-                    return true;
-                }
-                return false;
-            }
-        }));
-        page.addView(settingsToggleRow("合并足迹和日历", footprintCalendarMerged(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !footprintCalendarMerged();
-                if (setProfileBoolean("mergeFootprintCalendar", next)) {
-                    buildNav();
-                    updateNav(false);
-                    return true;
-                }
-                return false;
-            }
-        }));
+        if (food) addFoodRecognitionSettings(page);
+        else if (nutritionist) addNutritionistSettings(page);
+        else addUsableAiSettings(page);
         page.addView(space(dp(120)));
         animateIn(page);
     }
 
-    private void renderMoreSettingsPage() {
+    private void renderMealReminderSettingsPage() {
         inPreferencesPage = true;
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inNotebookSettingsPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = true;
-        inExperimentalPage = false;
+        inSmartAssistantPage = false;
         inApiOfficialSitesPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
@@ -10694,42 +8221,106 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("AI功能", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("三餐提醒", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("可以在这里安排三餐提醒并管理 AI 能力。云同步不会同步 API Key、接口地址和模型配置。", 14,
+        TextView hint = label("按自己的用餐时间安排提醒；关闭后将取消三餐通知。", 14,
                 nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
         page.addView(hint);
 
-        section(page, "通知功能");
+        section(page, "三餐提醒");
         page.addView(settingsToggleRow("三餐通知", mealNotificationsEnabled(), new ToggleHandler() {
             @Override
             public boolean onToggle() {
                 return setMealNotificationsEnabled(!mealNotificationsEnabled());
             }
         }));
-        page.addView(notificationTimeRow("早餐提醒", "breakfastNotificationTime", "08:00", "早"));
-        page.addView(notificationTimeRow("午餐提醒", "lunchNotificationTime", "12:00", "午"));
-        page.addView(notificationTimeRow("晚餐提醒", "dinnerNotificationTime", "18:30", "晚"));
-
-        section(page, "AI 设置");
-        addUsableAiSettings(page);
+        page.addView(notificationTimeRow("早餐提醒", "breakfastNotificationTime", "08:00", "@reminder"));
+        page.addView(notificationTimeRow("午餐提醒", "lunchNotificationTime", "12:00", "@reminder"));
+        page.addView(notificationTimeRow("晚餐提醒", "dinnerNotificationTime", "18:30", "@reminder"));
         page.addView(space(dp(120)));
         animateIn(page);
     }
 
     private void addUsableAiSettings(LinearLayout page) {
-        page.addView(settingRow("调用 API", apiEnabled() ? "已启用 · " + apiModelName() + " · " + apiModelModeTitle() : "未启用", "API", accent, new View.OnClickListener() {
+        page.addView(settingRow("调用 API", apiEnabled() ? "已启用 · " + ApiModelPresentation.summary(profile,apiEndpoint(),apiModelName()) + " · " + apiModelModeTitle() : "未启用", "API", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 configureApi();
             }
         }));
-        page.addView(settingsToggleRow("AI分析", aiAnalysisEnabled(), new ToggleHandler() {
+        page.addView(settingRow("餐图识别", recognitionSummary(), "@spark", accent,
+                v -> smoothContentSwap(() -> renderFoodRecognitionSettingsPage(), 1f)));
+        page.addView(settingRow("营养师", aiAnalysisEnabled() ? "已开启 · 饮食分析与问答" : "饮食分析、记录读取与记忆", "@doll", accent,
+                v -> smoothContentSwap(() -> renderNutritionistSettingsPage(), 1f)));
+    }
+
+    private void addFoodRecognitionSettings(LinearLayout page) {
+        page.addView(settingRow("API 识别设置",recognitionSummary(),"@spark",accent,v->recognitionSetup().choose(false)));
+        page.addView(settingsToggleRow("自动识别菜名和营养", FoodAnalysisJobService.enabled(profile), () -> {
+            if (FoodAnalysisJobService.enabled(profile)) foodUi().disableNutrition();
+            else foodUi().enableNutrition();
+            return false; // Enabling requires explicit upload consent; refresh follows confirmation.
+        }));
+        if("api".equals(FoodRecognitionPolicy.source(profile))){
+        final LinearLayout advanced=new LinearLayout(this);advanced.setOrientation(LinearLayout.VERTICAL);
+        advanced.setTag("food_recognition_advanced");advanced.setVisibility(foodAdvancedExpanded?View.VISIBLE:View.GONE);
+        View advancedToggle=settingRow("高级设置","输出兼容性","@smart",accent,null);
+        advancedToggle.setTag("food_recognition_advanced_toggle");
+        advancedToggle.setOnClickListener(v->{foodAdvancedExpanded=!foodAdvancedExpanded;advanced.setVisibility(foodAdvancedExpanded?View.VISIBLE:View.GONE);});
+        page.addView(advancedToggle);
+        advanced.addView(settingsToggleRow("严格结构化输出", profile.optBoolean("foodJsonSchema"),
+                () -> setProfileBoolean("foodJsonSchema", !profile.optBoolean("foodJsonSchema"))));
+        TextView schemaHint = label("使用 JSON Schema 约束输出；服务商明确不支持时自动兼容。关闭不影响最终营养数据校验。", 13,
+                UiTokens.secondary(nightDecoration()), false);
+        schemaHint.setPadding(dp(6), 0, dp(6), dp(16));
+        schemaHint.setLineSpacing(dp(2), 1.05f);
+        advanced.addView(schemaHint);page.addView(advanced);
+        }
+        page.addView(settingRow("识别已保存食物图片", "已有有效结果不重复识别 · 可能产生 API 费用", "@media", accent,
+                v -> foodUi().recognizeSavedPhotos()));
+    }
+
+    private String recognitionSummary(){
+        return "自己的 API · "+(FoodAnalysisJobService.apiConfigured(profile)?FoodAnalysisJobService.enabled(profile)?"识别已开启":"识别未开启":"尚未配置")+" · 图片本机抠图";
+    }
+    private FoodRecognitionSetup recognitionSetup(){
+        if(foodRecognitionSetup==null)foodRecognitionSetup=new FoodRecognitionSetup(this,new FoodRecognitionSetup.Host(){
+            public JSONObject profile(){return MainActivity.this.profile;}
+            public boolean night(){return nightDecoration();}
+            public void chooseSource(String source,boolean enabled){chooseRecognitionSource(source,enabled);}
+            public void rememberChoice(){synchronized(NutritionStore.LOCK){try{profile.put("foodRecognitionOnboardingSeen",true);saveProfile();}catch(JSONException ignored){}}}
+            public void configureApi(Runnable saved){MainActivity.this.configureApi(saved);}
+            public void refresh(){refreshRecognitionSettings();}
+        });return foodRecognitionSetup;
+    }
+    private void maybeShowRecognitionSetup(){
+        if(isFinishing()||isDestroyed()||profile.optBoolean("foodRecognitionOnboardingSeen")||!currentVersionName().equals(profile.optString("seenAnnouncementVersion"))||!hasWindowFocus()
+                ||activeGlassDialogCount>0||foodProcessing!=null)return;
+        recognitionSetup().choose(true);
+    }
+    private void chooseRecognitionSource(String source,boolean enabled){
+        synchronized(NutritionStore.LOCK){try{
+            if(!"api".equals(source))return;
+            profile.put("foodRecognitionSource","api").put("foodRecognitionOnboardingSeen",true)
+                .put("foodRecognitionGeneration",profile.optLong("foodRecognitionGeneration")+1)
+                .put("foodAutoAnalyze",enabled).put("foodPhotoConsent",enabled);
+            profile.remove("foodOfflineAnalyze");
+            saveProfile();
+        }catch(JSONException ignored){}}
+        FoodAnalysisJobService.recognitionSettingsChanged(this);
+    }
+    private void refreshRecognitionSettings(){
+        if(inSmartAssistantPage)rerenderPreservingScroll(()->renderCurrentAssistantSettingsPage());
+        else if(foodProcessing==null)renderCurrent();
+    }
+
+    private void addNutritionistSettings(LinearLayout page) {
+        page.addView(settingsToggleRow("营养师", aiAnalysisEnabled(), new ToggleHandler() {
             @Override
             public boolean onToggle() {
                 boolean next = !aiAnalysisEnabled();
@@ -10746,21 +8337,10 @@ public class MainActivity extends Activity {
             public boolean onToggle() {
                 boolean next = !aiAutoAnalysisEnabled();
                 if (next && !aiAnalysisEnabled()) {
-                    showGlassToast("请先开启 AI分析", Toast.LENGTH_SHORT);
+                    showGlassToast("请先开启营养师", Toast.LENGTH_SHORT);
                     return false;
                 }
                 return setProfileBoolean("aiAutoAnalysis", next);
-            }
-        }));
-        page.addView(settingsToggleRow("食物识别", aiVisionEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !aiVisionEnabled();
-                if (next && !apiVisionSupported()) {
-                    showVisionUnsupportedDialog();
-                    return false;
-                }
-                return setProfileBoolean("aiVisionEnabled", next);
             }
         }));
         page.addView(settingsToggleRow("AI读取记录", aiRecordAccessEnabled(), new ToggleHandler() {
@@ -10787,101 +8367,142 @@ public class MainActivity extends Activity {
                 return setProfileBoolean("aiChatMemory", next);
             }
         }));
-        page.addView(settingsToggleRow("自动识别热量", calorieRecognitionEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean next = !calorieRecognitionEnabled();
-                if (next && !apiEnabled()) {
-                    showGlassToast("请先在调用 API 里填入并检测有效", Toast.LENGTH_LONG);
-                    configureApi();
-                    return false;
-                }
-                return setProfileBoolean("calorieRecognition", next);
-            }
-        }));
     }
 
-    private void renderExperimentalPage() {
-        inPreferencesPage = true;
-        inHintManagerPage = false;
-        inVibrationPage = false;
-        inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
-        inNotebookSettingsPage = false;
-        inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
-        inInterfaceLayoutPage = false;
-        inMoreSettingsPage = false;
-        inExperimentalPage = true;
-        inApiOfficialSitesPage = false;
-        inBookDetail = false;
-        inPhotoViewer = false;
-        updateFab();
-        content.removeAllViews();
-        ScrollView scroll = pageScroll();
-        LinearLayout page = basePage();
-        scroll.addView(page);
-        content.addView(scroll);
 
-        LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView back = label("‹", 38, Color.rgb(34, 34, 34), true);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(surfaceRound(dp(25)));
-        attachPressAnimation(back);
-        back.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                closeExperimentalPage();
+    private volatile long apiCredentialEpoch;
+    private final java.util.Set<HttpURLConnection> apiCredentialConnections =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<HttpURLConnection, Boolean>());
+
+    private boolean apiRequestCurrent(ApiCredentialPolicy.Snapshot authority, long epoch) {
+        synchronized (NutritionStore.LOCK) {
+            return !isFinishing() && !isDestroyed() && epoch == apiCredentialEpoch
+                    && ApiCredentialPolicy.current(authority, profile);
+        }
+    }
+
+    private boolean apiRequestArgumentsCurrent(ApiCredentialPolicy.Snapshot authority, long epoch,
+                                               String endpoint, String key, String model) {
+        synchronized (NutritionStore.LOCK) {
+            return apiRequestCurrent(authority, epoch) && key.equals(profile.optString("apiKey"))
+                    && endpoint.equals(apiEndpoint()) && model.equals(apiModelName());
+        }
+    }
+
+    private List<HttpURLConnection> advanceApiCredentialEpochLocked() {
+        apiCredentialEpoch++;
+        List<HttpURLConnection> previous = new ArrayList<HttpURLConnection>(apiCredentialConnections);
+        apiCredentialConnections.clear();
+        return previous;
+    }
+
+    private void disconnectApiConnections(final List<HttpURLConnection> connections) {
+        if (connections.isEmpty()) return;
+        new Thread(() -> {
+            for (HttpURLConnection connection : connections) {
+                try { connection.disconnect(); } catch (RuntimeException ignored) { }
             }
-        });
-        top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("实验性功能", 30, Color.rgb(28, 28, 30), true);
-        title.setPadding(dp(14), 0, 0, 0);
-        top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        installStickyHeader(scroll, page, top);
+        }, "api-credential-cancel").start();
+    }
 
-        TextView hint = label("这些功能还在准备中，开放后会在这里出现。", 14,
-                nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
-        hint.setPadding(0, dp(12), 0, dp(12));
-        page.addView(hint);
+    private boolean removeSavedApiKey() {
+        List<HttpURLConnection> cancelled;
+        boolean persisted;
+        synchronized (NutritionStore.LOCK) {
+            JSONObject latest = PrivateProfileStore.read(this);
+            try { ApiCredentialPolicy.remove(latest); } catch (JSONException unavailable) { return false; }
+            profile = latest;
+            cancelled = advanceApiCredentialEpochLocked();
+            persisted = PrivateProfileStore.write(this, latest);
+        }
+        disconnectApiConnections(cancelled);
+        FoodAnalysisJobService.recognitionSettingsChanged(this);
+        return persisted;
+    }
 
-        section(page, "未来功能");
-        page.addView(disabledSettingRow("智能餐单", "敬请期待"));
-        page.addView(disabledSettingRow("智能抠图", "敬请期待"));
-        page.addView(space(dp(120)));
-        animateIn(page);
+    private final class ApiProbeSession {
+        private final long epoch = apiCredentialEpoch;
+        private volatile boolean closed;
+        private final java.util.Set<HttpURLConnection> connections =
+                java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<HttpURLConnection, Boolean>());
+        boolean current() { return !closed && epoch == apiCredentialEpoch; }
+        boolean register(HttpURLConnection connection) {
+            synchronized (NutritionStore.LOCK) {
+                if (!current()) return false;
+                connections.add(connection);apiCredentialConnections.add(connection);return true;
+            }
+        }
+        void release(HttpURLConnection connection) {
+            connections.remove(connection);apiCredentialConnections.remove(connection);
+        }
+        void close() {
+            closed = true;
+            List<HttpURLConnection> previous = new ArrayList<HttpURLConnection>(connections);
+            connections.clear();apiCredentialConnections.removeAll(previous);disconnectApiConnections(previous);
+        }
     }
 
     private void configureApi() {
+        configureApi(null);
+    }
+
+    private void configureApi(final Runnable onSaved) {
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
+        final ApiProbeSession probeSession = new ApiProbeSession();
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(22), dp(20), dp(22), dp(18));
         box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
         box.addView(label("调用 API", 22, Color.rgb(28, 28, 30), true));
 
-        TextView tip = label("兼容 DeepSeek、Xiaomi MiMo、MiniMax 等国内大模型及 OpenAI 格式接口。检测通过后会读取可选模型，可直接从列表中选择。", 14,
+        TextView tip = label("填写服务商的 HTTPS Chat Completions 完整地址。只向该地址检测模型列表；列表可用不代表图片输入已实测，餐图识别还需服务商支持图片。", 14,
                 Color.rgb(112, 116, 124), false);
         tip.setPadding(0, dp(8), 0, dp(10));
         tip.setLineSpacing(dp(2), 1.05f);
         box.addView(tip);
 
         final EditText keyInput = apiInput("API Key");
+        keyInput.setTag("api_key_input");
+        keyInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        keyInput.setTransformationMethod(android.text.method.PasswordTransformationMethod.getInstance());
+        keyInput.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+        keyInput.setSaveEnabled(false);
+        keyInput.setImeOptions(keyInput.getImeOptions()
+                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        keyInput.setContentDescription("API Key，默认隐藏");
         keyInput.setText(profile.optString("apiKey", ""));
         box.addView(keyInput);
-        final EditText endpointInput = apiInput("接口地址（可自动识别）");
+        if (!profile.optString("apiKey").trim().isEmpty()) {
+            TextView removeKey = label("删除已保存的 Key", 14,
+                    nightDecoration() ? Color.rgb(244, 164, 148) : Color.rgb(167, 70, 54), false);
+            removeKey.setTag("api_key_delete");removeKey.setPadding(dp(4), dp(8), dp(4), dp(8));
+            removeKey.setMinHeight(dp(44));attachPressAnimation(removeKey);
+            removeKey.setOnClickListener(v -> {
+                removeKey.setEnabled(false);
+                boolean persisted = removeSavedApiKey();
+                keyInput.setText("");dialog.dismiss();
+                refreshRecognitionSettings();
+                showGlassToast(persisted ? "已删除 Key，并关闭依赖 API 的授权"
+                        : "本次会话已移除 Key，本机保存失败，请重试", Toast.LENGTH_LONG);
+            });
+            box.addView(removeKey);
+        }
+        final EditText endpointInput = apiInput("HTTPS Chat Completions 完整地址");
         endpointInput.setText(apiEndpoint());
         box.addView(endpointInput);
         final String[] selectedModel = new String[]{apiModelName()};
         final boolean[] probeReady = new boolean[]{false};
         final JSONArray[] detectedModels = new JSONArray[]{new JSONArray()};
+        final JSONObject[] detectedImageInputs = new JSONObject[]{new JSONObject()};
+        final JSONObject[] detectedNames = new JSONObject[]{new JSONObject()};
         final String[] detectedKey = new String[]{""};
         final String[] detectedEndpoint = new String[]{""};
         final boolean[] applyingDetectedEndpoint = new boolean[]{false};
         final TextView[] primaryAction = new TextView[1];
-        final TextView modelSelect = apiSelectBox(apiModelName().length() > 0 ? apiModelName() : "检测后选择模型");
+        final TextView modelSelect = apiSelectBox(ApiModelPresentation.selection(apiModelName(),ApiModelPresentation.names(profile,apiEndpoint())));
+        modelSelect.setTag("api_model_select");
         modelSelect.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -10891,7 +8512,11 @@ public class MainActivity extends Activity {
                     promptManualApiModel(selectedModel, modelSelect);
                     return;
                 }
-                showStoredApiModelChoices(models, selectedModel, modelSelect);
+                JSONObject imageInputs = probeReady[0] ? detectedImageInputs[0]
+                        : endpointInput.getText().toString().trim().equals(profile.optString("apiModelImageInputsEndpoint", ""))
+                        ? profile.optJSONObject("apiModelImageInputs") : null;
+                JSONObject names=probeReady[0]?detectedNames[0]:ApiModelPresentation.names(profile,endpointInput.getText().toString().trim());
+                showStoredApiModelChoices(models, selectedModel, modelSelect, imageInputs, names);
             }
         });
         box.addView(modelSelect);
@@ -10931,6 +8556,8 @@ public class MainActivity extends Activity {
                     return;
                 }
                 probeReady[0] = false;
+                modelSelect.setText(ApiModelPresentation.selection(selectedModel[0],
+                    ApiModelPresentation.names(profile,endpointInput.getText().toString().trim())));
                 if (primaryAction[0] != null) {
                     primaryAction[0].setText("检测模型");
                 }
@@ -10949,7 +8576,7 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 dialog.dismiss();
-                renderApiOfficialSitesPage();
+                smoothContentSwap(()->renderApiOfficialSitesPage(),1f);
             }
         });
         cancel.setOnClickListener(new View.OnClickListener() {
@@ -10961,6 +8588,11 @@ public class MainActivity extends Activity {
         test.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                if (!probeSession.current()) {
+                    dialog.dismiss();
+                    showGlassToast("API 配置已改变，请重新打开配置", Toast.LENGTH_SHORT);
+                    return;
+                }
                 final String key = keyInput.getText().toString().trim();
                 if (key.length() == 0) {
                     showApiInlineMessage(apiStatus, "请输入 API Key", true);
@@ -10969,29 +8601,49 @@ public class MainActivity extends Activity {
                 }
                 final String endpoint = endpointInput.getText().toString().trim();
                 final String model = selectedModel[0].trim();
+                if (!ApiVisionPolicy.isChatEndpoint(endpoint)) {
+                    showApiInlineMessage(apiStatus, "请输入 HTTPS Chat Completions 完整地址（以 /chat/completions 结尾）", true);
+                    endpointInput.requestFocus();
+                    return;
+                }
                 if (probeReady[0] && key.equals(detectedKey[0]) && endpoint.equals(detectedEndpoint[0])) {
                     String chosen = selectedModel[0].trim();
                     if (chosen.length() == 0) {
                         showApiInlineMessage(apiStatus, "请先选择一个模型", true);
                         return;
                     }
-                    try {
-                        boolean vision = looksLikeVisionModel(chosen);
+                    List<HttpURLConnection> cancelled;
+                    boolean persisted;
+                    try { synchronized (NutritionStore.LOCK) {
+                        profile = PrivateProfileStore.read(MainActivity.this);
                         profile.put("apiKey", key);
                         profile.put("apiEndpoint", endpoint);
                         profile.put("apiModel", chosen);
                         profile.put("apiModelMode", selectedMode[0]);
                         profile.put("apiModels", detectedModels[0]);
-                        profile.put("apiVisionSupported", vision);
-                        if (!vision) {
-                            profile.put("aiVisionEnabled", false);
-                        }
+                        profile.put("apiModelImageInputs", detectedImageInputs[0]);
+                        profile.put("apiModelImageInputsEndpoint", endpoint);
+                        profile.put("apiModelDisplayNames", detectedNames[0]);
+                        profile.put("apiModelDisplayNamesEndpoint", endpoint);
+                        profile.remove("apiVisionSupported"); // Old name allowlist was not a capability test.
                         profile.put("apiEnabled", true);
-                        saveProfile();
-                    } catch (JSONException ignored) {
+                        ApiCredentialPolicy.changed(profile);
+                        cancelled = advanceApiCredentialEpochLocked();
+                        persisted = PrivateProfileStore.write(MainActivity.this, profile);
                     }
+                    } catch (JSONException ignored) {
+                        showApiInlineMessage(apiStatus, "配置保存失败，请重新打开后重试", true);
+                        return;
+                    }
+                    disconnectApiConnections(cancelled);
+                    FoodAnalysisJobService.recognitionSettingsChanged(MainActivity.this);
                     dialog.dismiss();
+                    if (!persisted) {
+                        showGlassToast("配置未能保存到本机，请重新打开后重试", Toast.LENGTH_LONG);
+                        return;
+                    }
                     showGlassToast("API 配置已保存", Toast.LENGTH_SHORT);
+                    if (onSaved != null) { onSaved.run(); return; }
                     rerenderPreservingScroll(new Runnable() {
                         @Override
                         public void run() {
@@ -11009,11 +8661,11 @@ public class MainActivity extends Activity {
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        final ApiProbeResult probe = detectApiConfiguration(key, endpoint, model);
+                        final ApiProbeResult probe = detectApiConfiguration(key, endpoint, model, probeSession);
                         runOnUiThread(new Runnable() {
                             @Override
                             public void run() {
-                                if (!dialog.isShowing()) {
+                                if (!dialog.isShowing() || !probeSession.current()) {
                                     return;
                                 }
                                 if (!probe.valid) {
@@ -11023,7 +8675,7 @@ public class MainActivity extends Activity {
                                     endpointInput.setEnabled(true);
                                     modelSelect.setEnabled(true);
                                     showApiInlineMessage(apiStatus,
-                                            "未识别到该密钥对应的接入地址，请检查密钥或网络", true);
+                                            "模型列表检测未通过，请检查接口地址、列表支持、密钥权限和网络；这不代表模型不支持图片", true);
                                     return;
                                 }
                                 keyInput.setEnabled(true);
@@ -11032,6 +8684,8 @@ public class MainActivity extends Activity {
                                 test.setEnabled(true);
                                 test.setAlpha(1f);
                                 detectedModels[0] = probe.models;
+                                detectedImageInputs[0] = probe.imageInputs;
+                                detectedNames[0] = probe.displayNames;
                                 detectedKey[0] = key;
                                 detectedEndpoint[0] = probe.endpoint;
                                 applyingDetectedEndpoint[0] = true;
@@ -11039,15 +8693,14 @@ public class MainActivity extends Activity {
                                 endpointInput.setSelection(probe.endpoint.length());
                                 applyingDetectedEndpoint[0] = false;
                                 selectedModel[0] = probe.selectedModel;
-                                modelSelect.setText(probe.selectedModel
-                                        + (looksLikeVisionModel(probe.selectedModel) ? " · 可识图" : ""));
+                                modelSelect.setText(ApiModelPresentation.selection(probe.selectedModel,probe.displayNames));
                                 probeReady[0] = true;
                                 test.setText("保存");
                                 showApiInlineMessage(apiStatus,
-                                        "已识别 " + apiProviderName(probe.endpoint) + "，请选择模型后保存", false);
+                                        "模型列表可用，请选择后保存；未做图片调用，不产生识图测试费用", false);
                                 List<String> choices = apiModelChoicesWithCurrent(probe.models, probe.selectedModel);
                                 if (choices.size() > 1) {
-                                    showStoredApiModelChoices(choices, selectedModel, modelSelect);
+                                    showStoredApiModelChoices(choices, selectedModel, modelSelect, probe.imageInputs, probe.displayNames);
                                 }
                             }
                         });
@@ -11063,10 +8716,18 @@ public class MainActivity extends Activity {
         actions.addView(test, new LinearLayout.LayoutParams(dp(96), dp(42)));
         box.addView(actions);
         showRoundedDialog(dialog, box);
+        if (dialog.getWindow() != null) dialog.getWindow().getDecorView().addOnAttachStateChangeListener(
+                new View.OnAttachStateChangeListener() {
+                    @Override public void onViewAttachedToWindow(View view) { }
+                    @Override public void onViewDetachedFromWindow(View view) {
+                        probeSession.close();keyInput.setText("");detectedKey[0] = "";
+                        view.removeOnAttachStateChangeListener(this);
+                    }
+                });
     }
 
     private void showStoredApiModelChoices(final List<String> models, final String[] selectedModel,
-                                           final TextView modelSelect) {
+                                           final TextView modelSelect, final JSONObject imageInputs, final JSONObject displayNames) {
         showApiModelChoiceDialog(models, selectedModel[0], true, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
@@ -11075,34 +8736,30 @@ public class MainActivity extends Activity {
                 }
                 String chosen = models.get(which);
                 selectedModel[0] = chosen;
-                modelSelect.setText(chosen + (looksLikeVisionModel(chosen) ? " · 可识图" : ""));
+                modelSelect.setText(ApiModelPresentation.selection(chosen,displayNames));
             }
         }, new Runnable() {
             @Override
             public void run() {
                 promptManualApiModel(selectedModel, modelSelect);
             }
-        });
-    }
-
-    private void showApiModelChoiceDialog(final List<String> models, String current,
-                                          boolean allowManual, final ChoiceHandler handler) {
-        showApiModelChoiceDialog(models, current, allowManual, handler, null);
+        }, imageInputs, displayNames);
     }
 
     private void showApiModelChoiceDialog(final List<String> models, String current,
                                           boolean allowManual, final ChoiceHandler handler,
-                                          final Runnable manualHandler) {
+                                          final Runnable manualHandler, final JSONObject imageInputs, final JSONObject displayNames) {
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
+        box.setTag("api_model_choices");
         box.setPadding(dp(22), dp(20), dp(22), dp(18));
         box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
         TextView title = label("选择 AI 模型", 22, Color.rgb(28, 28, 30), true);
         title.setPadding(0, 0, 0, dp(10));
         box.addView(title);
 
-        ScrollView scroll = new ScrollView(this);
+        ScrollView scroll = new MaxHeightScrollView(this, dp(420));
         disableForceDark(scroll);
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout list = new LinearLayout(this);
@@ -11111,10 +8768,13 @@ public class MainActivity extends Activity {
         for (int i = 0; i < models.size(); i++) {
             final int index = i;
             String model = models.get(i);
-            TextView item = label(model + (looksLikeVisionModel(model) ? " · 可识图" : ""),
+            TextView item = label(ApiModelPresentation.choice(model, displayNames, imageInputs == null ? ApiVisionPolicy.UNKNOWN
+                    : imageInputs.optString(model, ApiVisionPolicy.UNKNOWN)),
                     16, Color.rgb(35, 35, 35), false);
             item.setGravity(Gravity.CENTER_VERTICAL);
-            item.setPadding(dp(14), 0, dp(14), 0);
+            item.setTag("api_model_choice_"+model);
+            item.setPadding(dp(14), dp(10), dp(14), dp(10));
+            item.setMinHeight(dp(48));
             item.setBackground(round(model.equals(current) ? accentSoft : Color.TRANSPARENT, dp(16), 0, 0));
             attachPressAnimation(item);
             item.setOnClickListener(new View.OnClickListener() {
@@ -11125,7 +8785,7 @@ public class MainActivity extends Activity {
                 }
             });
             LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             itemLp.topMargin = dp(5);
             list.addView(item, itemLp);
         }
@@ -11149,9 +8809,7 @@ public class MainActivity extends Activity {
             manualLp.topMargin = dp(8);
             list.addView(manual, manualLp);
         }
-        int rows = models.size() + (allowManual ? 1 : 0);
-        int listHeight = Math.min(420, Math.max(58, rows * 55));
-        box.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(listHeight)));
+        box.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         showRoundedDialog(dialog, box);
     }
 
@@ -11162,7 +8820,7 @@ public class MainActivity extends Activity {
         box.setPadding(dp(22), dp(20), dp(22), dp(18));
         box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
         box.addView(label("手动填写模型", 22, Color.rgb(28, 28, 30), true));
-        final EditText input = apiInput("例如 deepseek-chat / mimo-v2-flash / MiniMax-M2.1");
+        final EditText input = apiInput("填写服务商的模型 ID，例如 deepseek-flash");
         input.setText(selectedModel[0]);
         box.addView(input);
         LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
@@ -11184,7 +8842,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 selectedModel[0] = model;
-                modelSelect.setText(model + (looksLikeVisionModel(model) ? " · 可识图" : ""));
+                modelSelect.setText(ApiModelPresentation.selection(model,null));
                 dialog.dismiss();
             }
         });
@@ -11200,12 +8858,13 @@ public class MainActivity extends Activity {
     private TextView apiSelectBox(String text) {
         TextView box = label(text, 14, Color.rgb(36, 38, 42), false);
         box.setGravity(Gravity.CENTER_VERTICAL);
-        box.setSingleLine(true);
-        box.setPadding(dp(12), 0, dp(12), 0);
+        box.setSingleLine(false);
+        box.setPadding(dp(12), dp(10), dp(12), dp(10));
+        box.setMinHeight(dp(48));
         box.setBackground(round(nightDecoration() ? Color.rgb(31, 32, 36) : Color.rgb(246, 248, 250),
                 dp(14), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
         attachPressAnimation(box);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(8);
         box.setLayoutParams(lp);
         return box;
@@ -11261,9 +8920,12 @@ public class MainActivity extends Activity {
         return input;
     }
 
-    private ApiProbeResult detectApiConfiguration(final String key, String currentEndpoint, String currentModel) {
+    private ApiProbeResult detectApiConfiguration(final String key, String currentEndpoint, String currentModel,
+                                                 final ApiProbeSession session) {
         ApiProbeResult result = new ApiProbeResult();
+        if (!session.current()) return result;
         final List<String> endpoints = apiEndpointCandidates(currentEndpoint);
+        if (endpoints.isEmpty()) return result;
         ExecutorService executor = Executors.newFixedThreadPool(endpoints.size());
         ExecutorCompletionService<ApiEndpointMatch> completion =
                 new ExecutorCompletionService<ApiEndpointMatch>(executor);
@@ -11272,13 +8934,13 @@ public class MainActivity extends Activity {
                 completion.submit(new Callable<ApiEndpointMatch>() {
                     @Override
                     public ApiEndpointMatch call() {
-                        JSONArray models = fetchAuthorizedApiModels(endpoint, key);
-                        return new ApiEndpointMatch(endpoint, models);
+                        return session.current() ? fetchAuthorizedApiModels(endpoint, key, session) : null;
                     }
                 });
             }
             long deadline = System.currentTimeMillis() + 7500L;
             for (int i = 0; i < endpoints.size(); i++) {
+                if (!session.current()) return result;
                 long remaining = deadline - System.currentTimeMillis();
                 if (remaining <= 0L) {
                     break;
@@ -11288,10 +8950,12 @@ public class MainActivity extends Activity {
                     break;
                 }
                 ApiEndpointMatch match = future.get();
-                if (match != null && match.models.length() > 0) {
+                if (session.current() && match != null && match.models.length() > 0) {
                     result.valid = true;
                     result.endpoint = match.endpoint;
                     result.models = match.models;
+                    result.imageInputs = match.imageInputs;
+                    result.displayNames = match.displayNames;
                     List<String> choices = apiModelChoices(match.models);
                     String selected = currentModel == null ? "" : currentModel.trim();
                     if (!choices.contains(selected)) {
@@ -11299,7 +8963,6 @@ public class MainActivity extends Activity {
                         selected = choices.contains(preferred) ? preferred : choices.get(0);
                     }
                     result.selectedModel = selected;
-                    result.visionSupported = looksLikeVisionModel(selected);
                     return result;
                 }
             }
@@ -11312,12 +8975,8 @@ public class MainActivity extends Activity {
 
     private List<String> apiEndpointCandidates(String currentEndpoint) {
         List<String> endpoints = new ArrayList<String>();
-        addApiEndpointCandidate(endpoints, currentEndpoint);
-        addApiEndpointCandidate(endpoints, "https://api.longcat.chat/openai/v1/chat/completions");
-        addApiEndpointCandidate(endpoints, "https://api.deepseek.com/chat/completions");
-        addApiEndpointCandidate(endpoints, "https://api.xiaomimimo.com/v1/chat/completions");
-        addApiEndpointCandidate(endpoints, "https://api.minimaxi.com/v1/chat/completions");
-        addApiEndpointCandidate(endpoints, "https://api.openai.com/v1/chat/completions");
+        // A credential is scoped to the provider chosen by the user. Never broadcast it.
+        if (ApiVisionPolicy.isChatEndpoint(currentEndpoint)) addApiEndpointCandidate(endpoints, currentEndpoint);
         return endpoints;
     }
 
@@ -11328,28 +8987,33 @@ public class MainActivity extends Activity {
         }
     }
 
-    private JSONArray fetchAuthorizedApiModels(String endpoint, String key) {
+    private ApiEndpointMatch fetchAuthorizedApiModels(String endpoint, String key, ApiProbeSession session) {
         JSONArray result = new JSONArray();
+        JSONObject imageInputs = new JSONObject();
+        JSONObject displayNames = new JSONObject();
         String modelsUrl = modelsEndpointFromChatEndpoint(endpoint);
         if (modelsUrl.length() > 0) {
             HttpURLConnection conn = null;
             try {
                 URL url = new URL(modelsUrl);
                 conn = (HttpURLConnection) url.openConnection();
+                if (!session.register(conn)) return new ApiEndpointMatch(endpoint, result, imageInputs, displayNames);
                 conn.setRequestMethod("GET");
                 conn.setConnectTimeout(3000);
                 conn.setReadTimeout(4500);
                 conn.setUseCaches(false);
+                conn.setInstanceFollowRedirects(false);
                 conn.setRequestProperty("Authorization", "Bearer " + key);
                 conn.setRequestProperty("api-key", key);
                 conn.setRequestProperty("Accept", "application/json");
+                if (!session.current()) return new ApiEndpointMatch(endpoint, result, imageInputs, displayNames);
                 int code = conn.getResponseCode();
                 InputStream in = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
                 String text = in == null ? "" : readAll(in);
                 if (in != null) {
                     in.close();
                 }
-                if (code >= 200 && code < 300) {
+                if (session.current() && code >= 200 && code < 300) {
                     JSONObject root = new JSONObject(text);
                     JSONArray data = root.optJSONArray("data");
                     if (data == null) {
@@ -11364,6 +9028,9 @@ public class MainActivity extends Activity {
                             }
                             if (id.length() > 0 && !jsonArrayContains(result, id)) {
                                 result.put(id);
+                                imageInputs.put(id, ApiVisionPolicy.fromMetadata(item));
+                                String name=ApiModelPresentation.metadataName(item);
+                                if(!name.isEmpty())displayNames.put(id,name);
                             }
                         }
                     }
@@ -11371,11 +9038,12 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             } finally {
                 if (conn != null) {
+                    session.release(conn);
                     conn.disconnect();
                 }
             }
         }
-        return result;
+        return new ApiEndpointMatch(endpoint, result, imageInputs, displayNames);
     }
 
     private String modelsEndpointFromChatEndpoint(String endpoint) {
@@ -11406,32 +9074,12 @@ public class MainActivity extends Activity {
             return "MiniMax-M2.7";
         }
         if (lower.contains("deepseek")) {
-            return "deepseek-chat";
+            return "deepseek-flash";
         }
         if (lower.contains("openai")) {
             return "gpt-4o-mini";
         }
         return "";
-    }
-
-    private String apiProviderName(String endpoint) {
-        String lower = endpoint == null ? "" : endpoint.toLowerCase(Locale.US);
-        if (lower.contains("longcat")) {
-            return "LongCat";
-        }
-        if (lower.contains("xiaomimimo")) {
-            return "Xiaomi MiMo";
-        }
-        if (lower.contains("minimaxi")) {
-            return "MiniMax";
-        }
-        if (lower.contains("deepseek")) {
-            return "DeepSeek";
-        }
-        if (lower.contains("openai")) {
-            return "OpenAI";
-        }
-        return "OpenAI 格式";
     }
 
     private void showApiInlineMessage(TextView status, String message, boolean error) {
@@ -11476,86 +9124,23 @@ public class MainActivity extends Activity {
         return list;
     }
 
-    private boolean looksLikeVisionModel(String model) {
-        String lower = model == null ? "" : model.toLowerCase(Locale.US);
-        return lower.contains("vision")
-                || lower.contains("vl")
-                || lower.contains("omni")
-                || lower.contains("gpt-4o")
-                || lower.contains("gpt-5")
-                || lower.contains("qwen-vl")
-                || lower.contains("gemini")
-                || lower.contains("claude-3")
-                || lower.contains("glm-4v");
-    }
-
-    private void showApiInvalidDialog() {
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(18));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        box.addView(label("API 调用无效", 22, Color.rgb(28, 28, 30), true));
-        TextView message = label("请检查 API Key、接口地址和选择的模型是否可用，也确认当前网络可以访问该服务。", 15,
-                Color.rgb(86, 90, 98), false);
-        message.setPadding(0, dp(10), 0, dp(16));
-        message.setLineSpacing(dp(2), 1.05f);
-        box.addView(message);
-        LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        TextView ok = dialogButton("知道了", accent, Color.WHITE);
-        ok.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-            }
-        });
-        actions.addView(ok, new LinearLayout.LayoutParams(dp(92), dp(42)));
-        box.addView(actions);
-        showRoundedDialog(dialog, box);
-    }
-
-    private void showVisionUnsupportedDialog() {
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(18));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        box.addView(label("当前模型不支持识图", 22, Color.rgb(28, 28, 30), true));
-        TextView message = label("请在调用 API 中选择支持图片输入的模型，再开启识别图片/贴纸。", 15,
-                Color.rgb(86, 90, 98), false);
-        message.setPadding(0, dp(10), 0, dp(16));
-        message.setLineSpacing(dp(2), 1.05f);
-        box.addView(message);
-        LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        TextView ok = dialogButton("知道了", accent, Color.WHITE);
-        ok.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-            }
-        });
-        actions.addView(ok, new LinearLayout.LayoutParams(dp(92), dp(42)));
-        box.addView(actions);
-        showRoundedDialog(dialog, box);
-    }
-
-    private String callChatApi(String endpoint, String key, String model, String prompt) {
-        return callChatApiInternal(endpoint, key, model, prompt, null);
-    }
-
-    private String callChatApiWithImages(String endpoint, String key, String model, String prompt, List<File> images) {
-        return callChatApiInternal(endpoint, key, model, prompt, images);
-    }
-
-    private String callChatApiInternal(String endpoint, String key, String model, String prompt, List<File> images) {
+    private String callChatApiInternal(String endpoint, String key, String model, String prompt, List<File> images,
+                                       ApiCredentialPolicy.Snapshot authority, long epoch) {
         HttpURLConnection conn = null;
         try {
+            if (!apiRequestArgumentsCurrent(authority, epoch, endpoint, key, model)
+                    || !ApiVisionPolicy.isChatEndpoint(endpoint)) return "";
             URL url = new URL(endpoint);
             conn = (HttpURLConnection) url.openConnection();
+            synchronized (NutritionStore.LOCK) {
+                if (!apiRequestArgumentsCurrent(authority, epoch, endpoint, key, model)) return "";
+                apiCredentialConnections.add(conn);
+            }
             conn.setRequestMethod("POST");
             conn.setConnectTimeout(12000);
             conn.setReadTimeout(18000);
             conn.setUseCaches(false);
+            conn.setInstanceFollowRedirects(false);
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             conn.setRequestProperty("Authorization", "Bearer " + key);
@@ -11583,6 +9168,7 @@ public class MainActivity extends Activity {
             }
             messages.put(user);
             body.put("messages", messages);
+            if (!apiRequestCurrent(authority, epoch)) return "";
             OutputStream out = conn.getOutputStream();
             try {
                 out.write(body.toString().getBytes("UTF-8"));
@@ -11595,7 +9181,7 @@ public class MainActivity extends Activity {
             if (in != null) {
                 in.close();
             }
-            if (code < 200 || code >= 300) {
+            if (code < 200 || code >= 300 || !apiRequestCurrent(authority, epoch)) {
                 return "";
             }
             JSONObject result = new JSONObject(text);
@@ -11610,6 +9196,7 @@ public class MainActivity extends Activity {
             return "";
         } finally {
             if (conn != null) {
+                apiCredentialConnections.remove(conn);
                 conn.disconnect();
             }
         }
@@ -11662,11 +9249,7 @@ public class MainActivity extends Activity {
         inPreferencesPage = true;
         inHintManagerPage = true;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
@@ -11688,37 +9271,16 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("提示词管理", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("未用餐文案", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView tip = label("先选一个分类，再进去修改对应提示词。长按具体提示词可以删除。",
+        TextView tip = label("管理未用餐时显示在记录本里的文字。长按具体文案可以删除。",
                 14, Color.rgb(116, 122, 130), false);
         tip.setPadding(0, dp(12), 0, dp(12));
         page.addView(tip);
 
-        section(page, "今日提示");
-        page.addView(settingRow("今日提示", homeHintCountText(), "✎", accent, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openHintSectionPage("home", "", "今日提示", "管理今日标题下面那句提示词。",
-                        "首页提示", "写一句今日页上方提示词");
-            }
-        }));
-
-        section(page, "餐次提示");
-        for (final MealOption meal : allMealOptions()) {
-            page.addView(settingRow(meal.title + "提示", mealHintList(meal.key).size() + "条",
-                    "✎", accent, new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    openHintSectionPage("meal", meal.key, meal.title + "提示",
-                            "这些文字会出现在" + meal.title + "卡片还没有记录的时候。",
-                            meal.title + "提示", "写一句" + meal.title + "未记录提示词");
-                }
-            }));
-        }
 
         section(page, "没有吃饭");
         final String[] skipKeyValues = {"one", "two", "three", "many"};
@@ -11762,14 +9324,12 @@ public class MainActivity extends Activity {
 
     private void renderHintSectionPage(final String kind, final String key, String titleText,
                                        String subtitleText, final String prefix, final String hint) {
+        if(!"skip".equals(kind)){renderHintManagerPage();return;}
         inPreferencesPage = true;
         inHintManagerPage = true;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inDataSecurityPage = false;
-        inHiddenSettingsPage = false;
         inBookDetail = false;
         inPhotoViewer = false;
         updateFab();
@@ -11898,7 +9458,7 @@ public class MainActivity extends Activity {
         View.OnLongClickListener deleteListener = new View.OnLongClickListener() {
             @Override
             public boolean onLongClick(View v) {
-                showChoiceDialog("这条提示词", new String[]{"删除", "取消"}, new ChoiceHandler() {
+                showChoiceDialog("这条文案", new String[]{"删除", "取消"}, new ChoiceHandler() {
                     @Override
                     public void onChoice(int which) {
                         if (which == 0) {
@@ -11967,27 +9527,10 @@ public class MainActivity extends Activity {
         }, 40);
     }
 
-    private View toggleRow(String title, boolean enabled, View.OnClickListener click) {
-        LinearLayout row = row(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(18), dp(14), dp(18), dp(14));
-        row.setBackground(surfaceRound(dp(18)));
-        row.setClickable(true);
-        attachPressAnimation(row);
-        row.setOnClickListener(click);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(10);
-        row.setLayoutParams(lp);
-
-        row.addView(label(title, 19, Color.rgb(30, 30, 30), false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView toggle = label(enabled ? "开" : "关", 14, enabled ? Color.WHITE : Color.rgb(120, 120, 120), true);
-        toggle.setGravity(Gravity.CENTER);
-        toggle.setBackground(round(enabled ? accent : Color.rgb(236, 238, 241), dp(18), 0, 0));
-        row.addView(toggle, new LinearLayout.LayoutParams(dp(58), dp(36)));
-        return row;
-    }
 
     private View settingsToggleRow(String title, boolean enabled, final ToggleHandler handler) {
         LinearLayout row = row(Gravity.CENTER_VERTICAL);
+        row.setTag("setting_toggle_"+title);
         row.setPadding(dp(18), dp(14), dp(18), dp(14));
         row.setBackground(surfaceRound(dp(18)));
         row.setClickable(true);
@@ -12018,157 +9561,20 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private View disabledSettingRow(String title, String subtitle) {
-        LinearLayout row = row(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(18), dp(14), dp(18), dp(14));
-        row.setBackground(surfaceRound(dp(18)));
-        row.setAlpha(0.62f);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(10);
-        row.setLayoutParams(lp);
 
-        LinearLayout texts = new LinearLayout(this);
-        texts.setOrientation(LinearLayout.VERTICAL);
-        texts.addView(label(title, 19, Color.rgb(86, 90, 98), false));
-        TextView sub = label(subtitle, 14, Color.rgb(140, 144, 152), false);
-        sub.setPadding(0, dp(4), 0, 0);
-        texts.addView(sub);
-        row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView badge = pill("敬请期待", Color.rgb(234, 236, 240), Color.rgb(132, 136, 144), 12);
-        row.addView(badge, new LinearLayout.LayoutParams(dp(76), dp(34)));
-        return row;
-    }
 
-    private View hiddenSettingsRow() {
-        LinearLayout row = row(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(18), dp(14), dp(18), dp(14));
-        row.setBackground(surfaceRound(dp(18)));
-        row.setClickable(true);
-        attachPressAnimation(row);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(10);
-        row.setLayoutParams(lp);
 
-        row.addView(label("隐藏设置", 19, Color.rgb(30, 30, 30), false),
-                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        final TextView toggle = label("", 14, Color.WHITE, true);
-        toggle.setGravity(Gravity.CENTER);
-        updateToggleChip(toggle, settingsHidden());
-        row.addView(toggle, new LinearLayout.LayoutParams(dp(58), dp(36)));
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (settingsHidden()) {
-                    if (toggleHiddenSettings(false)) {
-                        updateToggleChip(toggle, false);
-                        pulseToggle(toggle);
-                    }
-                } else {
-                    confirmEnableHiddenSettings(toggle);
-                }
-            }
-        });
-        return row;
-    }
 
-    private View photoCollectionRow() {
-        LinearLayout row = row(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(18), dp(14), dp(18), dp(14));
-        row.setBackground(surfaceRound(dp(18)));
-        row.setClickable(true);
-        attachPressAnimation(row);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(10);
-        row.setLayoutParams(lp);
-
-        LinearLayout texts = new LinearLayout(this);
-        texts.setOrientation(LinearLayout.VERTICAL);
-        texts.addView(label("图片合集", 19, Color.rgb(30, 30, 30), false));
-        final TextView sub = label(photoCollectionEnabled() ? "贴纸栏会同时显示普通图片" : "贴纸栏只显示贴纸",
-                14, Color.rgb(92, 92, 92), false);
-        sub.setPadding(0, dp(3), 0, 0);
-        texts.addView(sub);
-        row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        final TextView toggle = label("", 14, Color.WHITE, true);
-        toggle.setGravity(Gravity.CENTER);
-        updateToggleChip(toggle, photoCollectionEnabled());
-        row.addView(toggle, new LinearLayout.LayoutParams(dp(58), dp(36)));
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (photoCollectionEnabled()) {
-                    if (setProfileBoolean("photoCollection", false)) {
-                        updateToggleChip(toggle, false);
-                        sub.setText("贴纸栏只显示贴纸");
-                        pulseToggle(toggle);
-                    }
-                } else {
-                    confirmEnablePhotoCollection(toggle, sub);
-                }
-            }
-        });
-        return row;
-    }
-
-    private void confirmEnablePhotoCollection(final TextView toggle, final TextView subtitle) {
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(18));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-
-        box.addView(label("开启图片合集吗？", 22, Color.rgb(28, 28, 30), true));
-        TextView message = label("开启后，贴纸栏会把普通图片也按贴纸大小一起显示，方便统一查看；原餐卡里的图片不会被改变。",
-                16, Color.rgb(92, 96, 104), false);
-        message.setPadding(0, dp(10), 0, dp(16));
-        message.setLineSpacing(dp(2), 1.05f);
-        box.addView(message);
-
-        LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        TextView ok = dialogButton("确定", accent, Color.WHITE);
-        cancel.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-            }
-        });
-        ok.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-                if (setProfileBoolean("photoCollection", true)) {
-                    updateToggleChip(toggle, true);
-                    if (subtitle != null) {
-                        subtitle.setText("贴纸栏会同时显示普通图片");
-                    }
-                    pulseToggle(toggle);
-                }
-            }
-        });
-        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(78), dp(42));
-        cancelLp.rightMargin = dp(10);
-        actions.addView(cancel, cancelLp);
-        actions.addView(ok, new LinearLayout.LayoutParams(dp(78), dp(42)));
-        box.addView(actions);
-        showRoundedDialog(dialog, box);
-    }
-
-    private void pulseToggle(final View toggle) {
-        toggle.animate().cancel();
-        toggle.setScaleX(0.96f);
-        toggle.setScaleY(0.96f);
-        toggle.animate().scaleX(1f).scaleY(1f).setDuration(150).start();
-    }
 
     private View vibrationLevelRow() {
         final FrameLayout box = new FrameLayout(this);
-        box.setPadding(dp(8), dp(8), dp(8), dp(8));
+        box.setTag("vibration_strength");
+        box.setPadding(dp(6), dp(6), dp(6), dp(6));
         box.setClipChildren(false);
         box.setClipToPadding(false);
         box.setBackground(round(nightDecoration() ? Color.argb(132, 42, 44, 50) : Color.argb(214, 255, 255, 255),
                 dp(20), adjustAlpha(accent, nightDecoration() ? 34 : 22), dp(1)));
-        LinearLayout.LayoutParams boxLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
+        LinearLayout.LayoutParams boxLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(60));
         boxLp.bottomMargin = dp(10);
         box.setLayoutParams(boxLp);
         final FrameLayout track = new FrameLayout(this);
@@ -12178,8 +9584,9 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(48), Gravity.CENTER);
         box.addView(track, trackLp);
         final View indicator = new View(this);
+        indicator.setTag("vibration_strength_indicator");
         indicator.setBackground(round(vibrationIndicatorColor(), dp(18), adjustAlpha(Color.WHITE, 130), dp(1)));
-        track.addView(indicator, new FrameLayout.LayoutParams(1, dp(42), Gravity.CENTER_VERTICAL));
+        track.addView(indicator, new FrameLayout.LayoutParams(1, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER_VERTICAL));
         final LinearLayout chipRow = new LinearLayout(this);
         chipRow.setOrientation(LinearLayout.HORIZONTAL);
         chipRow.setGravity(Gravity.CENTER);
@@ -12223,7 +9630,7 @@ public class MainActivity extends Activity {
     private void renderApiOfficialSitesPage() {
         inPreferencesPage = true;
         inMoreSettingsPage = false;
-        inExperimentalPage = false;
+        inSmartAssistantPage = false;
         inApiOfficialSitesPage = true;
         inBookDetail = false;
         inPhotoViewer = false;
@@ -12243,8 +9650,7 @@ public class MainActivity extends Activity {
         back.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                inApiOfficialSitesPage = false;
-                renderMoreSettingsPage();
+                smoothContentSwap(()->{inApiOfficialSitesPage=false;renderMoreSettingsPage();},-1f);
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
@@ -12314,9 +9720,10 @@ public class MainActivity extends Activity {
         int inset = dp(6);
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) indicator.getLayoutParams();
         lp.width = Math.max(1, slot - inset * 2);
-        lp.height = Math.max(1, innerHeight - dp(6));
+        lp.height = Math.max(1, innerHeight);
+        lp.gravity = Gravity.TOP | Gravity.LEFT;
         lp.leftMargin = host.getPaddingLeft() + inset;
-        lp.topMargin = host.getPaddingTop() + (innerHeight - lp.height) / 2;
+        lp.topMargin = host.getPaddingTop();
         indicator.setLayoutParams(lp);
         float target = (Math.max(1, Math.min(3, selectedLevel)) - 1) * slot;
         indicator.animate().cancel();
@@ -12369,32 +9776,64 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void showNotificationTimePicker(String title, final String key, String fallback) {
-        String value = mealNotificationTime(key, fallback);
-        String[] parts = value.split(":");
-        int hour = Integer.parseInt(parts[0]);
-        int minute = Integer.parseInt(parts[1]);
-        TimePickerDialog picker = new TimePickerDialog(this, new TimePickerDialog.OnTimeSetListener() {
-            @Override
-            public void onTimeSet(android.widget.TimePicker view, int selectedHour, int selectedMinute) {
-                try {
-                    profile.put(key, String.format(Locale.CHINA, "%02d:%02d", selectedHour, selectedMinute));
-                    saveProfile();
-                    if (mealNotificationsEnabled()) {
-                        MealReminderReceiver.ensureScheduled(MainActivity.this);
-                    }
-                    rerenderPreservingScroll(new Runnable() {
-                        @Override
-                        public void run() {
-                            renderMoreSettingsPage();
-                        }
-                    });
-                } catch (JSONException ignored) {
+    private AlertDialog showNotificationTimePicker(String title, final String key, String fallback) {
+        AlertDialog.Builder builder = PaperComponents.dialogBuilder(this, nightDecoration());
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(24), dp(8), dp(24), dp(8));
+        TextView hint = label("使用 24 小时制，例如 08:00", 14, UiTokens.secondary(nightDecoration()), false);
+        hint.setPadding(0, 0, 0, dp(8));
+        box.addView(hint);
+        final EditText input = new EditText(builder.getContext());
+        input.setTag("reminder_time_input");
+        input.setContentDescription(title + "时间，24 小时制");
+        input.setSingleLine(true);
+        input.setMinHeight(dp(48));
+        input.setTextSize(AppTypography.sp(this, 22));
+        input.setTypeface(AppTypography.typeface(this, false));
+        input.setTextColor(UiTokens.ink(nightDecoration()));
+        input.setHintTextColor(UiTokens.secondary(nightDecoration()));
+        input.setBackgroundTintList(android.content.res.ColorStateList.valueOf(accent));
+        input.setInputType(android.text.InputType.TYPE_CLASS_DATETIME | android.text.InputType.TYPE_DATETIME_VARIATION_TIME);
+        input.setMinHeight(dp(48));input.setMinimumHeight(dp(48));
+        input.setHint("HH:mm");
+        input.setText(mealNotificationTime(key, fallback));
+        input.setSelectAllOnFocus(true);
+        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        box.addView(input, new LinearLayout.LayoutParams(-1, -2));
+        final AlertDialog dialog = builder.setTitle(title).setView(box)
+                .setNegativeButton("取消", null).setPositiveButton("保存", null).create();
+        dialog.setOnShowListener(ignored -> {
+            PaperComponents.styleDialog(dialog, nightDecoration());
+            View.OnClickListener save = v -> {
+                String normalized = ReminderTimeInput.normalize(input.getText().toString());
+                if (normalized == null) {
+                    input.setError("请输入有效时间：小时 00–23，分钟 00–59");
+                    input.requestFocus();
+                    return;
                 }
-            }
-        }, hour, minute, true);
-        picker.setTitle(title);
-        picker.show();
+                try {
+                    profile.put(key, normalized);
+                    saveProfile();
+                    if (mealNotificationsEnabled()) MealReminderReceiver.ensureScheduled(MainActivity.this);
+                    dialog.dismiss();
+                    rerenderPreservingScroll(() -> renderMealReminderSettingsPage());
+                } catch (JSONException ignoredSave) {
+                    input.setError("保存失败，请重试");
+                }
+            };
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(save);
+            input.setOnEditorActionListener((view, actionId, event) -> {
+                if (actionId != android.view.inputmethod.EditorInfo.IME_ACTION_DONE) return false;
+                save.onClick(view);
+                return true;
+            });
+            input.requestFocus();
+        });
+        if (dialog.getWindow() != null) dialog.getWindow().setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        dialog.show();
+        return dialog;
     }
 
     private boolean setMealNotificationsEnabled(boolean enabled) {
@@ -12426,30 +9865,15 @@ public class MainActivity extends Activity {
     private String vibrationSummary() {
         String level = vibrationLevel() == 1 ? "轻" : (vibrationLevel() == 2 ? "中" : "强");
         return level + "，底栏" + (navHapticEnabled() ? "开" : "关")
-                + "，日历" + (calendarHapticEnabled() ? "开" : "关")
-                + "，滑动" + (pageSwipeHapticEnabled() ? "开" : "关")
                 + "，编辑" + (mediaEditHapticEnabled() ? "开" : "关");
     }
 
-    private boolean aiCutoutEnabled() {
-        return profile == null || profile.optBoolean("aiCutout", true);
-    }
 
-    private boolean uploadCutoutEnabled() {
-        return profile != null && profile.optBoolean("uploadCutout", false);
-    }
 
-    private boolean stickerCollapseEnabled() {
-        return profile != null && profile.optBoolean("stickerCollapse", false);
-    }
 
     private boolean apiEnabled() {
         return profile != null && profile.optBoolean("apiEnabled", false)
                 && profile.optString("apiKey", "").trim().length() > 0;
-    }
-
-    private boolean calorieRecognitionEnabled() {
-        return profile != null && profile.optBoolean("calorieRecognition", false);
     }
 
     private boolean aiAnalysisEnabled() {
@@ -12460,20 +9884,12 @@ public class MainActivity extends Activity {
         return profile != null && profile.optBoolean("aiAutoAnalysis", false);
     }
 
-    private boolean aiVisionEnabled() {
-        return profile != null && profile.optBoolean("aiVisionEnabled", false);
-    }
-
     private boolean aiRecordAccessEnabled() {
         return profile != null && profile.optBoolean("aiRecordAccess", false);
     }
 
     private boolean aiChatMemoryEnabled() {
         return profile != null && profile.optBoolean("aiChatMemory", false);
-    }
-
-    private boolean apiVisionSupported() {
-        return profile != null && profile.optBoolean("apiVisionSupported", false);
     }
 
     private String apiEndpoint() {
@@ -12483,7 +9899,7 @@ public class MainActivity extends Activity {
 
     private String apiModelName() {
         String model = profile == null ? "" : profile.optString("apiModel", "");
-        return model.trim().length() == 0 ? "deepseek-chat" : model.trim();
+        return model.trim().length() == 0 ? "deepseek-flash" : model.trim();
     }
 
     private String apiModelMode() {
@@ -12495,38 +9911,6 @@ public class MainActivity extends Activity {
         return "thinking".equals(apiModelMode()) ? "思考" : "快速";
     }
 
-    private View mealToggleRow(final MealOption meal) {
-        final LinearLayout row = row(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(18), dp(14), dp(18), dp(14));
-        row.setBackground(surfaceRound(dp(18)));
-        row.setClickable(true);
-        attachPressAnimation(row);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(10);
-        row.setLayoutParams(lp);
-
-        row.addView(label(meal.title, 19, Color.rgb(30, 30, 30), false),
-                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        final TextView toggle = label("", 14, Color.WHITE, true);
-        toggle.setGravity(Gravity.CENTER);
-        updateToggleChip(toggle, activeMealContains(meal.key));
-        row.addView(toggle, new LinearLayout.LayoutParams(dp(58), dp(36)));
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                boolean changed = toggleMeal(meal.key);
-                updateToggleChip(toggle, activeMealContains(meal.key));
-                if (!changed) {
-                    return;
-                }
-                toggle.animate().cancel();
-                toggle.setScaleX(0.96f);
-                toggle.setScaleY(0.96f);
-                toggle.animate().scaleX(1f).scaleY(1f).setDuration(150).start();
-            }
-        });
-        return row;
-    }
 
     private void updateToggleChip(TextView toggle, boolean enabled) {
         toggle.setText(enabled ? "开" : "关");
@@ -12534,49 +9918,18 @@ public class MainActivity extends Activity {
         toggle.setBackground(round(enabled ? accent : Color.rgb(236, 238, 241), dp(18), 0, 0));
     }
 
-    private boolean toggleMeal(String key) {
-        JSONArray old = profile.optJSONArray("meals");
-        List<String> keys = new ArrayList<String>();
-        if (old != null) {
-            for (int i = 0; i < old.length(); i++) {
-                keys.add(old.optString(i));
-            }
-        }
-        if (keys.isEmpty()) {
-            for (String defaultKey : DEFAULT_MEAL_KEYS) {
-                keys.add(defaultKey);
-            }
-        }
-        if (keys.contains(key)) {
-            if (keys.size() <= 1) {
-                showGlassToast("至少保留一个餐次", Toast.LENGTH_SHORT);
-                return false;
-            }
-            keys.remove(key);
-        } else {
-            keys.add(key);
-        }
-        JSONArray arr = new JSONArray();
-        for (String available : AVAILABLE_MEAL_KEYS) {
-            if (keys.contains(available)) {
-                arr.put(available);
-            }
-        }
-        try {
-            profile.put("meals", arr);
-            saveProfile();
-        } catch (JSONException ignored) {
-            return false;
-        }
-        return true;
-    }
 
     private View settingRow(String title, String subtitle, String icon, int color, View.OnClickListener click) {
+        boolean destructive="@delete".equals(icon);
+        color = destructive?(nightDecoration()?0xffffaaa0:0xffa83229):UiTokens.secondary(nightDecoration());
         LinearLayout row = row(Gravity.CENTER_VERTICAL);
+        row.setTag("setting_row_"+title);
         row.setPadding(dp(spaceByLayout(18, 16, 14)), dp(spaceByLayout(16, 14, 12)),
                 dp(16), dp(spaceByLayout(16, 14, 12)));
         row.setBackground(surfaceRound(dp(spaceByLayout(18, 16, 14))));
         row.setClickable(true);
+        row.setFocusable(true);
+        row.setContentDescription(title+(subtitle==null||subtitle.isEmpty()?"":"，"+subtitle));
         attachPressAnimation(row);
         row.setOnClickListener(click);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -12584,18 +9937,23 @@ public class MainActivity extends Activity {
         row.setLayoutParams(lp);
 
         View iconView;
-        if (icon != null && icon.startsWith("@")) {
+        if("@reset".equals(icon)||"@switch".equals(icon)||"@reminder".equals(icon)||"@smart".equals(icon)||"@doll".equals(icon)||"@dining".equals(icon)) {
+            iconView=new ProfileSettingIcon(this,icon.substring(1),settingIconTint(color),nightDecoration(),true);
+        } else if (icon != null && icon.startsWith("@")) {
             iconView = new SettingIconView(this, icon.substring(1), color);
         } else {
             TextView textIcon = label(icon, icon.length() > 2 ? 13 : 23, color, true);
             textIcon.setGravity(Gravity.CENTER);
             iconView = textIcon;
         }
+        iconView.setTag("settings_row_icon");
         row.addView(iconView, new LinearLayout.LayoutParams(dp(42), dp(42)));
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
         texts.setPadding(dp(14), 0, 0, 0);
-        texts.addView(label(title, 19, Color.rgb(30, 30, 30), false));
+        TextView rowTitle=label(title,19,Color.rgb(30,30,30),false);
+        if(destructive)rowTitle.setTextColor(color);
+        texts.addView(rowTitle);
         if (subtitle != null && subtitle.length() > 0) {
             TextView subtitleView = label(subtitle, 14, Color.rgb(92, 92, 92), false);
             subtitleView.setTag("subtitle");
@@ -12635,6 +9993,7 @@ public class MainActivity extends Activity {
 
     private void section(LinearLayout page, String title) {
         TextView s = label(title, 21, Color.rgb(30, 30, 30), true);
+        s.setTag("settings_section_"+title);
         s.setPadding(0, dp(30), 0, dp(12));
         page.addView(s);
     }
@@ -12973,6 +10332,13 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
             restoreBackupFromUri(uri);
+        } else if (requestCode == REQ_INTERNAL_FOOD_CAPTURE) {
+            if (resultCode == RESULT_OK && data != null) {
+                String returnedDate=data.getStringExtra(FoodCaptureActivity.EXTRA_DATE), returnedMeal=data.getStringExtra(FoodCaptureActivity.EXTRA_MEAL);
+                if(returnedDate!=null&&returnedDate.matches("\\d{4}-\\d{2}-\\d{2}"))pendingPhotoDate=returnedDate;
+                for(String key:NutritionStore.MEALS)if(key.equals(returnedMeal))pendingPhotoMeal=key;
+                importSelectedMealMediaAsync(selectedImageUris(data),false);
+            } else finishMealPhotoPickMode(false);
         } else if (requestCode == REQ_TAKE_MEAL_PHOTO) {
             handleMealCameraResult(resultCode, data);
         }
@@ -12994,7 +10360,7 @@ public class MainActivity extends Activity {
                 rerenderPreservingScroll(new Runnable() {
                     @Override
                     public void run() {
-                        renderMoreSettingsPage();
+                        renderMealReminderSettingsPage();
                     }
                 });
             }
@@ -13007,6 +10373,7 @@ public class MainActivity extends Activity {
         final Uri outputUri = pendingMealCameraUri;
         final String targetDate = pendingPhotoDate;
         final String targetMeal = pendingPhotoMeal;
+        final List<String> savedSources = new ArrayList<String>();
         final List<Uri> candidateUris = new ArrayList<Uri>();
         if (outputUri != null) {
             candidateUris.add(outputUri);
@@ -13028,7 +10395,7 @@ public class MainActivity extends Activity {
             preview = (Bitmap) data.getExtras().get("data");
         }
         final Bitmap fallbackPreview = preview;
-        final int target = 1600;
+        final int target = 2048;
         Log.i(LOG_TAG, "camera result code=" + resultCode + " output=" + outputUri
                 + " candidates=" + candidateUris.size() + " preview=" + (preview != null));
         mealPhotoPickAwaitingResult = true;
@@ -13066,7 +10433,7 @@ public class MainActivity extends Activity {
                 final boolean accepted = resultCode == RESULT_OK
                         || (outputUri != null && photo != null);
                 final boolean saved = accepted && photo != null
-                        && saveMealBitmap(targetDate, targetMeal, photo, false, false);
+                        && saveMealBitmap(targetDate, targetMeal, photo, false, false, savedSources);
                 recycleBitmapUnless(photo, null);
                 if (fallbackPreview != photo) {
                     recycleBitmapUnless(fallbackPreview, null);
@@ -13076,8 +10443,9 @@ public class MainActivity extends Activity {
                     public void run() {
                         clearPendingMealCameraOutput();
                         if (saved) {
-                            showGlassToast("图片已添加", Toast.LENGTH_SHORT);
+                            showGlassToast("照片已准备，请预览后确认", Toast.LENGTH_SHORT);
                             finishMealPhotoPickMode(true);
+                            showFoodProcessing(targetDate, targetMeal, savedSources);
                         } else {
                             if (resultCode == RESULT_OK) {
                                 showGlassToast("照片保存失败，请重新拍摄", Toast.LENGTH_SHORT);
@@ -13093,6 +10461,7 @@ public class MainActivity extends Activity {
     private void importSelectedMealMediaAsync(final List<Uri> uris, final boolean stickers) {
         final String targetDate = pendingPhotoDate;
         final String targetMeal = pendingPhotoMeal;
+        final List<String> savedSources = new ArrayList<String>();
         if (targetDate == null || targetMeal == null || uris == null || uris.isEmpty()) {
             showGlassToast(stickers ? "贴纸读取失败" : "图片读取失败", Toast.LENGTH_SHORT);
             finishMealPhotoPickMode(false);
@@ -13105,14 +10474,18 @@ public class MainActivity extends Activity {
             public void run() {
                 int saved = 0;
                 for (Uri uri : uris) {
-                    Bitmap bitmap = decodeBitmap(uri, stickers ? 1024 : 1440);
+                    // Preserve at least the cutout engine's 1024px input where possible.
+                    // The old 1440 limit halved a 1706px source before a second JPEG encode.
+                    Bitmap bitmap = decodeBitmap(uri, stickers ? 1024 : 2048);
+                    if(bitmap==null&&!stickers)bitmap=decodeBitmap(uri,1024);
                     if (bitmap == null) {
+                        cleanupInternalCaptureUri(uri);
                         continue;
                     }
                     try {
                         boolean success = stickers
                                 ? saveImportedMealSticker(targetDate, targetMeal, bitmap, false)
-                                : saveMealBitmap(targetDate, targetMeal, bitmap, false, false);
+                                : saveMealBitmap(targetDate, targetMeal, bitmap, false, false, savedSources);
                         if (success) {
                             saved++;
                         }
@@ -13121,6 +10494,7 @@ public class MainActivity extends Activity {
                         releaseThumbnailMemory();
                     } finally {
                         recycleBitmapUnless(bitmap, null);
+                        cleanupInternalCaptureUri(uri);
                     }
                 }
                 final int savedCount = saved;
@@ -13129,10 +10503,11 @@ public class MainActivity extends Activity {
                     public void run() {
                         if (savedCount > 0) {
                             String message = savedCount == 1
-                                    ? (stickers ? "贴纸已添加" : "图片已添加")
-                                    : "已添加" + savedCount + (stickers ? "张贴纸" : "张图片");
+                                    ? (stickers ? "贴纸已添加" : "照片已准备，请预览后确认")
+                                    : (stickers ? "已添加" : "待确认") + savedCount + (stickers ? "张贴纸" : "张图片");
                             showGlassToast(message, Toast.LENGTH_SHORT);
                             finishMealPhotoPickMode(true);
+                            if (!savedSources.isEmpty()) showFoodProcessing(targetDate, targetMeal, savedSources);
                         } else {
                             showGlassToast(stickers ? "贴纸读取失败" : "图片读取失败", Toast.LENGTH_SHORT);
                             finishMealPhotoPickMode(false);
@@ -13141,6 +10516,11 @@ public class MainActivity extends Activity {
                 });
             }
         }, stickers ? "meal-sticker-import" : "meal-photo-import").start();
+    }
+
+    private void cleanupInternalCaptureUri(Uri uri) {
+        if(uri==null||!"content".equals(uri.getScheme())||!MealCameraProvider.AUTHORITY.equals(uri.getAuthority()))return;
+        try{getContentResolver().delete(uri,null,null);}catch(Exception ignored){}
     }
 
     private void finishMealPhotoPickMode(boolean renderAfter) {
@@ -13154,8 +10534,6 @@ public class MainActivity extends Activity {
         updateFab();
         if (renderAfter) {
             renderCurrent();
-        } else {
-            applyMealPhotoPickModeToExistingRows(false);
         }
     }
 
@@ -13230,6 +10608,24 @@ public class MainActivity extends Activity {
             Bitmap bitmap = BitmapFactory.decodeStream(second, null, opts);
             second.close();
             second = null;
+            if (bitmap != null && Build.VERSION.SDK_INT >= 24) {
+                try (InputStream exifStream = getContentResolver().openInputStream(uri)) {
+                    android.media.ExifInterface exif = new android.media.ExifInterface(exifStream);
+                    int orientation = exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
+                    Matrix transform = new Matrix();
+                    if (orientation == 2) transform.setScale(-1, 1);
+                    else if (orientation == 3) transform.setRotate(180);
+                    else if (orientation == 4) transform.setScale(1, -1);
+                    else if (orientation == 5) { transform.setRotate(90); transform.postScale(-1, 1); }
+                    else if (orientation == 6) transform.setRotate(90);
+                    else if (orientation == 7) { transform.setRotate(270); transform.postScale(-1, 1); }
+                    else if (orientation == 8) transform.setRotate(270);
+                    if (!transform.isIdentity()) {
+                        Bitmap oriented = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), transform, true);
+                        if (oriented != bitmap) bitmap.recycle(); bitmap = oriented;
+                    }
+                } catch (Exception ignored) { }
+            }
             return bitmap;
         } catch (OutOfMemoryError error) {
             releaseThumbnailMemory();
@@ -13271,6 +10667,11 @@ public class MainActivity extends Activity {
     }
 
     private void releaseThumbnailMemory() {
+        if(android.os.Looper.myLooper()!=android.os.Looper.getMainLooper()){
+            runOnUiThread(()->releaseThumbnailMemory());return;
+        }
+        invalidateRootPages();
+        mediaThumbnailEpoch++;mediaThumbnailInFlight.clear();
         mediaThumbnailCache.evictAll();
     }
 
@@ -13290,14 +10691,8 @@ public class MainActivity extends Activity {
         JSONArray arr = profile.optJSONArray("meals");
         if (arr == null || arr.length() == 0) {
             arr = new JSONArray();
-            try {
-                for (String key : DEFAULT_MEAL_KEYS) {
-                    arr.put(key);
-                }
-                profile.put("meals", arr);
-                saveProfile();
-            } catch (JSONException ignored) {
-            }
+            // Reading legacy defaults must not write settings during a UI-mode switch.
+            for (String key : DEFAULT_MEAL_KEYS) arr.put(key);
         }
         List<MealOption> result = new ArrayList<MealOption>();
         for (int i = 0; i < arr.length(); i++) {
@@ -13314,7 +10709,8 @@ public class MainActivity extends Activity {
     }
 
     private List<MealOption> visibleMealsForDate(String date) {
-        return visibleMealsForDay(ensureDay(date));
+        JSONObject day = days.optJSONObject(date);
+        return visibleMealsForDay(day == null ? new JSONObject() : day);
     }
 
     private List<MealOption> visibleMealsForDay(JSONObject day) {
@@ -13396,116 +10792,17 @@ public class MainActivity extends Activity {
         return null;
     }
 
-    private boolean activeMealContains(String key) {
-        List<MealOption> meals = activeMeals();
-        for (MealOption meal : meals) {
-            if (meal.key.equals(key)) {
-                return true;
-            }
-        }
-        return false;
-    }
 
-    private boolean addDayExtraMeal(String date, String key) {
-        if (key == null || key.length() == 0 || activeMealContains(key)) {
-            return false;
-        }
-        JSONObject day = ensureDay(date);
-        JSONArray extras = day.optJSONArray("extraMeals");
-        if (extras == null) {
-            extras = new JSONArray();
-            try {
-                day.put("extraMeals", extras);
-            } catch (JSONException ignored) {
-            }
-        }
-        for (int i = 0; i < extras.length(); i++) {
-            if (key.equals(extras.optString(i))) {
-                return false;
-            }
-        }
-        extras.put(key);
-        saveDays();
-        return true;
-    }
 
-    private boolean canAddDayExtraMeal(String date, String key) {
-        if (key == null || key.length() == 0 || activeMealContains(key)) {
-            return false;
-        }
-        JSONObject day = ensureDay(date);
-        return !dayExtraMealContains(day, key) && !mealHasAnyData(day, key);
-    }
 
-    private boolean canRemoveDayExtraMeal(String date, String key) {
-        if (!isMoodOnlyMeal(key) || activeMealContains(key)) {
-            return false;
-        }
-        return dayExtraMealContains(ensureDay(date), key);
-    }
 
-    private boolean dayExtraMealContains(JSONObject day, String key) {
-        JSONArray extras = day == null ? null : day.optJSONArray("extraMeals");
-        if (extras == null) {
-            return false;
-        }
-        for (int i = 0; i < extras.length(); i++) {
-            if (key.equals(extras.optString(i))) {
-                return true;
-            }
-        }
-        return false;
-    }
 
-    private boolean removeDayExtraMeal(String date, String key) {
-        if (!canRemoveDayExtraMeal(date, key)) {
-            return false;
-        }
-        JSONObject day = ensureDay(date);
-        JSONArray extras = day.optJSONArray("extraMeals");
-        JSONArray next = new JSONArray();
-        if (extras != null) {
-            for (int i = 0; i < extras.length(); i++) {
-                String item = extras.optString(i);
-                if (item.length() > 0 && !key.equals(item)) {
-                    next.put(item);
-                }
-            }
-        }
-        try {
-            if (next.length() > 0) {
-                day.put("extraMeals", next);
-            } else {
-                day.remove("extraMeals");
-            }
-            day.remove(key);
-            JSONObject byMeal = day.optJSONObject("mealDiningMethods");
-            if (byMeal != null) {
-                byMeal.remove(key);
-                if (byMeal.length() == 0) {
-                    day.remove("mealDiningMethods");
-                }
-            }
-            saveDays();
-            return true;
-        } catch (JSONException ignored) {
-            return false;
-        }
-    }
 
     private String mealTitle(String key) {
         MealOption meal = mealByKey(key);
         return meal == null ? key : meal.title;
     }
 
-    private String mealHint(String key, String fallbackTitle) {
-        List<String> hints = mealHintList(key);
-        if (hints.isEmpty()) {
-            return fallbackTitle + "吃了什么吖";
-        }
-        int idx = Math.abs(hintSeed + key.hashCode()) % hints.size();
-        return hints.get(idx);
-    }
 
     private List<String> mealHintList(String key) {
         List<String> hints = new ArrayList<String>();
@@ -13520,8 +10817,7 @@ public class MainActivity extends Activity {
             }
         }
         if (hints.isEmpty()) {
-            MealOption meal = mealByKey(key);
-            int idx = meal == null ? 0 : Math.max(0, Math.min(MEAL_HINTS.length - 1, meal.index));
+            int idx = ManualMealPrompts.mealHintIndex(key);
             for (String value : MEAL_HINTS[idx]) {
                 hints.add(value);
             }
@@ -13529,11 +10825,6 @@ public class MainActivity extends Activity {
         return hints;
     }
 
-    private String homeHint(String date) {
-        List<String> hints = homeHintList();
-        int idx = Math.abs(hintSeed + date.hashCode()) % Math.max(1, hints.size());
-        return stripHintTail(hints.get(idx)) + HINT_TAIL;
-    }
 
     private List<String> homeHintList() {
         List<String> hints = new ArrayList<String>();
@@ -13554,15 +10845,7 @@ public class MainActivity extends Activity {
         return hints;
     }
 
-    private String homeHintCountText() {
-        JSONArray custom = profile.optJSONArray("homeHints");
-        int count = homeHintList().size();
-        return (custom == null || custom.length() == 0 ? "默认" : "自定义") + " · " + count + " 条";
-    }
 
-    private String promptCountText() {
-        return mealHintTotalCount() + "条";
-    }
 
     private List<String> hintValues(String kind, String key) {
         if ("home".equals(kind)) {
@@ -13574,20 +10857,7 @@ public class MainActivity extends Activity {
         return mealHintList(key);
     }
 
-    private int mealHintTotalCount() {
-        int count = 0;
-        for (MealOption meal : allMealOptions()) {
-            count += mealHintList(meal.key).size();
-        }
-        return count;
-    }
 
-    private int skipHintTotalCount() {
-        return skipReminderList("one").size()
-                + skipReminderList("two").size()
-                + skipReminderList("three").size()
-                + skipReminderList("many").size();
-    }
 
     private String stripHintTail(String value) {
         if (value == null) {
@@ -13680,32 +10950,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void saveMealHints(List<String> keys, List<List<EditText>> inputGroups) {
-        JSONObject obj = new JSONObject();
-        try {
-            for (int i = 0; i < keys.size() && i < inputGroups.size(); i++) {
-                JSONArray arr = new JSONArray();
-                List<EditText> inputs = inputGroups.get(i);
-                for (EditText input : inputs) {
-                    String value = input.getText().toString().trim();
-                    if (value.length() > 0) {
-                        arr.put(value);
-                    }
-                }
-                if (arr.length() > 0) {
-                    obj.put(keys.get(i), arr);
-                }
-            }
-            if (obj.length() == 0) {
-                profile.remove("mealHints");
-            } else {
-                profile.put("mealHints", obj);
-            }
-            hintSeed = (int) (System.currentTimeMillis() % 100000);
-            saveProfile();
-        } catch (JSONException ignored) {
-        }
-    }
 
     private List<String> skipReminderList(String key) {
         List<String> hints = new ArrayList<String>();
@@ -13748,14 +10992,9 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inNotebookSettingsPage = false;
         inDataSecurityPage = false;
         inRecycleBinPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
-        inExperimentalPage = false;
         inStickerGalleryPage = false;
         inUpdateLogPage = false;
         inBookDetail = false;
@@ -13779,23 +11018,27 @@ public class MainActivity extends Activity {
             }
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
-        TextView title = label("主题", 30, Color.rgb(28, 28, 30), true);
+        TextView title = label("个性化", 30, Color.rgb(28, 28, 30), true);
         title.setPadding(dp(14), 0, 0, 0);
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("选择整体主题，也可以设置头像、底栏和顶栏的半透明效果。",
+        TextView hint = label("设置主题、字体与食物贴纸轮廓。默认小赖手写已内置，无需联网下载。",
                 14, nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
         page.addView(hint);
 
+        section(page,"字体与贴纸");
+        page.addView(settingRow("字体大小",fontSizeTitle(),"@font",accent,v->chooseFontSize()));
+        page.addView(settingRow("个性字体",bookFontTitle(),"@font",accent,v->chooseBookFont()));
+        page.addView(settingRow("食物贴纸轮廓",FoodStickerRenderer.styleTitle(FoodStickerRenderer.style(this)),"@media",accent,v->chooseFoodStickerBorder()));
         section(page, "主题色");
-        final String[] names = {"清新绿色", "柠檬黄色", "番茄红", "湖水蓝", "深夜灰"};
-        final String[] values = {"green", "yellow", "red", "blue", "night"};
+        final String[] names = {"柠檬黄色", "清新绿色", "番茄红", "湖水蓝", "深夜灰"};
+        final String[] values = {"yellow", "green", "red", "blue", "night"};
         final int[] colors = {
-                Color.rgb(86, 191, 112),
                 Color.rgb(244, 196, 42),
+                Color.rgb(86, 191, 112),
                 Color.rgb(244, 93, 80),
                 Color.rgb(78, 158, 220),
                 Color.rgb(72, 75, 84)
@@ -13810,75 +11053,24 @@ public class MainActivity extends Activity {
             }));
         }
 
-        section(page, "水滴质感");
-        page.addView(settingsToggleRow("头像背景半透明", profileGlassCardEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean ok = setProfileBoolean("profileGlassCard", !profileGlassCardEnabled());
-                if (ok) {
-                    applyDecoration();
-                    refreshCurrentThemeSurface();
-                }
-                return ok;
-            }
-        }));
-        page.addView(settingsToggleRow("底栏半透明", navGlassEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean ok = setProfileBoolean("navGlass", !navGlassEnabled());
-                if (ok) {
-                    refreshCurrentThemeSurface();
-                }
-                return ok;
-            }
-        }));
-        page.addView(settingsToggleRow("顶栏透明", headerTransparentEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean enabled = !headerTransparentEnabled();
-                boolean ok = setProfileBoolean("headerTransparent", enabled);
-                if (ok && activeStickyHeader != null) {
-                    activeStickyHeader.setTransparentMode(enabled);
-                }
-                return ok;
-            }
-        }));
-        page.addView(settingsToggleRow("全局字体跟随笔记字体", globalFontFollowsBookEnabled(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                boolean ok = setProfileBoolean("globalFontFollowsBook", !globalFontFollowsBookEnabled());
-                if (ok) {
-                    refreshCurrentSurfaceTypefaces();
-                }
-                return ok;
-            }
-        }));
-        page.addView(settingsToggleRow("夜间模式", followSystemNightMode(), new ToggleHandler() {
+        section(page,"显示");
+        page.addView(settingsToggleRow("夜间模式", nightDecoration(), new ToggleHandler() {
             @Override
             public boolean onToggle() {
                 beginThemeModeTransition();
-                boolean ok = setProfileBoolean("followSystemNight", !followSystemNightMode());
-                if (ok) {
-                    applyNightModeOverride();
-                    applyDecoration();
-                    updateSystemBars();
-                    int scrollY = themeModeTransitionScrollY;
-                    boolean wasSuppressing = suppressEntryAnimation;
-                    suppressEntryAnimation = true;
-                    renderThemeSettingsPage();
-                    suppressEntryAnimation = wasSuppressing;
-                    restoreScrollPosition(currentPageScroll(), scrollY);
-                    refreshCurrentThemeSurface();
-                    finishThemeModeTransition();
-                } else {
-                    cancelThemeModeTransition();
-                }
+                boolean ok=setProfileBoolean("nightMode",!nightDecoration());
+                if(ok){
+                    applyNightModeOverride();applyDecoration();updateSystemBars();
+                    int y=themeModeTransitionScrollY;boolean previous=suppressEntryAnimation;suppressEntryAnimation=true;
+                    try{renderThemeSettingsPage();}finally{suppressEntryAnimation=previous;}
+                    restoreScrollPosition(currentPageScroll(),y);refreshCurrentThemeSurface();finishThemeModeTransition();
+                }else cancelThemeModeTransition();
                 return ok;
             }
         }));
 
-        section(page, "布局");
-        page.addView(settingRow("布局", layoutTitle(), "≡", accent, new View.OnClickListener() {
+        section(page, "界面疏密");
+        page.addView(settingRow("界面疏密", layoutTitle(), "≡", accent, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chooseLayout();
@@ -13889,6 +11081,15 @@ public class MainActivity extends Activity {
         animateIn(page);
     }
 
+    private void chooseFoodStickerBorder() {
+
+        String current=FoodStickerRenderer.style(this);int selected=0;
+        for(int i=0;i<FoodStickerRenderer.STYLES.length;i++)if(current.equals(FoodStickerRenderer.STYLES[i]))selected=i;
+        showChoiceDialog("食物贴纸轮廓",FoodStickerRenderer.NAMES,selected,which->{
+            try{profile.put("foodStickerBorder",FoodStickerRenderer.STYLES[which]);saveProfile();rerenderPreservingScroll(()->renderThemeSettingsPage());showGlassToast("贴纸边框已更新",Toast.LENGTH_SHORT);}catch(JSONException ignored){}
+        });
+    }
+
     private void renderProfileSettingsPage() {
         inThemeSettingsPage = false;
         inProfileSettingsPage = true;
@@ -13896,14 +11097,9 @@ public class MainActivity extends Activity {
         inHintManagerPage = false;
         inVibrationPage = false;
         inStickerSettingsPage = false;
-        inStackSettingsPage = false;
-        inFootprintSettingsPage = false;
         inNotebookSettingsPage = false;
         inDataSecurityPage = false;
         inRecycleBinPage = false;
-        inHiddenSettingsPage = false;
-        inHomeManagerPage = false;
-        inExperimentalPage = false;
         inStickerGalleryPage = false;
         inUpdateLogPage = false;
         inBookDetail = false;
@@ -13916,9 +11112,9 @@ public class MainActivity extends Activity {
         content.addView(scroll);
 
         LinearLayout top = row(Gravity.CENTER_VERTICAL);
-        TextView back = label("‹", 38, Color.rgb(34, 34, 34), true);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(surfaceRound(dp(25)));
+        View back = new ProfileSettingIcon(this, "back", accent, nightDecoration());
+        back.setContentDescription("返回我");
+        back.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         attachPressAnimation(back);
         back.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -13932,7 +11128,7 @@ public class MainActivity extends Activity {
         top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         installStickyHeader(scroll, page, top);
 
-        TextView hint = label("这里集中显示软件头像昵称、ID 和餐饮分析会读取的个人信息。第一次编辑昵称会创建唯一账号。",
+        TextView hint = label("管理个人资料与账号。餐饮信息仅在使用 AI 分析时作为参考。",
                 14, nightDecoration() ? Color.rgb(150, 154, 162) : Color.rgb(124, 128, 136), false);
         hint.setPadding(0, dp(12), 0, dp(12));
         hint.setLineSpacing(dp(2), 1.05f);
@@ -13940,14 +11136,14 @@ public class MainActivity extends Activity {
 
         section(page, "基础资料");
         LinearLayout basicGroup = profileInfoGroup();
-        basicGroup.addView(profileInfoRow("昵称", profile.optString("name", "给自己起个名字"), "☺", accent, true, new View.OnClickListener() {
+        basicGroup.addView(profileInfoRow("ID", profileUserId(), "id", accent, false, null));
+        basicGroup.addView(profileInfoRow("昵称", profile.optString("name", "给自己起个名字"), "profile", accent, true, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 editProfileInfo();
             }
         }));
-        basicGroup.addView(profileInfoRow("ID", profileUserId(), "ID", accent, false, null));
-        basicGroup.addView(profileInfoRow("个性签名", profileTagline(), "✎", accent, true, new View.OnClickListener() {
+        basicGroup.addView(profileInfoRow("个性签名", profileTagline(), "signature", accent, true, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 editProfileInfo();
@@ -13957,33 +11153,33 @@ public class MainActivity extends Activity {
 
         section(page, "其他资料");
         LinearLayout foodGroup = profileInfoGroup();
-        foodGroup.addView(profileInfoRow("性别", aiGenderTitle(), "♀", accent, true, new View.OnClickListener() {
+        foodGroup.addView(profileInfoRow("性别", aiGenderTitle(), "gender", accent, true, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chooseProfileSingleOption("性别", new String[]{"不填写", "女生", "男生"},
                         new String[]{"", "女生", "男生"}, "aiGender", null);
             }
         }));
-        foodGroup.addView(profileInfoRow("身高体重", profileHeightWeightTitle(), "BMI", accent, true, new View.OnClickListener() {
+        foodGroup.addView(profileInfoRow("身高体重", profileHeightWeightTitle(), "body", accent, true, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 showProfileBodyEditDialog();
             }
         }));
-        foodGroup.addView(profileInfoRow("餐饮习惯", aiMealHabitTitle(), "☰", accent, true, new View.OnClickListener() {
+        foodGroup.addView(profileInfoRow("餐饮习惯", aiMealHabitTitle(), "habit", accent, true, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chooseProfileSingleOption("餐饮习惯", MEAL_HABIT_OPTIONS, MEAL_HABIT_OPTIONS,
                         "aiMealHabit", null);
             }
         }));
-        foodGroup.addView(profileInfoRow("就餐方式", aiDiningMethodsTitle(), "▣", accent, true, new View.OnClickListener() {
+        foodGroup.addView(profileInfoRow("就餐方式", aiDiningMethodsTitle(), "dining", accent, true, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chooseDiningMethods(null);
             }
         }));
-        foodGroup.addView(profileInfoRow("平均消费", aiMealSpendTitle(), "¥", accent, true, new View.OnClickListener() {
+        foodGroup.addView(profileInfoRow("平均消费", aiMealSpendTitle(), "spend", accent, true, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 chooseProfileSingleOption("平均消费",
@@ -13996,17 +11192,11 @@ public class MainActivity extends Activity {
 
         section(page, "绑定信息");
         LinearLayout bindGroup = profileInfoGroup();
-        bindGroup.addView(profileInfoRow("绑定微信", wechatBindTitle(), "微", accent, true, new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showWechatAccountUnavailableDialog();
-            }
-        }));
         if (hasCloudIdentity()) {
             final boolean hasPwd = profile.optBoolean("cloudHasPassword", false);
             bindGroup.addView(profileInfoRow(hasPwd ? "修改密码" : "设置密码",
                     hasPwd ? "修改云端账号密码" : "设置密码后可切换登录",
-                    "🔒", accent, true, new View.OnClickListener() {
+                    "password", accent, true, new View.OnClickListener() {
                         @Override
                         public void onClick(View v) {
                             showSetPasswordDialog(hasPwd);
@@ -14015,7 +11205,7 @@ public class MainActivity extends Activity {
         }
         bindGroup.addView(profileInfoRow(hasCloudIdentity() ? "切换登录" : "登录",
                 hasCloudIdentity() ? "通过ID或用户名和密码切换到其他账号" : "通过ID或用户名和密码登录已有账号",
-                "↻", accent, true, new View.OnClickListener() {
+                "login", accent, true, new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
                         showLoginDialog();
@@ -14024,7 +11214,7 @@ public class MainActivity extends Activity {
         if (hasCloudIdentity()) {
             bindGroup.addView(profileInfoRow("退出登录",
                     "退出后仅本地使用，不再自动同步云端数据",
-                    "⎋", Color.rgb(224, 96, 86), true, new View.OnClickListener() {
+                    "logout", accent, true, new View.OnClickListener() {
                         @Override
                         public void onClick(View v) {
                             confirmCloudLogout();
@@ -14032,7 +11222,7 @@ public class MainActivity extends Activity {
                     }));
             bindGroup.addView(profileInfoRow("注销账号",
                     "清空云端资料并回收 ID，本机记录不受影响",
-                    "×", Color.rgb(224, 96, 86), true, new View.OnClickListener() {
+                    "delete", accent, true, new View.OnClickListener() {
                         @Override
                         public void onClick(View v) {
                             confirmDeleteCloudAccount();
@@ -14047,11 +11237,8 @@ public class MainActivity extends Activity {
     private LinearLayout profileInfoGroup() {
         LinearLayout group = new LinearLayout(this);
         group.setOrientation(LinearLayout.VERTICAL);
-        group.setPadding(dp(8), dp(8), dp(8), dp(8));
-        int fill = nightDecoration()
-                ? adjustAlpha(blendColor(Color.rgb(38, 40, 45), accentSoft, 0.12f), 218)
-                : adjustAlpha(blendColor(Color.WHITE, accentSoft, 0.10f), 188);
-        group.setBackground(round(fill, dp(24), adjustAlpha(accent, nightDecoration() ? 42 : 34), dp(1)));
+        group.setPadding(dp(6), dp(6), dp(6), dp(6));
+        group.setBackground(surfaceRound(dp(24)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.bottomMargin = dp(10);
         group.setLayoutParams(lp);
@@ -14060,37 +11247,33 @@ public class MainActivity extends Activity {
 
     private View profileInfoRow(String title, String value, String icon, int color, boolean clickable, View.OnClickListener click) {
         LinearLayout row = row(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), dp(11), dp(10), dp(11));
-        row.setBackground(round(adjustAlpha(Color.WHITE, nightDecoration() ? 10 : 40),
-                dp(18), Color.TRANSPARENT, 0));
+        row.setTag("profile_info_" + title);
+        row.setPadding(dp(14), dp(14), dp(12), dp(14));
+        row.setMinimumHeight(dp(72));
         if (clickable) {
             row.setClickable(true);
             attachPressAnimation(row);
             row.setOnClickListener(click);
         }
-        TextView iconView = label(icon, icon.length() > 2 ? 12 : 18,
-                clickable ? color : adjustAlpha(color, 184), true);
-        iconView.setGravity(Gravity.CENTER);
-        iconView.setBackground(round(adjustAlpha(color, nightDecoration() ? 30 : 24), dp(15), 0, 0));
-        row.addView(iconView, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        View iconView = new ProfileSettingIcon(this, icon, color, nightDecoration());
+        row.addView(iconView, new LinearLayout.LayoutParams(dp(36), dp(36)));
 
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
-        texts.setPadding(dp(12), 0, 0, 0);
-        texts.addView(label(title, 16, Color.rgb(34, 36, 40), true));
+        texts.setPadding(dp(14), 0, dp(8), 0);
+        texts.addView(label(title, 18, Color.rgb(34, 36, 40), false));
         TextView valueView = label(value == null || value.length() == 0 ? "未填写" : value,
                 14, Color.rgb(96, 100, 108), false);
         valueView.setPadding(0, dp(3), 0, 0);
         valueView.setSingleLine(false);
-        valueView.setMaxLines(3);
         texts.addView(valueView);
         row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         if (clickable) {
-            row.addView(label("›", 26, Color.rgb(112, 116, 124), true));
+            row.addView(new ProfileSettingIcon(this, "chevron", color, nightDecoration()),
+                    new LinearLayout.LayoutParams(dp(20), dp(28)));
         }
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(4);
         row.setLayoutParams(lp);
         return row;
     }
@@ -14112,7 +11295,7 @@ public class MainActivity extends Activity {
         TextView name = label(title, 19, Color.rgb(30, 30, 30), false);
         name.setPadding(dp(14), 0, 0, 0);
         row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        boolean selected = value.equals(profile.optString("decoration", "green"));
+        boolean selected = value.equals(profile.optString("decoration", "yellow"));
         TextView mark = label(selected ? "✓" : "", 22, accent, true);
         mark.setGravity(Gravity.CENTER);
         row.addView(mark, new LinearLayout.LayoutParams(dp(34), dp(34)));
@@ -14120,6 +11303,7 @@ public class MainActivity extends Activity {
     }
 
     private void applyThemeChoice(String value) {
+        beginThemeModeTransition();
         try {
             profile.put("decoration", value);
             saveProfile();
@@ -14141,7 +11325,9 @@ public class MainActivity extends Activity {
                     renderThemeSettingsPage();
                 }
             });
+            finishThemeModeTransition();
         } catch (JSONException ignored) {
+            cancelThemeModeTransition();
         }
     }
 
@@ -14168,39 +11354,52 @@ public class MainActivity extends Activity {
             return;
         }
         final File file = new File(getFilesDir(), fileName);
-        final String key = file.getAbsolutePath() + "@" + target;
+        final String key = file.getAbsolutePath() + "@" + target+":"+file.lastModified()+":"+file.length();
         Bitmap cached = mediaThumbnailCache.get(key);
         view.setTag(key);
         if (cached != null && !cached.isRecycled()) {
             view.setImageBitmap(cached);
+            notifyNotebookMediaReady(view);
             return;
         }
         view.setImageDrawable(null);
-        try {
-            mediaThumbnailExecutor.execute(new Runnable() {
-                @Override
-                public void run() {
-                    final Bitmap bitmap = decodeFileSampled(file, Math.max(128, target * 2));
-                    if (bitmap != null) {
-                        mediaThumbnailCache.put(key, bitmap);
-                    }
-                    if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) {
-                        return;
-                    }
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (bitmap != null && key.equals(view.getTag()) && view.getParent() != null) {
-                                view.setImageBitmap(bitmap);
-                            }
+        ArrayList<java.lang.ref.WeakReference<ImageView>> waiting=mediaThumbnailInFlight.get(key);
+        if(waiting!=null){
+            for(java.lang.ref.WeakReference<ImageView> ref:waiting)if(ref.get()==view)return;
+            waiting.add(new java.lang.ref.WeakReference<>(view));return;
+        }
+        final ArrayList<java.lang.ref.WeakReference<ImageView>> subscribers=new ArrayList<>();
+        subscribers.add(new java.lang.ref.WeakReference<>(view));mediaThumbnailInFlight.put(key,subscribers);
+        final long epoch=mediaThumbnailEpoch;
+        try{mediaThumbnailExecutor.execute(()->{
+            final Bitmap bitmap=decodeFileSampled(file,Math.max(128,target*2));
+            runOnUiThread(()->{
+                boolean owns=epoch==mediaThumbnailEpoch&&mediaThumbnailInFlight.get(key)==subscribers;
+                if(owns)mediaThumbnailInFlight.remove(key);
+                if(!owns||isFinishing()||isDestroyed()){
+                    if(bitmap!=null&&!bitmap.isRecycled())bitmap.recycle();return;
+                }
+                if(bitmap!=null){
+                    mediaThumbnailCache.put(key,bitmap);
+                    for(java.lang.ref.WeakReference<ImageView> ref:subscribers){
+                        ImageView targetView=ref.get();
+                        if(targetView!=null&&key.equals(targetView.getTag())&&targetView.getParent()!=null){
+                            targetView.setImageBitmap(bitmap);notifyNotebookMediaReady(targetView);
                         }
-                    });
+                    }
                 }
             });
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+        });}catch(java.util.concurrent.RejectedExecutionException ignored){
+            if(mediaThumbnailInFlight.get(key)==subscribers)mediaThumbnailInFlight.remove(key);
         }
     }
 
+    private void notifyNotebookMediaReady(ImageView view) {
+        BookOpenView opening = bookOpeningOverlay;
+        if (opening != null) opening.onMediaReady(view);
+        BookDetailSwipeFrame frame = bookDetailSwipeFrame;
+        if (frame != null) frame.onMediaReady(view);
+    }
     private Bitmap decodeFileSampled(File file, int target) {
         if (file == null || !file.isFile()) {
             return null;
@@ -14214,8 +11413,7 @@ public class MainActivity extends Activity {
             }
             int safeTarget = Math.max(128, target);
             int sample = 1;
-            while (bounds.outWidth / (sample * 2) >= safeTarget
-                    && bounds.outHeight / (sample * 2) >= safeTarget) {
+            while (Math.max(bounds.outWidth,bounds.outHeight) / ((long)sample * 2) >= safeTarget) {
                 sample *= 2;
             }
             BitmapFactory.Options options = new BitmapFactory.Options();
@@ -14223,26 +11421,30 @@ public class MainActivity extends Activity {
             options.inPreferredConfig = Bitmap.Config.ARGB_8888;
             return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
         } catch (OutOfMemoryError error) {
-            releaseThumbnailMemory();
-            Log.e(LOG_TAG, "Out of memory decoding " + file.getName(), error);
+            runOnUiThread(()->releaseThumbnailMemory());
+            Log.w(LOG_TAG, "Image decode exceeded memory budget");
+            return null;
+        } catch (RuntimeException malformed) {
             return null;
         }
     }
 
     private void beginThemeModeTransition() {
-        cancelThemeModeTransition();
         themeModeTransitionScrollY = currentContentScrollY();
-        if (root == null || root.getWidth() <= 0 || root.getHeight() <= 0) {
+        if (!ValueAnimator.areAnimatorsEnabled() || root == null || root.getWidth() <= 0 || root.getHeight() <= 0) {
+            cancelThemeModeTransition();
             return;
         }
         try {
             Bitmap snapshot = Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);
             root.draw(new Canvas(snapshot));
+            cancelThemeModeTransition();
+            if(pageCrossfade!=null)pageCrossfade.clear();
             ImageView overlay = new ImageView(this);
             disableForceDark(overlay);
             overlay.setScaleType(ImageView.ScaleType.FIT_XY);
             overlay.setImageBitmap(snapshot);
-            overlay.setClickable(true);
+            overlay.setClickable(false);
             root.addView(overlay, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             overlay.bringToFront();
@@ -14259,10 +11461,13 @@ public class MainActivity extends Activity {
         }
         overlay.bringToFront();
         overlay.animate().cancel();
-        overlay.animate()
+        overlay.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener(){public boolean onPreDraw(){
+            overlay.getViewTreeObserver().removeOnPreDrawListener(this);
+            if(themeModeTransitionOverlay!=overlay)return true;
+            overlay.animate()
                 .alpha(0f)
-                .setDuration(420)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator(1.35f))
+                .setDuration(ValueAnimator.areAnimatorsEnabled()?500:0)
+                .setInterpolator(UiTokens.motionEaseOut())
                 .withEndAction(new Runnable() {
                     @Override
                     public void run() {
@@ -14270,6 +11475,8 @@ public class MainActivity extends Activity {
                     }
                 })
                 .start();
+            return true;
+        }});overlay.invalidate();
     }
 
     private void cancelThemeModeTransition() {
@@ -14300,32 +11507,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void saveSkipHints(List<String> keys, List<List<EditText>> inputGroups) {
-        JSONObject obj = new JSONObject();
-        try {
-            for (int i = 0; i < keys.size() && i < inputGroups.size(); i++) {
-                JSONArray arr = new JSONArray();
-                List<EditText> inputs = inputGroups.get(i);
-                for (EditText input : inputs) {
-                    String value = input.getText().toString().trim();
-                    if (value.length() > 0) {
-                        arr.put(value);
-                    }
-                }
-                if (arr.length() > 0) {
-                    obj.put(keys.get(i), arr);
-                }
-            }
-            if (obj.length() == 0) {
-                profile.remove("skipHints");
-            } else {
-                profile.put("skipHints", obj);
-            }
-            hintSeed = (int) (System.currentTimeMillis() % 100000);
-            saveProfile();
-        } catch (JSONException ignored) {
-        }
-    }
 
     private String profileTagline() {
         String signature = profile == null ? "" : profile.optString("signature", "").trim();
@@ -14341,40 +11522,7 @@ public class MainActivity extends Activity {
         return id.length() == 0 ? "未创建" : id;
     }
 
-    private String cloudProfileStatusTitle() {
-        if (cloudIdentityRequesting || cloudProfileSyncing) {
-            return "正在同步...";
-        }
-        if (profile == null) {
-            return "本地资料";
-        }
-        if (profile.optString("userId", "").length() == 0) {
-            return "编辑昵称后创建账号";
-        }
-        String source = profile.optString("userIdSource", "");
-        String token = profile.optString("cloudToken", "");
-        String status = profile.optString("cloudSyncStatus", "");
-        if ("cloud".equals(source) && token.length() > 0 && "synced".equals(status)) {
-            return "已同步 · 云端 ID";
-        }
-        if ("failed".equals(status)) {
-            String message = profile.optString("cloudSyncMessage", "");
-            return message.length() == 0 ? "同步失败，点此重试" : "同步失败，点此重试";
-        }
-        return token.length() > 0 ? "待同步，点此同步" : "点此同步云端";
-    }
 
-    private String generateLocalProfileId() {
-        long seed = Math.abs(System.currentTimeMillis() ^ (long) android.os.Build.SERIAL.hashCode());
-        int id = 10000 + (int) (seed % 80000);
-        for (int i = 0; i < 90000; i++) {
-            String value = String.valueOf(id + i);
-            if (!value.contains("4")) {
-                return value;
-            }
-        }
-        return "10000";
-    }
 
     private int profileNameColor() {
         return nightDecoration() ? Color.rgb(238, 240, 244) : Color.rgb(20, 20, 20);
@@ -14400,38 +11548,6 @@ public class MainActivity extends Activity {
         return Color.argb(218, 240, 255, 245);
     }
 
-    private void chooseDecoration() {
-        final String[] names = {"清新绿色 · 细叶水波", "柠檬黄色 · 小泡泡纹", "番茄红 · 软糖弧纹", "湖水蓝 · 潮汐流线", "深夜灰 · 玻璃星光"};
-        final String[] values = {"green", "yellow", "red", "blue", "night"};
-        int current = 0;
-        String decoration = profile.optString("decoration", "green");
-        for (int i = 0; i < values.length; i++) {
-            if (values[i].equals(decoration)) {
-                current = i;
-            }
-        }
-        showChoiceDialog("主题", names, current, new ChoiceHandler() {
-            @Override
-            public void onChoice(int which) {
-                try {
-                    profile.put("decoration", values[which]);
-                    saveProfile();
-                    applyDecoration();
-                    updateSystemBars();
-                    refreshChrome();
-                    rerenderPreservingScroll(new Runnable() {
-                        @Override
-                        public void run() {
-                            renderCurrent();
-                        }
-                    });
-                    updateFab();
-                    updateNav(false);
-                } catch (JSONException ignored) {
-                }
-            }
-        });
-    }
 
     private void chooseFontSize() {
         final String[] names = fontSizeNames();
@@ -14507,10 +11623,11 @@ public class MainActivity extends Activity {
                     profile.put("font", values[Math.max(0, Math.min(values.length - 1, seek.getProgress()))]);
                     saveProfile();
                     dialog.dismiss();
+                    final boolean keepPersonalization=inThemeSettingsPage;
                     rerenderPreservingScroll(new Runnable() {
                         @Override
                         public void run() {
-                            renderCurrent();
+                            if(keepPersonalization)renderThemeSettingsPage();else renderCurrent();
                         }
                     });
                     updateNav(false);
@@ -14559,7 +11676,7 @@ public class MainActivity extends Activity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(22), dp(20), dp(22), dp(18));
         box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        TextView title = label("布局", 22, Color.rgb(28, 28, 30), true);
+        TextView title = label("界面疏密", 22, Color.rgb(28, 28, 30), true);
         title.setPadding(0, 0, 0, dp(12));
         box.addView(title);
 
@@ -14619,11 +11736,12 @@ public class MainActivity extends Activity {
                     profile.put("layout", layoutValueForLevel(progress));
                     saveProfile();
                     dialog.dismiss();
+                    final boolean keepPersonalization=inThemeSettingsPage;
                     refreshChrome();
                     rerenderPreservingScroll(new Runnable() {
                         @Override
                         public void run() {
-                            renderCurrent();
+                            if(keepPersonalization)renderThemeSettingsPage();else renderCurrent();
                         }
                     });
                     updateNav(false);
@@ -14693,190 +11811,15 @@ public class MainActivity extends Activity {
         return "黑色";
     }
 
-    private int mealCardAlpha() {
-        int value = profile == null ? 245 : profile.optInt("mealCardAlpha", 245);
-        return Math.max(28, Math.min(255, value));
-    }
 
-    private int mealCardTransparencyLevel() {
-        return Math.round((255 - mealCardAlpha()) / 227f * 100f);
-    }
 
-    private int alphaForTransparencyLevel(int level) {
-        int clean = Math.max(0, Math.min(100, level));
-        return Math.max(28, Math.min(255, Math.round(255 - clean * 2.27f)));
-    }
 
-    private int mealCardGlassLevel() {
-        int value = profile == null ? 18 : profile.optInt("mealCardGlass", 18);
-        return Math.max(0, Math.min(100, value));
-    }
 
-    private String mealCardGlassTitle() {
-        int glass = mealCardGlassLevel();
-        return "透明" + mealCardTransparencyLevel() + "% · 玻璃" + glass + "%";
-    }
 
-    private Drawable mealCardBackground(int radius) {
-        return mealCardBackgroundForValues(radius, mealCardAlpha(), mealCardGlassLevel());
-    }
 
-    private Drawable mealCardBackgroundForValues(int radius, int alpha, int glass) {
-        int a = Math.max(28, Math.min(255, alpha));
-        int g = Math.max(0, Math.min(100, glass));
-        if (nightDecoration()) {
-            int top = Color.argb(Math.max(34, Math.min(244, a - 10 + g / 3)), 52, 55, 62);
-            int bottom = Color.argb(Math.max(28, Math.min(230, a - 38 + g / 5)), 22, 24, 30);
-            GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{top, bottom});
-            d.setCornerRadius(radius);
-            d.setStroke(dp(g > 4 ? 1 : 0), Color.argb(42 + Math.min(170, g * 2), 228, 234, 244));
-            return d;
-        }
-        int top = Color.argb(a, 255, 255, 255);
-        int soft = blendColor(Color.WHITE, accentSoft, 0.10f);
-        int bottomBase = blendColor(Color.WHITE, accentSoft, 0.16f);
-        int middle = Color.argb(Math.max(24, a - g / 3), Color.red(soft), Color.green(soft), Color.blue(soft));
-        int bottom = Color.argb(Math.max(18, a - g / 2), Color.red(bottomBase), Color.green(bottomBase), Color.blue(bottomBase));
-        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{top, middle, bottom});
-        d.setCornerRadius(radius);
-        d.setStroke(dp(g > 4 ? 1 : 0), Color.argb(38 + Math.min(180, g * 2), 255, 255, 255));
-        return d;
-    }
 
-    private void chooseMealCardGlass() {
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(18));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
 
-        TextView title = label("文本框", 22, Color.rgb(28, 28, 30), true);
-        title.setPadding(0, 0, 0, dp(10));
-        box.addView(title);
 
-        final TextView value = label(mealCardGlassTitle(), 17, Color.rgb(40, 40, 40), true);
-        value.setGravity(Gravity.CENTER);
-        value.setPadding(0, dp(9), 0, dp(9));
-        value.setBackground(round(Color.argb(36, Color.red(accent), Color.green(accent), Color.blue(accent)),
-                dp(16), accentSoft, dp(1)));
-        box.addView(value, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        TextView alphaLabel = label("透明程度", 14, Color.rgb(118, 122, 130), false);
-        alphaLabel.setPadding(0, dp(12), 0, 0);
-        box.addView(alphaLabel);
-        final SeekBar alphaSeek = new SeekBar(this);
-        alphaSeek.setMax(100);
-        alphaSeek.setProgress(mealCardTransparencyLevel());
-        styleThickSeekBar(alphaSeek);
-        box.addView(alphaSeek, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
-
-        TextView glassLabel = label("背景模糊程度", 14, Color.rgb(118, 122, 130), false);
-        box.addView(glassLabel);
-        final SeekBar glassSeek = new SeekBar(this);
-        glassSeek.setMax(100);
-        glassSeek.setProgress(mealCardGlassLevel());
-        styleThickSeekBar(glassSeek);
-        box.addView(glassSeek, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
-
-        final LinearLayout preview = new LinearLayout(this);
-        preview.setOrientation(LinearLayout.VERTICAL);
-        preview.setPadding(dp(16), dp(14), dp(16), dp(14));
-        LinearLayout.LayoutParams previewLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        previewLp.topMargin = dp(6);
-        box.addView(preview, previewLp);
-        updateMealCardGlassPreview(preview, value, alphaForTransparencyLevel(alphaSeek.getProgress()), glassSeek.getProgress());
-
-        SeekBar.OnSeekBarChangeListener listener = new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                updateMealCardGlassPreview(preview, value, alphaForTransparencyLevel(alphaSeek.getProgress()), glassSeek.getProgress());
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
-            }
-        };
-        alphaSeek.setOnSeekBarChangeListener(listener);
-        glassSeek.setOnSeekBarChangeListener(listener);
-
-        LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        actions.setPadding(0, dp(16), 0, 0);
-        TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        TextView save = dialogButton("保存", accent, Color.WHITE);
-        cancel.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-            }
-        });
-        save.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                try {
-                    profile.put("mealCardAlpha", alphaForTransparencyLevel(alphaSeek.getProgress()));
-                    profile.put("mealCardGlass", glassSeek.getProgress());
-                    saveProfile();
-                    dialog.dismiss();
-                    rerenderPreservingScroll(new Runnable() {
-                        @Override
-                        public void run() {
-                            renderPreferencesPage();
-                        }
-                    });
-                    showGlassToast("今日文本框已保存", Toast.LENGTH_SHORT);
-                } catch (JSONException ignored) {
-                }
-            }
-        });
-        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(78), dp(42));
-        cancelLp.rightMargin = dp(10);
-        actions.addView(cancel, cancelLp);
-        actions.addView(save, new LinearLayout.LayoutParams(dp(78), dp(42)));
-        box.addView(actions);
-        showRoundedDialog(dialog, box);
-    }
-
-    private void updateMealCardGlassPreview(LinearLayout preview, TextView value, int alpha, int glass) {
-        if (value != null) {
-            value.setText("透明" + Math.round((255 - alpha) / 227f * 100f) + "% · 玻璃" + glass + "%");
-        }
-        if (preview == null) {
-            return;
-        }
-        preview.removeAllViews();
-        preview.setBackground(frostedPreviewBackground(dp(18), alpha, glass));
-        TextView line1 = label("早餐", 20, Color.rgb(34, 34, 34), true);
-        TextView line2 = label("今天吃了热乎乎的小面包", 15, Color.rgb(86, 90, 98), false);
-        line2.setPadding(0, dp(5), 0, 0);
-        preview.addView(line1);
-        preview.addView(line2);
-        preview.setElevation(dp(2 + Math.round(glass / 34f)));
-    }
-
-    private Drawable frostedPreviewBackground(int radius, int alpha, int glass) {
-        int a = Math.max(36, Math.min(245, alpha));
-        int g = Math.max(0, Math.min(100, glass));
-        if (nightDecoration()) {
-            GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                    new int[]{Color.argb(Math.max(130, a), 58, 60, 66),
-                            Color.argb(Math.max(108, a - 24), 30, 31, 36)});
-            d.setCornerRadius(radius);
-            d.setStroke(dp(1), Color.argb(80 + g, 226, 232, 242));
-            return d;
-        }
-        int grayTop = blendColor(Color.rgb(247, 248, 247), accentSoft, 0.10f + g / 520f);
-        int grayBottom = blendColor(Color.rgb(235, 238, 237), accentSoft, 0.08f + g / 640f);
-        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                new int[]{Color.argb(Math.max(150, a), Color.red(grayTop), Color.green(grayTop), Color.blue(grayTop)),
-                        Color.argb(Math.max(130, a - 18), Color.red(grayBottom), Color.green(grayBottom), Color.blue(grayBottom))});
-        d.setCornerRadius(radius);
-        d.setStroke(dp(1), Color.argb(88 + Math.min(112, g), 255, 255, 255));
-        return d;
-    }
 
     private int stickerColumns() {
         int columns = profile == null ? 4 : profile.optInt("stickerColumns", 4);
@@ -14998,14 +11941,16 @@ public class MainActivity extends Activity {
                 current = i;
             }
         }
-        showChoiceDialog("贴纸边框", names, current, new ChoiceHandler() {
+        showChoiceDialog("记录本图片边框", names, current, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 try {
                     profile.put("stickerFrame", values[which]);
                     saveProfile();
-                    showGlassToast("贴纸边框已切换：" + names[which], Toast.LENGTH_SHORT);
-                    if (inStickerSettingsPage) {
+                    showGlassToast("记录本图片边框已切换：" + names[which], Toast.LENGTH_SHORT);
+                    if(inNotebookSettingsPage){
+                        rerenderPreservingScroll(()->renderNotebookSettingsPage());
+                    } else if (inStickerSettingsPage) {
                         rerenderPreservingScroll(new Runnable() {
                             @Override
                             public void run() {
@@ -15036,7 +11981,7 @@ public class MainActivity extends Activity {
                 current = i;
             }
         }
-        showChoiceDialog("图片背景", names, current, new ChoiceHandler() {
+        showChoiceDialog("原图背景", names, current, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 try {
@@ -15058,340 +12003,18 @@ public class MainActivity extends Activity {
         });
     }
 
-    private String timelineTitle() {
-        return timelineTitle(timelineLevel());
-    }
 
-    private void chooseTimelineStyle() {
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(18));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        TextView title = label("左侧条痕", 22, Color.rgb(28, 28, 30), true);
-        title.setPadding(0, 0, 0, dp(12));
-        box.addView(title);
 
-        final TextView value = label(timelineTitle(), 18, Color.rgb(40, 40, 40), true);
-        value.setGravity(Gravity.CENTER);
-        value.setPadding(0, dp(10), 0, dp(10));
-        value.setBackground(round(Color.argb(36, Color.red(accent), Color.green(accent), Color.blue(accent)),
-                dp(16), accentSoft, dp(1)));
-        box.addView(value, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        final SeekBar seek = new SeekBar(this);
-        seek.setMax(100);
-        seek.setProgress(timelineLevel());
-        styleThickSeekBar(seek);
-        LinearLayout.LayoutParams seekLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54));
-        seekLp.topMargin = dp(8);
-        box.addView(seek, seekLp);
 
-        final FrameLayout preview = new FrameLayout(this);
-        preview.setPadding(dp(16), dp(12), dp(16), dp(12));
-        preview.setBackground(round(nightDecoration() ? Color.rgb(31, 32, 36) : Color.rgb(248, 250, 252),
-                dp(18), surfaceStrokeColor(), dp(1)));
-        LinearLayout.LayoutParams previewLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(74));
-        previewLp.topMargin = dp(4);
-        box.addView(preview, previewLp);
-        updateTimelinePreview(preview, timelineLevel());
 
-        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                value.setText(timelineTitle(progress));
-                updateTimelinePreview(preview, progress);
-            }
 
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-            }
 
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
-            }
-        });
 
-        LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        actions.setPadding(0, dp(16), 0, 0);
-        TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        TextView save = dialogButton("保存", accent, Color.WHITE);
-        cancel.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-            }
-        });
-        save.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                try {
-                    profile.put("timeline", timelineValueForLevel(seek.getProgress()));
-                    saveProfile();
-                    dialog.dismiss();
-                    rerenderPreservingScroll(new Runnable() {
-                        @Override
-                        public void run() {
-                            renderPreferencesPage();
-                        }
-                    });
-                } catch (JSONException ignored) {
-                }
-            }
-        });
-        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(78), dp(42));
-        cancelLp.rightMargin = dp(10);
-        actions.addView(cancel, cancelLp);
-        actions.addView(save, new LinearLayout.LayoutParams(dp(78), dp(42)));
-        box.addView(actions);
-        showRoundedDialog(dialog, box);
-    }
 
-    private int timelineLevel() {
-        String timeline = profile == null ? "bold" : profile.optString("timeline", "bold");
-        if ("none".equals(timeline)) {
-            return 0;
-        }
-        if ("hairline".equals(timeline)) {
-            return 20;
-        }
-        if ("thin".equals(timeline)) {
-            return 40;
-        }
-        if ("standard".equals(timeline)) {
-            return 60;
-        }
-        if ("strong".equals(timeline)) {
-            return 100;
-        }
-        return 80;
-    }
-
-    private String timelineTitle(int level) {
-        if (level <= 8) {
-            return "无条痕";
-        }
-        if (level <= 28) {
-            return "很细";
-        }
-        if (level <= 50) {
-            return "轻细";
-        }
-        if (level <= 70) {
-            return "标准";
-        }
-        if (level <= 90) {
-            return "明显";
-        }
-        return "很明显";
-    }
-
-    private String timelineValueForLevel(int level) {
-        if (level <= 8) {
-            return "none";
-        }
-        if (level <= 28) {
-            return "hairline";
-        }
-        if (level <= 50) {
-            return "thin";
-        }
-        if (level <= 70) {
-            return "standard";
-        }
-        if (level <= 90) {
-            return "bold";
-        }
-        return "strong";
-    }
-
-    private void updateTimelinePreview(FrameLayout preview, int level) {
-        preview.removeAllViews();
-        int width = timelineWidthForLevel(level);
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(10), dp(14), dp(10));
-        card.setBackground(round(nightDecoration() ? Color.rgb(38, 40, 45) : Color.WHITE,
-                dp(16), accentSoft, dp(1)));
-        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
-        cardLp.leftMargin = dp(width > 0 ? 18 : 0);
-        cardLp.gravity = Gravity.CENTER_VERTICAL;
-        preview.addView(card, cardLp);
-
-        View line1 = new View(this);
-        line1.setBackground(round(adjustAlpha(Color.rgb(90, 94, 104), 155), dp(4), 0, 0));
-        LinearLayout.LayoutParams l1 = new LinearLayout.LayoutParams(dp(92), dp(6));
-        l1.bottomMargin = dp(7);
-        card.addView(line1, l1);
-        View line2 = new View(this);
-        line2.setBackground(round(adjustAlpha(Color.rgb(140, 144, 152), 125), dp(4), 0, 0));
-        card.addView(line2, new LinearLayout.LayoutParams(dp(132), dp(6)));
-
-        if (width > 0) {
-            View bar = new View(this);
-            bar.setBackground(round(accent, dp(Math.max(2, width)), 0, 0));
-            FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(dp(width), dp(48));
-            barLp.leftMargin = dp(2);
-            barLp.gravity = Gravity.LEFT | Gravity.CENTER_VERTICAL;
-            preview.addView(bar, barLp);
-        }
-    }
-
-    private int timelineWidthForLevel(int level) {
-        return timelineWidthForValue(timelineValueForLevel(level));
-    }
-
-    private int timelineWidthForValue(String timeline) {
-        if ("none".equals(timeline)) {
-            return 0;
-        }
-        if ("hairline".equals(timeline)) {
-            return 2;
-        }
-        if ("thin".equals(timeline)) {
-            return 4;
-        }
-        if ("standard".equals(timeline)) {
-            return 6;
-        }
-        if ("strong".equals(timeline)) {
-            return 10;
-        }
-        return 8;
-    }
-
-    private void confirmEnableHiddenSettings(final TextView toggle) {
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(18));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-
-        TextView title = label("确定要开启该功能吗？", 22, Color.rgb(28, 28, 30), true);
-        box.addView(title);
-        TextView message = label("开启后，可通过“足迹”日历右上角的齿轮来打开“我”界面。", 16,
-                Color.rgb(92, 96, 104), false);
-        message.setPadding(0, dp(10), 0, dp(16));
-        message.setLineSpacing(dp(2), 1.05f);
-        box.addView(message);
-
-        LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        TextView ok = dialogButton("确定", accent, Color.WHITE);
-        cancel.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-            }
-        });
-        ok.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-                if (toggleHiddenSettings(true)) {
-                    updateToggleChip(toggle, true);
-                    pulseToggle(toggle);
-                }
-            }
-        });
-        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(78), dp(42));
-        cancelLp.rightMargin = dp(10);
-        actions.addView(cancel, cancelLp);
-        actions.addView(ok, new LinearLayout.LayoutParams(dp(78), dp(42)));
-        box.addView(actions);
-        showRoundedDialog(dialog, box);
-    }
-
-    private boolean toggleHiddenSettings(boolean next) {
-        try {
-            if (next && calendarHidden()) {
-                showSimpleInfoDialog("不能同时隐藏", "日历和“我/设置”不能同时隐藏，否则会找不到设置入口。请先关闭隐藏日历。");
-                return false;
-            }
-            profile.put("hideSettings", next);
-            if (next && profile.optInt("startTab", 0) == 3) {
-                profile.put("startTab", 0);
-            }
-            saveProfile();
-            buildNav();
-            updateFab();
-            updateNav(false);
-            return true;
-        } catch (JSONException ignored) {
-            return false;
-        }
-    }
-
-    private void toggleNavHaptic() {
-        try {
-            profile.put("navHaptic", !navHapticEnabled());
-            saveProfile();
-            renderPreferencesPage();
-        } catch (JSONException ignored) {
-        }
-    }
-
-    private void chooseStartTab() {
-        ArrayList<Integer> availableTabs = new ArrayList<Integer>();
-        availableTabs.add(0);
-        availableTabs.add(1);
-        if (!calendarHidden() && !footprintCalendarMerged()) {
-            availableTabs.add(2);
-        }
-        if (!settingsHidden()) {
-            availableTabs.add(3);
-        }
-        final int[] tabs = new int[availableTabs.size()];
-        for (int i = 0; i < availableTabs.size(); i++) {
-            tabs[i] = availableTabs.get(i);
-        }
-        final String[] names = new String[tabs.length];
-        int current = 0;
-        int saved = profile.optInt("startTab", 0);
-        if (saved == 2 && (calendarHidden() || footprintCalendarMerged())) {
-            saved = 1;
-        }
-        for (int i = 0; i < tabs.length; i++) {
-            names[i] = TAB_TITLES[tabs[i]];
-            if (tabs[i] == saved) {
-                current = i;
-            }
-        }
-        showChoiceDialog("启动页面", names, current, new ChoiceHandler() {
-            @Override
-            public void onChoice(int which) {
-                try {
-                    profile.put("startTab", tabs[which]);
-                    saveProfile();
-                    showGlassToast("下次打开会优先显示：" + names[which], Toast.LENGTH_SHORT);
-                    rerenderPreservingScroll(new Runnable() {
-                        @Override
-                        public void run() {
-                            renderPreferencesPage();
-                        }
-                    });
-                } catch (JSONException ignored) {
-                }
-            }
-        });
-    }
-
-    private String startTabTitle() {
-        int tab = profile.optInt("startTab", 0);
-        if (tab == 2 && (calendarHidden() || footprintCalendarMerged())) {
-            tab = 1;
-        }
-        if (settingsHidden() && tab == 3) {
-            tab = 0;
-        }
-        if (tab < 0 || tab >= TAB_TITLES.length) {
-            tab = 0;
-        }
-        return TAB_TITLES[tab];
-    }
 
     private String footprintLayoutMode() {
-        String mode = profile == null ? "original" : profile.optString("footprintLayout", "original");
+        String mode = profile == null ? "expanded" : profile.optString("footprintLayout", "expanded");
         return "expanded".equals(mode) ? "expanded" : "original";
     }
 
@@ -15400,7 +12023,7 @@ public class MainActivity extends Activity {
     }
 
     private String footprintLayoutTitle() {
-        return footprintExpanded() ? "展开" : "平滑";
+        return footprintExpanded() ? "网格书架" : "横向书架";
     }
 
     private int footprintColumns() {
@@ -15412,22 +12035,13 @@ public class MainActivity extends Activity {
         return profile != null && profile.optBoolean("footprintDateSections", false);
     }
 
-    private boolean footprintShowCaloriesEnabled() {
-        return profile != null && profile.optBoolean("footprintShowCalories", false);
-    }
 
-    private boolean footprintShowSpendingEnabled() {
-        return profile != null && profile.optBoolean("footprintShowSpending", false);
-    }
 
     private int footprintGap() {
         int gap = profile == null ? 10 : profile.optInt("footprintGap", 10);
         return Math.max(4, Math.min(28, gap));
     }
 
-    private String footprintPageTitle() {
-        return footprintLayoutTitle() + " · 每行" + footprintColumns() + "本";
-    }
 
     private String bookCoverStyle() {
         String style = profile == null ? "food" : profile.optString("bookCoverStyle", "food");
@@ -15507,36 +12121,7 @@ public class MainActivity extends Activity {
         return "美食派对";
     }
 
-    private String bookFontStyle() {
-        String style = profile == null ? "default" : profile.optString("bookFont", "default");
-        if ("girl".equals(style) || "sweet".equals(style) || "round".equals(style)
-                || "soft".equals(style) || "pudding".equals(style) || "bubble".equals(style)
-                || "luoyan".equals(style)) {
-            return "xiaolai";
-        }
-        if ("comic".equals(style) || "block".equals(style)
-                || "scribble".equals(style) || "diary".equals(style)) {
-            return "yozai";
-        }
-        if ("casual".equals(style) || "kai".equals(style) || "note".equals(style)) {
-            return "xiaolai";
-        }
-        if ("serif".equals(style)) {
-            return "wenkai";
-        }
-        if ("film".equals(style)) {
-            return "wenkai";
-        }
-        if ("mashan".equals(style)) {
-            return "default";
-        }
-        if ("yozai".equals(style) || "xiaolai".equals(style)
-                || "wenkai".equals(style) || "marker".equals(style)
-                || "zcool".equals(style)) {
-            return style;
-        }
-        return "default";
-    }
+    private String bookFontStyle() { return AppTypography.fontStyle(profile); }
 
     private String bookFontTitle() {
         String style = bookFontStyle();
@@ -15544,7 +12129,7 @@ public class MainActivity extends Activity {
             return downloadedBookFontReady(style) ? "悠哉手写" : "悠哉手写（未下载）";
         }
         if ("xiaolai".equals(style)) {
-            return downloadedBookFontReady(style) ? "小赖手写" : "小赖手写（未下载）";
+            return "小赖手写(默认)";
         }
         if ("wenkai".equals(style)) {
             return downloadedBookFontReady(style) ? "文楷手写" : "文楷手写（未下载）";
@@ -15582,9 +12167,6 @@ public class MainActivity extends Activity {
         return "straight".equals(bookStickerLayout()) ? "整齐摆放" : "自然斜放";
     }
 
-    private boolean bookPhotoBoardEnabled() {
-        return profile != null && profile.optBoolean("bookPhotoBoard", false);
-    }
 
     private String bookTransitionMode() {
         String mode = profile == null ? "normal" : profile.optString("bookTransitionMode",
@@ -15593,7 +12175,7 @@ public class MainActivity extends Activity {
     }
 
     private String bookTransitionModeTitle() {
-        return "flip".equals(bookTransitionMode()) ? "翻页" : "平滑";
+        return "flip".equals(bookTransitionMode()) ? "仿真翻页" : "滑动";
     }
 
     private boolean bookFlipAnimationEnabled() {
@@ -15706,10 +12288,10 @@ public class MainActivity extends Activity {
     }
 
     private void chooseFootprintLayout() {
-        final String[] names = {"平滑", "展开"};
-        final String[] values = {"original", "expanded"};
-        int current = footprintExpanded() ? 1 : 0;
-        showChoiceDialog("足迹页面布局", names, current, new ChoiceHandler() {
+        final String[] names = {"网格书架", "横向书架"};
+        final String[] values = {"expanded", "original"};
+        int current = footprintExpanded() ? 0 : 1;
+        showChoiceDialog("书架排列方式", names, current, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 try {
@@ -15865,8 +12447,8 @@ public class MainActivity extends Activity {
     }
 
     private void chooseBookFont() {
-        final String[] names = {"默认", "小赖手写", "悠哉手写", "文楷手写", "漫黑手写", "站酷快乐体"};
-        final String[] values = {"default", "xiaolai", "yozai", "wenkai", "marker", "zcool"};
+        final String[] names = {"默认", "悠哉手写", "文楷手写", "漫黑手写", "站酷快乐体"};
+        final String[] values = {"xiaolai", "yozai", "wenkai", "marker", "zcool"};
         int current = 0;
         String style = bookFontStyle();
         for (int i = 0; i < values.length; i++) {
@@ -15875,7 +12457,7 @@ public class MainActivity extends Activity {
                 break;
             }
         }
-        showBookFontChoiceDialog("笔记字体", names, values, current, new ChoiceHandler() {
+        showBookFontChoiceDialog("个性字体", names, values, current, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 try {
@@ -15884,7 +12466,7 @@ public class MainActivity extends Activity {
                     rerenderPreservingScroll(new Runnable() {
                         @Override
                         public void run() {
-                            renderInterfaceLayoutPage();
+                            if(inThemeSettingsPage)renderThemeSettingsPage();else renderInterfaceLayoutPage();
                         }
                     });
                 } catch (JSONException ignored) {
@@ -15915,66 +12497,20 @@ public class MainActivity extends Activity {
         final String[] names = {"自然斜放", "整齐摆放"};
         final String[] values = {"tilt", "straight"};
         int current = "straight".equals(bookStickerLayout()) ? 1 : 0;
-        showChoiceDialog("贴纸摆放", names, current, new ChoiceHandler() {
+        showChoiceDialog("记录本图片摆放", names, current, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 try {
                     profile.put("bookStickerLayout", values[which]);
                     saveProfile();
                     updateSettingRowSubtitle(sourceRow, bookStickerLayoutTitle());
-                    showGlassToast("贴纸摆放已切换：" + names[which], Toast.LENGTH_SHORT);
+                    showGlassToast("记录本图片摆放已切换：" + names[which], Toast.LENGTH_SHORT);
                 } catch (JSONException ignored) {
                 }
             }
         });
     }
 
-    private void confirmBookPhotoBoard() {
-        final boolean next = !bookPhotoBoardEnabled();
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(18));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        box.addView(label(next ? "开启图片摆放？" : "关闭图片摆放？", 22, Color.rgb(28, 28, 30), true));
-        String text = next
-                ? "开启后，会把普通图片像贴纸一样摆放到吃饭本子页面下面，和贴纸放在一起展示。"
-                : "关闭后，吃饭本子页面下面只摆放贴纸，普通图片不再放进本子纸张底部。";
-        TextView message = label(text, 15, Color.rgb(92, 96, 104), false);
-        message.setPadding(0, dp(10), 0, dp(16));
-        message.setLineSpacing(dp(2), 1.05f);
-        box.addView(message);
-        LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        TextView ok = dialogButton(next ? "开启" : "关闭", accent, Color.WHITE);
-        cancel.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-            }
-        });
-        ok.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                dialog.dismiss();
-                if (setProfileBoolean("bookPhotoBoard", next)) {
-                    showGlassToast(next ? "图片会像贴纸一样摆放啦" : "已关闭图片摆放", Toast.LENGTH_SHORT);
-                    rerenderPreservingScroll(new Runnable() {
-                        @Override
-                        public void run() {
-                            renderNotebookSettingsPage();
-                        }
-                    });
-                }
-            }
-        });
-        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(78), dp(42));
-        cancelLp.rightMargin = dp(10);
-        actions.addView(cancel, cancelLp);
-        actions.addView(ok, new LinearLayout.LayoutParams(dp(78), dp(42)));
-        box.addView(actions);
-        showRoundedDialog(dialog, box);
-    }
 
     private void chooseBookShareMode() {
         final String[] names = {"全屏界面", "纸张界面"};
@@ -16001,10 +12537,10 @@ public class MainActivity extends Activity {
     }
 
     private void chooseBookTransitionMode() {
-        final String[] names = {"平滑", "翻页"};
+        final String[] names = {"滑动", "仿真翻页"};
         final String[] values = {"normal", "flip"};
         int current = "flip".equals(bookTransitionMode()) ? 1 : 0;
-        showChoiceDialog("衔接动画", names, current, new ChoiceHandler() {
+        showChoiceDialog("翻页", names, current, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 if (which < 0 || which >= values.length) {
@@ -16014,7 +12550,7 @@ public class MainActivity extends Activity {
                     profile.put("bookTransitionMode", values[which]);
                     profile.put("bookFlipAnimation", "flip".equals(values[which]));
                     saveProfile();
-                    showGlassToast("衔接动画已切换：" + names[which], Toast.LENGTH_SHORT);
+                    showGlassToast("翻页方式已切换：" + names[which], Toast.LENGTH_SHORT);
                     rerenderPreservingScroll(new Runnable() {
                         @Override
                         public void run() {
@@ -16095,9 +12631,8 @@ public class MainActivity extends Activity {
                     if (out == null) {
                         throw new Exception("backup output missing");
                     }
-                    byte[] backup = buildBackupBytes(false);
                     try {
-                        out.write(backup);
+                        writeBackup(out, false);
                     } finally {
                         out.close();
                     }
@@ -16109,10 +12644,11 @@ public class MainActivity extends Activity {
                             showGlassToast("已备份到 Downloads/一蔬一饭 backup/" + done, Toast.LENGTH_LONG);
                         }
                     });
-                } catch (final Exception e) {
-                    if (uri != null && Build.VERSION.SDK_INT >= 29) {
+                } catch (final Exception | OutOfMemoryError e) {
+                    if (uri != null) {
                         try {
-                            getContentResolver().delete(uri, null, null);
+                            if("file".equals(uri.getScheme()))new File(uri.getPath()).delete();
+                            else getContentResolver().delete(uri, null, null);
                         } catch (Exception ignored) {
                         }
                     }
@@ -16193,11 +12729,11 @@ public class MainActivity extends Activity {
                             showGlassToast("数据已恢复", Toast.LENGTH_SHORT);
                         }
                     });
-                } catch (final Exception e) {
+                } catch (final Exception | OutOfMemoryError e) {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            showGlassToast("恢复失败，请确认备份文件可用", Toast.LENGTH_SHORT);
+                            if(!showPendingRestoreRecovery())showGlassToast("恢复失败，请确认备份文件和可用存储空间", Toast.LENGTH_SHORT);
                         }
                     });
                 }
@@ -16205,235 +12741,121 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private boolean showPendingRestoreRecovery(){
+        if(!prefs.contains(BackupRestoreRecovery.MARKER))return false;
+        startActivity(new Intent(this,RestoreRecoveryActivity.class));finish();return true;
+    }
+
     private byte[] buildBackupBytes(boolean forCloud) throws Exception {
+        // Kept for bounded compatibility/isolated QA, never used by normal export/upload.
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        ZipOutputStream zip = new ZipOutputStream(bytes);
-        try {
-            addZipText(zip, "days.json", days.toString());
-            addZipText(zip, "profile.json", (forCloud ? cloudSafeProfile() : profile).toString());
-            File avatar = new File(getFilesDir(), "avatar.bin");
-            if (avatar.exists()) {
-                addZipFile(zip, avatar, "files/avatar.bin");
-            }
-            List<String> files = referencedMediaFileNames(days);
-            for (String name : recycleMediaFileNames()) {
-                if (!files.contains(name)) {
-                    files.add(name);
-                }
-            }
-            for (String name : files) {
-                File file = new File(getFilesDir(), name);
-                if (file.exists() && file.isFile()) {
-                    addZipFile(zip, file, "files/" + name);
-                }
-            }
-        } finally {
-            zip.close();
-        }
+        OutputStream bounded=new java.io.FilterOutputStream(bytes){long count;
+            public void write(int value)throws java.io.IOException{if(++count>16L*1024*1024)throw new java.io.IOException("Legacy backup limit exceeded");out.write(value);}
+            public void write(byte[] data,int offset,int length)throws java.io.IOException{count+=length;if(count>16L*1024*1024)throw new java.io.IOException("Legacy backup limit exceeded");out.write(data,offset,length);}
+        };
+        writeBackup(bounded,forCloud);
         return bytes.toByteArray();
     }
 
-    private JSONObject cloudSafeProfile() throws JSONException {
-        JSONObject copy = new JSONObject(profile == null ? "{}" : profile.toString());
-        stripCloudOnlyProfileFields(copy);
-        stripApiProfileFields(copy);
-        return copy;
+    private void writeBackup(OutputStream output,boolean forCloud)throws Exception {
+        JSONObject snapshotDays,snapshotProfile;
+        synchronized(NutritionStore.LOCK){
+            snapshotDays=NutritionStore.read(prefs,DATA_KEY);
+            snapshotProfile=PrivateProfileStore.read(this);
+        }
+        List<File> files=new ArrayList<>();
+        File avatar=BackupArchive.child(getFilesDir(),"avatar.bin");if(avatar.isFile())files.add(avatar);
+        for(String name:backupMediaFileNames(snapshotDays,snapshotProfile)){
+            File file=BackupArchive.child(getFilesDir(),name);
+            if(!file.isFile())throw new java.io.IOException("Referenced backup media is unavailable");
+            if(!files.contains(file))files.add(file);
+        }
+        BackupArchive.write(output,snapshotDays.toString(),ProfilePrivacy.portable(snapshotProfile).toString(),files);
     }
 
-    private void stripCloudOnlyProfileFields(JSONObject obj) {
-        obj.remove("userId");
-        obj.remove("userIdSource");
-        obj.remove("cloudToken");
-        obj.remove("cloudWechatBound");
-        obj.remove("cloudHasPassword");
-        obj.remove("cloudCreatedAt");
-        obj.remove("cloudAvatarUrl");
-        obj.remove("cloudSyncStatus");
-        obj.remove("cloudSyncMessage");
-        obj.remove("cloudUpdatedAt");
-        obj.remove("cloudDataUpdatedAt");
-        obj.remove("cloudDataHash");
-        obj.remove("lastCloudBackupHash");
-        obj.remove("lastAutoCloudSyncAt");
+    private File buildBackupFile(boolean forCloud)throws Exception {
+        File file=File.createTempFile("eat-record-backup-",".zip",getCacheDir());
+        boolean complete=false;
+        try{BackupArchive.requireSpace(getCacheDir(),BackupArchive.DISK_RESERVE,BackupArchive.DISK);try(OutputStream output=new FileOutputStream(file)){writeBackup(output,forCloud);}complete=true;return file;}
+        finally{if(!complete)file.delete();}
+    }
+
+    private List<String> backupMediaFileNames(JSONObject sourceDays,JSONObject sourceProfile){
+        List<String> result=referencedMediaFileNames(sourceDays);Set<String> seen=new HashSet<>(result);
+        JSONArray recycle=sourceProfile==null?null:sourceProfile.optJSONArray("recycleBin");
+        for(int i=0;recycle!=null&&i<recycle.length();i++){
+            JSONObject item=recycle.optJSONObject(i);if(item==null)continue;
+            String file=safeBackupFileName(item.optString("file"));if(!file.isEmpty()&&seen.add(file))result.add(file);
+            for(String name:NutritionStore.media(item))if(BackupArchive.safeName(name)&&seen.add(name))result.add(name);
+        }
+        return result;
+    }
+
+    private JSONObject cloudSafeProfile() throws JSONException {
+        return ProfilePrivacy.portable(profile);
     }
 
     private void stripApiProfileFields(JSONObject obj) {
-        obj.remove("apiKey");
-        obj.remove("apiEndpoint");
-        obj.remove("apiModel");
-        obj.remove("apiModels");
-        obj.remove("apiModelMode");
-        obj.remove("apiVisionSupported");
-        try {
-            obj.put("apiEnabled", false);
-            obj.put("calorieRecognition", false);
-            obj.put("aiAnalysisEnabled", false);
-            obj.put("aiAutoAnalysis", false);
-            obj.put("aiVisionEnabled", false);
-        } catch (JSONException ignored) {
-        }
+        // Historical isolated QA entry delegates to the same export/import boundary.
+        ProfilePrivacy.preserveLocalOnly(obj,null);
     }
 
     private void restoreBackupFromStream(InputStream in, boolean keepLocalOnlyFields) throws Exception {
-        File tempDir = new File(getCacheDir(), "restore_" + System.currentTimeMillis());
-        JSONObject currentProfile = profile == null ? new JSONObject() : new JSONObject(profile.toString());
+        File tempDir = new File(getNoBackupFilesDir(),BackupRestoreRecovery.PREFIX+java.util.UUID.randomUUID());
+        boolean committed=false,marked=false;
         try {
-            if (!tempDir.mkdirs()) {
-                throw new Exception("restore temp missing");
-            }
-            String daysText = null;
-            String profileText = null;
-            ZipInputStream zip = new ZipInputStream(in);
-            try {
-                ZipEntry entry;
-                while ((entry = zip.getNextEntry()) != null) {
-                    String name = entry.getName();
-                    if (entry.isDirectory()) {
-                        zip.closeEntry();
-                        continue;
-                    }
-                    if ("days.json".equals(name)) {
-                        daysText = readZipEntryText(zip);
-                    } else if ("profile.json".equals(name)) {
-                        profileText = readZipEntryText(zip);
-                    } else if (name.startsWith("files/")) {
-                        String outName = safeBackupFileName(name.substring("files/".length()));
-                        if (outName.length() > 0) {
-                            copyZipEntryToFile(zip, new File(tempDir, outName));
-                        }
-                    }
-                    zip.closeEntry();
+            BackupArchive.Staged staged=BackupArchive.extract(in,tempDir);
+            List<String> media=backupMediaFileNames(staged.days,staged.profile);
+            for(String name:media)if(!staged.names.contains(name))throw new java.io.IOException("Backup references missing media");
+            if(staged.names.contains("avatar.bin"))media.add("avatar.bin");
+            // Do not install unreferenced archive files over unrelated app-private state.
+            synchronized(NutritionStore.LOCK){
+                BackupRestoreRecovery.recover(this);
+                JSONObject currentProfile=PrivateProfileStore.read(this);
+                JSONObject currentDays=NutritionStore.read(prefs,DATA_KEY);
+                ProfilePrivacy.preserveLocalOnly(staged.profile,currentProfile);
+                List<String> remove=backupMediaFileNames(currentDays,currentProfile);remove.add("avatar.bin");
+                BackupFileTransaction transaction=new BackupFileTransaction(getFilesDir(),tempDir,media,remove);
+                String oldDays=currentDays.toString(),oldProfile=ProfilePrivacy.publicProfile(currentProfile).toString();
+                String nextDays=staged.days.toString(),nextProfile=ProfilePrivacy.publicProfile(staged.profile).toString();
+                BackupFileTransaction.saveState(tempDir,oldDays,oldProfile);
+                marked=true;
+                if(!prefs.edit().putString(BackupRestoreRecovery.MARKER,tempDir.getName()).commit()){
+                    // commit(false) can still alter SharedPreferences' in-memory map.
+                    if(prefs.edit().remove(BackupRestoreRecovery.MARKER).commit())marked=false;
+                    else prefs.edit().putString(BackupRestoreRecovery.MARKER,tempDir.getName()).commit();
+                    throw new java.io.IOException("Cannot mark restore transaction");
                 }
-            } finally {
-                zip.close();
-            }
-            if (daysText == null || profileText == null) {
-                throw new Exception("backup json missing");
-            }
-            JSONObject restoredDays = new JSONObject(daysText);
-            JSONObject restoredProfile = new JSONObject(profileText);
-            if (keepLocalOnlyFields) {
-                preserveLocalOnlyProfileFields(restoredProfile, currentProfile);
-            }
-            deleteReferencedMediaFiles(days);
-            File oldAvatar = new File(getFilesDir(), "avatar.bin");
-            if (oldAvatar.exists()) {
-                oldAvatar.delete();
-            }
-            File[] restoredFiles = tempDir.listFiles();
-            if (restoredFiles != null) {
-                for (File file : restoredFiles) {
-                    if (file.isFile()) {
-                        copyFile(file, new File(getFilesDir(), file.getName()));
+                try{
+                    FoodAnalysisJobService.cancelAll(this);
+                    transaction.install();
+                    if(!prefs.edit().putString(DATA_KEY,nextDays).putString(PROFILE_KEY,nextProfile).remove(BackupRestoreRecovery.MARKER).commit())throw new java.io.IOException("Cannot commit restored records");
+                    committed=true;
+                }catch(Exception | OutOfMemoryError error){
+                    // Recover the known journal even if a failed commit removed the
+                    // marker from RAM. Its presence is not a disk-commit oracle.
+                    try{
+                        transaction.rollback();
+                        if(!prefs.edit().putString(DATA_KEY,oldDays).putString(PROFILE_KEY,oldProfile).remove(BackupRestoreRecovery.MARKER).commit())throw new java.io.IOException("Cannot persist restored rollback");
+                        marked=false;days=readJson(DATA_KEY);profile=readProfile();
+                    }catch(Exception | OutOfMemoryError recovery){
+                        prefs.edit().putString(BackupRestoreRecovery.MARKER,tempDir.getName()).commit();
+                        error.addSuppressed(recovery);
                     }
+                    throw error;
                 }
-            }
-            prefs.edit()
-                    .putString(DATA_KEY, restoredDays.toString())
-                    .putString(PROFILE_KEY, restoredProfile.toString())
-                    .apply();
-            days = readJson(DATA_KEY);
-            profile = readProfile();
-        } finally {
-            deleteTree(tempDir);
-        }
-    }
-
-    private void preserveLocalOnlyProfileFields(JSONObject target, JSONObject local) {
-        preserveProfileKey(target, local, "userId");
-        preserveProfileKey(target, local, "userIdSource");
-        preserveProfileKey(target, local, "cloudToken");
-        preserveProfileKey(target, local, "cloudWechatBound");
-        preserveProfileKey(target, local, "cloudHasPassword");
-        preserveProfileKey(target, local, "cloudCreatedAt");
-        preserveProfileKey(target, local, "cloudUpdatedAt");
-        preserveProfileKey(target, local, "cloudAvatarUrl");
-        preserveProfileKey(target, local, "cloudDataHash");
-        preserveProfileKey(target, local, "lastCloudBackupHash");
-        preserveProfileKey(target, local, "apiKey");
-        preserveProfileKey(target, local, "apiEndpoint");
-        preserveProfileKey(target, local, "apiModel");
-        preserveProfileKey(target, local, "apiModels");
-        preserveProfileKey(target, local, "apiModelMode");
-        preserveProfileKey(target, local, "apiVisionSupported");
-        preserveProfileKey(target, local, "apiEnabled");
-        preserveProfileKey(target, local, "calorieRecognition");
-        preserveProfileKey(target, local, "aiAnalysisEnabled");
-        preserveProfileKey(target, local, "aiAutoAnalysis");
-        preserveProfileKey(target, local, "aiVisionEnabled");
-        try {
-            target.put("cloudSyncStatus", "synced");
-            target.put("cloudSyncMessage", "");
-        } catch (JSONException ignored) {
-        }
-    }
-
-    private void preserveProfileKey(JSONObject target, JSONObject local, String key) {
-        if (local != null && local.has(key)) {
-            try {
-                target.put(key, local.get(key));
-            } catch (JSONException ignored) {
-            }
-        }
-    }
-
-    private void addZipText(ZipOutputStream zip, String name, String text) throws Exception {
-        ZipEntry entry = new ZipEntry(name);
-        zip.putNextEntry(entry);
-        byte[] data = text.getBytes("UTF-8");
-        zip.write(data, 0, data.length);
-        zip.closeEntry();
-    }
-
-    private void addZipFile(ZipOutputStream zip, File file, String entryName) throws Exception {
-        ZipEntry entry = new ZipEntry(entryName);
-        zip.putNextEntry(entry);
-        FileInputStream in = new FileInputStream(file);
-        try {
-            copyStream(in, zip);
-        } finally {
-            in.close();
-        }
-        zip.closeEntry();
-    }
-
-    private String readZipEntryText(ZipInputStream zip) throws Exception {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        copyStream(zip, out);
-        return new String(out.toByteArray(), "UTF-8");
-    }
-
-    private String sha256Hex(byte[] data) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] hash = digest.digest(data);
-        StringBuilder sb = new StringBuilder(hash.length * 2);
-        for (byte b : hash) {
-            sb.append(String.format(Locale.US, "%02x", b & 0xff));
-        }
-        return sb.toString();
-    }
-
-    private void copyZipEntryToFile(ZipInputStream zip, File outFile) throws Exception {
-        FileOutputStream out = new FileOutputStream(outFile);
-        try {
-            copyStream(zip, out);
-        } finally {
-            out.close();
-        }
-    }
-
-    private void copyFile(File from, File to) throws Exception {
-        FileInputStream in = new FileInputStream(from);
-        try {
-            FileOutputStream out = new FileOutputStream(to);
-            try {
-                copyStream(in, out);
-            } finally {
-                out.close();
+                days=readJson(DATA_KEY);profile=readProfile();
             }
         } finally {
-            in.close();
+            // A failed rollback retains its durable journal for next-start recovery.
+            if(committed||!marked)try{BackupArchive.deleteOwnedTree(tempDir);}catch(java.io.IOException ignored){}
         }
+    }
+
+    private String sha256Hex(File file)throws Exception {
+        MessageDigest digest=MessageDigest.getInstance("SHA-256");
+        try(InputStream in=new FileInputStream(file)){byte[] buffer=new byte[32768];int count;while((count=in.read(buffer))!=-1)digest.update(buffer,0,count);}
+        StringBuilder value=new StringBuilder();for(byte b:digest.digest())value.append(String.format(Locale.US,"%02x",b&0xff));return value.toString();
     }
 
     private void copyStream(InputStream in, OutputStream out) throws Exception {
@@ -16446,11 +12868,7 @@ public class MainActivity extends Activity {
     }
 
     private String safeBackupFileName(String name) {
-        if (name == null || name.length() == 0 || name.indexOf('/') >= 0
-                || name.indexOf('\\') >= 0 || name.indexOf("..") >= 0) {
-            return "";
-        }
-        return name;
+        return BackupArchive.safeName(name)?name:"";
     }
 
     private List<String> referencedMediaFileNames(JSONObject sourceDays) {
@@ -16475,6 +12893,7 @@ public class MainActivity extends Activity {
                 }
                 addMediaNames(result, seen, meal.optJSONArray("photos"));
                 addMediaNames(result, seen, meal.optJSONArray("stickers"));
+                for (String name : NutritionStore.media(meal)) if (!seen.contains(name)) { seen.add(name); result.add(name); }
             }
         }
         return result;
@@ -16494,6 +12913,7 @@ public class MainActivity extends Activity {
                 seen.add(name);
                 result.add(name);
             }
+            for(String media : NutritionStore.media(item)) if(!seen.contains(media)){seen.add(media);result.add(media);}
         }
         return result;
     }
@@ -16595,6 +13015,7 @@ public class MainActivity extends Activity {
         clear.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                FoodAnalysisJobService.cancelAll(MainActivity.this);
                 deleteReferencedMediaFiles(days);
                 deleteAllRecycleFilesSilently();
                 days = new JSONObject();
@@ -16650,51 +13071,8 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject fetchOpenListUpdateJson() throws Exception {
-        HttpURLConnection conn = null;
-        try {
-            URL url = new URL(OPENLIST_API_GET_URL);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(8000);
-            conn.setUseCaches(false);
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-            String body = "{\"path\":\"" + OPENLIST_UPDATE_JSON_PATH + "\"}";
-            OutputStream out = conn.getOutputStream();
-            try {
-                out.write(body.getBytes("UTF-8"));
-            } finally {
-                out.close();
-            }
-            int code = conn.getResponseCode();
-            if (code < 200 || code >= 300) {
-                throw new Exception("openlist get bad status " + code);
-            }
-            InputStream in = conn.getInputStream();
-            String text;
-            try {
-                text = readAll(in);
-            } finally {
-                in.close();
-            }
-            JSONObject root = new JSONObject(text);
-            if (root.optInt("code", 0) != 200) {
-                throw new Exception("openlist get code " + root.optInt("code", 0));
-            }
-            JSONObject data = root.optJSONObject("data");
-            String rawUrl = data == null ? "" : data.optString("raw_url", "");
-            if (rawUrl.length() == 0) {
-                throw new Exception("openlist update raw url missing");
-            }
-            return fetchJsonFromUrl(rawUrl);
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
-        }
+        return fetchJsonFromUrl(appDownloads.rawUrl(OPENLIST_UPDATE_JSON_PATH));
     }
-
     private JSONObject fetchJsonFromUrl(String targetUrl) throws Exception {
         HttpURLConnection conn = null;
         try {
@@ -16723,83 +13101,21 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject fetchOpenListUpdateInfo() throws Exception {
-        HttpURLConnection conn = null;
-        try {
-            URL url = new URL(OPENLIST_API_LIST_URL);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(8000);
-            conn.setUseCaches(false);
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-            String body = "{\"path\":\"" + OPENLIST_APP_ROOT + "\"}";
-            OutputStream out = conn.getOutputStream();
-            try {
-                out.write(body.getBytes("UTF-8"));
-            } finally {
-                out.close();
-            }
-            int code = conn.getResponseCode();
-            if (code < 200 || code >= 300) {
-                throw new Exception("openlist bad status " + code);
-            }
-            InputStream in = conn.getInputStream();
-            String text;
-            try {
-                text = readAll(in);
-            } finally {
-                in.close();
-            }
-            JSONObject root = new JSONObject(text);
-            if (root.optInt("code", 0) != 200) {
-                throw new Exception("openlist code " + root.optInt("code", 0));
-            }
-            JSONArray content = root.optJSONObject("data") == null
-                    ? null : root.optJSONObject("data").optJSONArray("content");
-            String latest = "";
-            if (content != null) {
-                for (int i = 0; i < content.length(); i++) {
-                    JSONObject item = content.optJSONObject(i);
-                    if (item == null || !item.optBoolean("is_dir", false)) {
-                        continue;
-                    }
-                    String name = item.optString("name", "").trim();
-                    if (!isVersionName(name)) {
-                        continue;
-                    }
-                    int comparison = latest.length() == 0 ? 1 : compareVersionNames(name, latest);
-                    if (latest.length() == 0 || comparison > 0
-                            || (comparison == 0 && name.length() > latest.length())) {
-                        latest = name;
-                    }
-                }
-            }
-            if (latest.length() == 0) {
-                throw new Exception("no version folders");
-            }
-            JSONObject update = new JSONObject();
-            update.put("versionName", latest);
-            int versionComparison = compareVersionNames(latest, currentVersionName());
-            boolean restartUpdate = versionComparison == 0 && !latest.equals(currentVersionName());
-            update.put("versionCode", versionComparison > 0 || restartUpdate
-                    ? currentVersionCode() + 1 : currentVersionCode());
-            String apkName = "EatRecord-" + latest + "-debug.apk";
-            update.put("apkUrl", OPENLIST_APP_PAGE + "/" + Uri.encode(latest)
-                    + "/apk/" + Uri.encode(apkName));
-            update.put("apkPath", OPENLIST_APP_ROOT + "/" + latest + "/apk/" + apkName);
-            JSONArray notes = new JSONArray();
-            notes.put("从 OpenList 目录检测到新版 " + latest);
-            notes.put("点击下载会尽量直接打开安装包下载");
-            update.put("notes", notes);
-            return update;
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
+        JSONArray content=appDownloads.read("list",OPENLIST_APP_ROOT).optJSONArray("content");String latest="";
+        for(int i=0;content!=null&&i<content.length();i++){
+            JSONObject item=content.optJSONObject(i);if(item==null||!item.optBoolean("is_dir"))continue;
+            String name=item.optString("name").trim();if(!isVersionName(name))continue;
+            int compared=latest.isEmpty()?1:compareVersionNames(name,latest);
+            if(latest.isEmpty()||compared>0||(compared==0&&name.length()>latest.length()))latest=name;
         }
+        if(latest.isEmpty())throw new Exception("下载目录中没有版本文件夹");
+        int comparison=compareVersionNames(latest,currentVersionName());boolean restart=comparison==0&&!latest.equals(currentVersionName());
+        String apkName="EatRecord-"+latest+"-debug.apk";
+        return new JSONObject().put("versionName",latest).put("versionCode",comparison>0||restart?currentVersionCode()+1:currentVersionCode())
+            .put("apkUrl",OPENLIST_APP_PAGE+"/"+Uri.encode(latest)+"/apk/"+Uri.encode(apkName))
+            .put("apkPath",OPENLIST_APP_ROOT+"/"+latest+"/apk/"+apkName)
+            .put("notes",new JSONArray().put("下载目录有可用版本 "+latest).put("点击后获取安装包下载链接"));
     }
-
     private boolean isVersionName(String value) {
         String numeric = numericVersionName(value);
         if (numeric.length() == 0) {
@@ -16888,33 +13204,11 @@ public class MainActivity extends Activity {
     }
 
     private String latestReleaseNotesText() {
-        if (RELEASE_NOTES.length == 0) {
-            return "当前版本已经准备好啦。";
-        }
-        return releaseNoteGroupText(RELEASE_NOTES[RELEASE_NOTES.length - 1]);
+        return ReleaseNotes.currentText(currentVersionName());
     }
 
     private String recentReleaseNotesText(int limit) {
-        StringBuilder builder = new StringBuilder();
-        int count = 0;
-        for (int i = RELEASE_NOTES.length - 1; i >= 0 && count < limit; i--, count++) {
-            if (builder.length() > 0) {
-                builder.append("\n\n");
-            }
-            builder.append(releaseNoteGroupText(RELEASE_NOTES[i]));
-        }
-        return builder.toString();
-    }
-
-    private String releaseNoteGroupText(String[] group) {
-        if (group == null || group.length == 0) {
-            return "";
-        }
-        StringBuilder builder = new StringBuilder(group[0]);
-        for (int j = 1; j < group.length; j++) {
-            builder.append("\n• ").append(group[j]);
-        }
-        return builder.toString();
+        return ReleaseNotes.recentText(currentVersionName(), limit);
     }
 
     private void maybeShowStartupAnnouncement() {
@@ -16940,6 +13234,7 @@ public class MainActivity extends Activity {
     private void showStartupAnnouncement(final String version) {
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
         LinearLayout box = new LinearLayout(this);
+        box.setTag("update_announcement");
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(22), dp(20), dp(22), dp(18));
         box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
@@ -16949,7 +13244,9 @@ public class MainActivity extends Activity {
         versionText.setPadding(0, dp(8), 0, dp(8));
         box.addView(versionText);
 
-        box.addView(scrollableDialogText(latestReleaseNotesText(), 15, Color.rgb(70, 74, 82)));
+        View notes = scrollableDialogText(ReleaseNotes.currentText(version), 15, Color.rgb(70, 74, 82));
+        notes.setTag("current_release_notes");
+        box.addView(notes);
 
         LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         actions.setPadding(0, dp(14), 0, 0);
@@ -16963,6 +13260,7 @@ public class MainActivity extends Activity {
                 } catch (JSONException ignored) {
                 }
                 dialog.dismiss();
+                root.post(()->maybeShowRecognitionSetup());
             }
         });
         actions.addView(ok, new LinearLayout.LayoutParams(dp(106), dp(42)));
@@ -17146,9 +13444,9 @@ public class MainActivity extends Activity {
         TextView message = label(line, 15, Color.rgb(96, 100, 108), false);
         message.setPadding(0, dp(10), 0, dp(8));
         box.addView(message);
-        if (notes != null && notes.trim().length() > 0) {
-            box.addView(scrollableDialogText("当前版本特性：\n" + notes, 15, Color.rgb(70, 74, 82)));
-        }
+        View features = scrollableDialogText("当前版本特性：\n" + latestReleaseNotesText(), 15, Color.rgb(70, 74, 82));
+        features.setTag("current_release_notes");
+        box.addView(features);
         LinearLayout actions = row(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         actions.setPadding(0, dp(14), 0, 0);
         TextView ok = dialogButton("好", accent, Color.WHITE);
@@ -17194,7 +13492,9 @@ public class MainActivity extends Activity {
             public void run() {
                 String url = "";
                 try {
-                    url = fetchOpenListRawUrl(apkPath);
+                    String requested=apkPath;
+                    if(requested==null||requested.isEmpty())requested=fallbackUrl==null?"":Uri.parse(fallbackUrl).getPath();
+                    url = fetchOpenListRawUrl(requested);
                 } catch (Exception ignored) {
                 }
                 final String target = url.length() > 0 ? url : fallbackUrl;
@@ -17213,51 +13513,8 @@ public class MainActivity extends Activity {
     }
 
     private String fetchOpenListRawUrl(String path) throws Exception {
-        HttpURLConnection conn = null;
-        try {
-            URL url = new URL(OPENLIST_API_GET_URL);
-            conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("POST");
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(8000);
-            conn.setUseCaches(false);
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-            String body = "{\"path\":\"" + path.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}";
-            OutputStream out = conn.getOutputStream();
-            try {
-                out.write(body.getBytes("UTF-8"));
-            } finally {
-                out.close();
-            }
-            int code = conn.getResponseCode();
-            if (code < 200 || code >= 300) {
-                throw new Exception("openlist get bad status " + code);
-            }
-            InputStream in = conn.getInputStream();
-            String text;
-            try {
-                text = readAll(in);
-            } finally {
-                in.close();
-            }
-            JSONObject root = new JSONObject(text);
-            if (root.optInt("code", 0) != 200) {
-                throw new Exception("openlist get code " + root.optInt("code", 0));
-            }
-            JSONObject data = root.optJSONObject("data");
-            String rawUrl = data == null ? "" : data.optString("raw_url", "");
-            if (rawUrl.length() == 0) {
-                throw new Exception("raw url missing");
-            }
-            return rawUrl;
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
-        }
+        return appDownloads.rawUrl(path);
     }
-
     private void openUpdateUrl(String url) {
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
@@ -17313,18 +13570,6 @@ public class MainActivity extends Activity {
         showSimpleInfoDialog("微信号已复制", "请打开微信，在搜索框粘贴刚刚复制的微信号添加好友；添加时记得说明来意喔。");
     }
 
-    private boolean openWechatIntent(Intent intent) {
-        if (intent == null) {
-            return false;
-        }
-        try {
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(intent);
-            return true;
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
 
     private void showContactAuthorDialog() {
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
@@ -17364,12 +13609,6 @@ public class MainActivity extends Activity {
         showRoundedDialog(dialog, box);
     }
 
-    private void shareDay(String date) {
-        Intent send = new Intent(Intent.ACTION_SEND);
-        send.setType("text/plain");
-        send.putExtra(Intent.EXTRA_TEXT, displayDate(date) + "\n" + daySummary(date));
-        startActivity(Intent.createChooser(send, "分享吃饭本子"));
-    }
 
     private void shareDayImage(String date) {
         try {
@@ -17421,7 +13660,7 @@ public class MainActivity extends Activity {
     }
 
     private Bitmap buildNotebookShareBitmap(String date) {
-        JSONObject day = ensureDay(date);
+        JSONObject day = dayReadSnapshot(date);
         final float scale = 2f;
         boolean paperOnly = bookSharePaperOnlyEnabled();
         int logicalWidth = paperOnly ? 720 : 820;
@@ -17459,9 +13698,9 @@ public class MainActivity extends Activity {
         if (!paperOnly) {
             Paint titlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
             titlePaint.setColor(Color.rgb(24, 24, 24));
-            titlePaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            titlePaint.setTypeface(AppTypography.typeface(MainActivity.this,true));
             titlePaint.setTextSize(48);
-            canvas.drawText("吃饭本子" + primaryDayEmoji(date), margin, 66, titlePaint);
+            canvas.drawText("吃饭记录本" + primaryDayEmoji(date), margin, 66, titlePaint);
         }
 
         RectF note = new RectF(margin, notebookTop, logicalWidth - margin, notebookTop + notebookHeight);
@@ -17573,7 +13812,7 @@ public class MainActivity extends Activity {
         Paint footerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         footerPaint.setColor(Color.argb(132, 80, 80, 80));
         footerPaint.setTextSize(24);
-        footerPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        footerPaint.setTypeface(AppTypography.typeface(MainActivity.this,true));
         String left = "Capturing a day of sweet treats. 📸";
         String right = "一蔬一饭";
         float baseline = totalHeight - bottomGap;
@@ -17638,6 +13877,7 @@ public class MainActivity extends Activity {
             top = y + 4 + row * rowHeight + (straight ? 0 : (column % 2) * 4);
             RectF dst = new RectF(left, top, left + size, top + size);
             int save = canvas.save();
+            canvas.rotate(item.displayRotation, dst.centerX(), dst.centerY());
             if (!straight) {
                 canvas.rotate(new float[]{-8f, 5f, -4f, 8f, -6f, 3f, -3f, 6f}[i % 8], dst.centerX(), dst.centerY());
             }
@@ -17660,7 +13900,7 @@ public class MainActivity extends Activity {
         Paint footerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         footerPaint.setColor(Color.argb(118, 112, 106, 98));
         footerPaint.setTextSize(19);
-        footerPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        footerPaint.setTypeface(AppTypography.typeface(MainActivity.this,true));
         String left = "Capturing a day of sweet treats. 📸";
         String right = "一蔬一饭";
         float y = note.bottom - 42;
@@ -17672,51 +13912,102 @@ public class MainActivity extends Activity {
         canvas.drawText(right, note.right - 44 - ww, y, footerPaint);
     }
 
-    private int notebookPaperBackgroundTop() {
-        String style = notebookPageStyle();
+    /** Front paper and its folded back share a palette; decoration alpha is not a paper color. */
+    private int[] notebookPaperPalette(String style) {
+        int paperTop = Color.rgb(255, 253, 246);
+        int paperBottom = Color.rgb(252, 246, 232);
+        int stripColor = Color.rgb(246, 239, 222);
+        int lineColor = Color.rgb(229, 219, 198);
+        int dotColor = Color.rgb(255, 255, 252);
+        int accentDot = Color.argb(24, 196, 154, 92);
         if ("fresh".equals(style)) {
-            return Color.rgb(239, 255, 249);
+            paperTop = Color.rgb(245, 255, 250);
+            paperBottom = Color.rgb(230, 248, 255);
+            stripColor = Color.rgb(216, 243, 232);
+            lineColor = Color.rgb(197, 226, 218);
+            accentDot = Color.argb(38, 72, 182, 150);
+        } else if ("pink".equals(style)) {
+            paperTop = Color.rgb(255, 248, 252);
+            paperBottom = Color.rgb(255, 235, 242);
+            stripColor = Color.rgb(253, 224, 235);
+            lineColor = Color.rgb(238, 204, 217);
+            accentDot = Color.argb(38, 222, 116, 156);
+        } else if ("grid".equals(style)) {
+            paperTop = Color.rgb(255, 253, 248);
+            paperBottom = Color.rgb(248, 250, 255);
+            stripColor = Color.rgb(236, 239, 248);
+            lineColor = Color.rgb(216, 224, 238);
+            accentDot = Color.argb(34, 102, 132, 190);
+        } else if ("plain".equals(style)) {
+            paperTop = Color.rgb(255, 255, 255);
+            paperBottom = Color.rgb(249, 250, 252);
+            stripColor = Color.rgb(240, 242, 245);
+            lineColor = Color.rgb(225, 228, 232);
+            accentDot = Color.argb(22, 90, 104, 118);
+        } else if ("recipe".equals(style)) {
+            paperTop = Color.rgb(255, 249, 236);
+            paperBottom = Color.rgb(255, 242, 218);
+            stripColor = Color.rgb(255, 226, 183);
+            lineColor = Color.rgb(232, 205, 170);
+            accentDot = Color.argb(44, 255, 145, 82);
+        } else if ("dotted".equals(style)) {
+            paperTop = Color.rgb(252, 253, 255);
+            paperBottom = Color.rgb(241, 247, 255);
+            stripColor = Color.rgb(225, 238, 255);
+            lineColor = Color.rgb(205, 218, 236);
+            accentDot = Color.argb(42, 96, 154, 221);
+        } else if ("memo".equals(style)) {
+            paperTop = Color.rgb(255, 254, 225);
+            paperBottom = Color.rgb(255, 248, 194);
+            stripColor = Color.rgb(255, 235, 141);
+            lineColor = Color.rgb(223, 205, 130);
+            accentDot = Color.argb(36, 232, 176, 30);
+        } else if ("letter".equals(style)) {
+            paperTop = Color.rgb(255, 251, 247);
+            paperBottom = Color.rgb(246, 247, 255);
+            stripColor = Color.rgb(244, 232, 220);
+            lineColor = Color.rgb(204, 218, 244);
+            accentDot = Color.argb(38, 92, 130, 214);
+        } else if ("fruit".equals(style)) {
+            paperTop = Color.rgb(255, 252, 237);
+            paperBottom = Color.rgb(238, 255, 238);
+            stripColor = Color.rgb(255, 225, 190);
+            lineColor = Color.rgb(215, 232, 183);
+            accentDot = Color.argb(48, 255, 105, 86);
+        } else if ("sunset".equals(style)) {
+            paperTop = Color.rgb(255, 244, 232);
+            paperBottom = Color.rgb(248, 231, 255);
+            stripColor = Color.rgb(255, 202, 173);
+            lineColor = Color.rgb(230, 192, 206);
+            accentDot = Color.argb(42, 255, 116, 108);
+        } else if ("blueprint".equals(style)) {
+            paperTop = Color.rgb(238, 248, 255);
+            paperBottom = Color.rgb(220, 237, 255);
+            stripColor = Color.rgb(188, 218, 248);
+            lineColor = Color.rgb(144, 190, 232);
+            accentDot = Color.argb(38, 50, 130, 210);
         }
-        if ("pink".equals(style)) {
-            return Color.rgb(255, 242, 249);
+        if (nightDecoration()) {
+            paperTop = Color.rgb(44, 45, 49);
+            paperBottom = Color.rgb(35, 36, 40);
+            stripColor = Color.rgb(58, 59, 64);
+            lineColor = Color.rgb(72, 74, 82);
+            dotColor = Color.rgb(30, 31, 35);
+            accentDot = Color.argb(24, 255, 255, 255);
         }
-        if ("grid".equals(style) || "dotted".equals(style) || "blueprint".equals(style)) {
-            return Color.rgb(241, 248, 255);
+        if (profile != null && !"yellow".equals(profile.optString("decoration", "yellow"))) {
+            boolean night = nightDecoration();
+            paperTop = blendColor(paperTop, UiTokens.card(night), night ? .28f : .18f);
+            paperBottom = blendColor(paperBottom, UiTokens.paper(night), night ? .28f : .18f);
+            stripColor = blendColor(stripColor, UiTokens.line(night), .25f);
+            lineColor = blendColor(lineColor, UiTokens.line(night), .25f);
         }
-        if ("plain".equals(style)) {
-            return Color.rgb(248, 250, 252);
-        }
-        if ("recipe".equals(style) || "memo".equals(style) || "fruit".equals(style)) {
-            return Color.rgb(255, 249, 226);
-        }
-        if ("sunset".equals(style)) {
-            return Color.rgb(255, 238, 232);
-        }
-        return Color.rgb(255, 244, 249);
+        return new int[]{paperTop, paperBottom, stripColor, lineColor, dotColor, accentDot};
     }
 
-    private int notebookPaperBackgroundBottom() {
-        String style = notebookPageStyle();
-        if ("fresh".equals(style)) {
-            return Color.rgb(229, 248, 255);
-        }
-        if ("pink".equals(style)) {
-            return Color.rgb(255, 229, 240);
-        }
-        if ("grid".equals(style) || "dotted".equals(style) || "blueprint".equals(style)) {
-            return Color.rgb(228, 238, 255);
-        }
-        if ("plain".equals(style)) {
-            return Color.rgb(239, 243, 248);
-        }
-        if ("recipe".equals(style) || "memo".equals(style) || "fruit".equals(style)) {
-            return Color.rgb(255, 238, 212);
-        }
-        if ("sunset".equals(style)) {
-            return Color.rgb(244, 225, 255);
-        }
-        return Color.rgb(255, 232, 241);
-    }
+    private int notebookPaperBackgroundTop() { return notebookPaperPalette(notebookPageStyle())[0]; }
+
+    private int notebookPaperBackgroundBottom() { return notebookPaperPalette(notebookPageStyle())[1]; }
 
     private void drawNotebookSharePaper(Canvas canvas, RectF rect) {
         drawNotebookSharePaper(canvas, rect, false);
@@ -17875,15 +14166,6 @@ public class MainActivity extends Activity {
         return y;
     }
 
-    private void drawRoundedBitmap(Canvas canvas, Bitmap bitmap, RectF dst, float radius) {
-        Path path = new Path();
-        path.addRoundRect(dst, radius, radius, Path.Direction.CW);
-        int save = canvas.save();
-        canvas.clipPath(path);
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        canvas.drawBitmap(bitmap, null, dst, p);
-        canvas.restoreToCount(save);
-    }
 
     private void drawBitmapContain(Canvas canvas, Bitmap bitmap, RectF dst, float radius) {
         if (bitmap == null || bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0) {
@@ -17906,27 +14188,15 @@ public class MainActivity extends Activity {
         canvas.restoreToCount(save);
     }
 
-    private void showEmojiPicker(final EmojiTarget target) {
-        GridView grid = new GridView(this);
-        grid.setNumColumns(6);
-        grid.setPadding(dp(12), dp(12), dp(12), dp(12));
-        grid.setAdapter(new EmojiAdapter());
-        final AlertDialog dialog = new AlertDialog.Builder(this).create();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(18), dp(18), dp(18), dp(18));
-        box.setBackground(round(dialogSurfaceColor(), dp(26), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        TextView title = label("选择 emoji", 22, Color.rgb(28, 28, 30), true);
-        box.addView(title);
-        box.addView(grid, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(280)));
-        grid.setOnItemClickListener(new AdapterView.OnItemClickListener() {
-            @Override
-            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-                target.apply(EMOJIS[position]);
-                dialog.dismiss();
-            }
-        });
-        showRoundedDialog(dialog, box);
+
+    private class EmojiAdapter extends BaseAdapter {
+        @Override public int getCount() { return EMOJIS.length; }
+        @Override public Object getItem(int position) { return EMOJIS[position]; }
+        @Override public long getItemId(int position) { return position; }
+        @Override public View getView(int position, View convertView, ViewGroup parent) {
+            TextView text=label(EMOJIS[position],28,Color.rgb(25,25,25),false);
+            text.setGravity(Gravity.CENTER);text.setPadding(0,dp(8),0,dp(8));return text;
+        }
     }
 
     private void showMoodEmojiPicker(final String date, final Runnable afterChange) {
@@ -18162,6 +14432,7 @@ public class MainActivity extends Activity {
             if (item == null) {
                 continue;
             }
+            if(item.getTag() instanceof MealTextAction){((MealTextAction)item.getTag()).exitEdit();continue;}
             if (item.getTag() instanceof PhotoAction) {
                 PhotoAction action = (PhotoAction) item.getTag();
                 action.exitEdit();
@@ -18197,55 +14468,23 @@ public class MainActivity extends Activity {
     private void chooseMealPhotoSource(final String date, final String mealKey) {
         pendingPhotoDate = date;
         pendingPhotoMeal = mealKey;
-        if (uploadCutoutEnabled()) {
-            launchStickerPicker();
-            return;
-        }
-        launchMealPhotoPicker();
+        launchMealCamera(date, mealKey);
     }
 
     private void launchMealCamera(String date, String mealKey) {
-        pendingPhotoDate = date;
-        pendingPhotoMeal = mealKey;
-        Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-        pendingMealCameraUri = createMealCameraOutputUri();
-        if (pendingMealCameraUri != null) {
-            intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingMealCameraUri);
-            int grants = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
-            intent.addFlags(grants);
-            intent.setClipData(ClipData.newRawUri("一蔬一饭拍照", pendingMealCameraUri));
-            try {
-                List<android.content.pm.ResolveInfo> handlers = getPackageManager().queryIntentActivities(
-                        intent, PackageManager.MATCH_DEFAULT_ONLY);
-                for (android.content.pm.ResolveInfo handler : handlers) {
-                    if (handler != null && handler.activityInfo != null) {
-                        grantUriPermission(handler.activityInfo.packageName, pendingMealCameraUri, grants);
-                    }
-                }
-            } catch (Exception ignored) {
-            }
-        }
-        persistPendingMealCameraState();
-        try {
-            mealPhotoPickAwaitingResult = true;
-            startActivityForResult(intent, REQ_TAKE_MEAL_PHOTO);
-        } catch (Exception e) {
-            mealPhotoPickAwaitingResult = false;
-            clearPendingMealCameraOutput();
-            showGlassToast("没有找到可用相机", Toast.LENGTH_SHORT);
-        }
+        launchInternalFoodCapture(date,mealKey,false);
     }
 
-    private Uri createMealCameraOutputUri() {
-        try {
-            Uri uri = MealCameraProvider.createOutputUri(this);
-            Log.i(LOG_TAG, "created camera output " + uri);
-            return uri;
-        } catch (Exception e) {
-            Log.w(LOG_TAG, "Unable to create camera output", e);
-            return null;
-        }
+    private void launchInternalFoodCapture(String date,String meal,boolean gallery) {
+        pendingPhotoDate=date;pendingPhotoMeal=meal;pendingMealCameraUri=null;persistPendingMealCameraState();
+        Intent intent=new Intent(this,FoodCaptureActivity.class).putExtra(FoodCaptureActivity.EXTRA_DATE,date)
+                .putExtra(FoodCaptureActivity.EXTRA_MEAL,meal).putExtra(FoodCaptureActivity.EXTRA_GALLERY,gallery);
+        try{mealPhotoPickAwaitingResult=true;startActivityForResult(intent,REQ_INTERNAL_FOOD_CAPTURE);}
+        catch(Exception error){mealPhotoPickAwaitingResult=false;clearPersistedPendingCameraState();showGlassToast("相机页面暂时无法打开",Toast.LENGTH_SHORT);}
     }
+
+    /** Kept for an in-flight result from an older installation; normal UI uses the in-app camera. */
+
 
     private void clearPendingMealCameraOutput() {
         Uri uri = pendingMealCameraUri;
@@ -18312,50 +14551,10 @@ public class MainActivity extends Activity {
     }
 
     private void launchMealPhotoPicker() {
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-        intent.setType("image/*");
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        try {
-            mealPhotoPickAwaitingResult = true;
-            startActivityForResult(Intent.createChooser(intent, "选择图片，最多3张"), REQ_PICK_MEAL_PHOTO);
-        } catch (Exception e) {
-            Intent fallback = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
-            fallback.setType("image/*");
-            try {
-                mealPhotoPickAwaitingResult = true;
-                startActivityForResult(fallback, REQ_PICK_MEAL_PHOTO);
-            } catch (Exception ignored) {
-                mealPhotoPickAwaitingResult = false;
-                showGlassToast("没有找到可用相册", Toast.LENGTH_SHORT);
-                exitMealPhotoPickMode();
-            }
-        }
+        launchInternalFoodCapture(pendingPhotoDate,pendingPhotoMeal,true);
     }
 
-    private void launchStickerPicker() {
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-        intent.setType("image/*");
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        try {
-            mealPhotoPickAwaitingResult = true;
-            startActivityForResult(Intent.createChooser(intent, "选择贴纸，最多3张"), REQ_PICK_MEAL_STICKER);
-        } catch (Exception e) {
-            Intent fallback = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
-            fallback.setType("image/*");
-            try {
-                mealPhotoPickAwaitingResult = true;
-                startActivityForResult(fallback, REQ_PICK_MEAL_STICKER);
-            } catch (Exception ignored) {
-                mealPhotoPickAwaitingResult = false;
-                showGlassToast("没有找到可用相册", Toast.LENGTH_SHORT);
-                exitMealPhotoPickMode();
-            }
-        }
-    }
+
 
     private void saveMealBitmap(Bitmap bitmap) {
         saveMealBitmap(bitmap, true, true);
@@ -18367,25 +14566,28 @@ public class MainActivity extends Activity {
 
     private boolean saveMealBitmap(String date, String mealKey, Bitmap bitmap,
                                    boolean renderAfter, boolean showToast) {
+        return saveMealBitmap(date, mealKey, bitmap, renderAfter, showToast, null);
+    }
+
+    private boolean saveMealBitmap(String date, String mealKey, Bitmap bitmap,
+                                   boolean renderAfter, boolean showToast, List<String> savedSources) {
         if (date == null || mealKey == null || bitmap == null || bitmap.isRecycled()) {
             return false;
         }
         Bitmap scaled = null;
         try {
-            scaled = scaleInside(bitmap, 900);
-            String fileName = "meal_" + date.replace("-", "") + "_" + mealKey
-                    + "_" + System.currentTimeMillis() + ".jpg";
-            saveBitmap(scaled, new File(getFilesDir(), fileName), 84);
-            JSONObject meal = optObj(ensureDay(date), mealKey);
-            JSONArray photos = meal.optJSONArray("photos");
-            if (photos == null) {
-                photos = new JSONArray();
-                meal.put("photos", photos);
+            scaled = scaleInside(bitmap, 1600);
+            String fileName = "draft_" + date.replace("-", "") + "_" + mealKey
+                    + "_" + UUID.randomUUID().toString() + ".jpg";
+            saveBitmap(scaled, new File(getFilesDir(), fileName), 92);
+            if (!FoodAnalysisJobService.enqueueDraft(this, date, mealKey, fileName, false)) {
+                new File(getFilesDir(), fileName).delete();
+                return false;
             }
-            photos.put(fileName);
-            saveDays();
+            if (savedSources != null) savedSources.add(fileName);
+            synchronized (NutritionStore.LOCK) { NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
             if (showToast) {
-                showGlassToast("图片已添加", Toast.LENGTH_SHORT);
+                showGlassToast("照片已准备，请预览后确认", Toast.LENGTH_SHORT);
             }
             if (renderAfter) {
                 renderCurrent();
@@ -18409,13 +14611,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private FrameLayout.LayoutParams centeredOverlayLp() {
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                (int) (getResources().getDisplayMetrics().widthPixels * 0.86f),
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.gravity = Gravity.CENTER;
-        return lp;
-    }
 
     private void saveMealSticker(String date, String mealKey, Bitmap sticker) {
         saveMealSticker(date, mealKey, sticker, true);
@@ -18434,6 +14629,8 @@ public class MainActivity extends Activity {
             }
             stickers.put(fileName);
             saveDays();
+            FoodAnalysisJobService.enqueue(this, date, mealKey, fileName, false);
+            synchronized (NutritionStore.LOCK) { NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
             if (showToast) {
                 showGlassToast("美食贴纸已保存", Toast.LENGTH_SHORT);
             }
@@ -18636,286 +14833,17 @@ public class MainActivity extends Activity {
                 Math.max(1, (int) (h * scale)), true);
     }
 
-    private void createAiStickerFromViewer(final String date, final String mealKey,
-                                           final Bitmap source, final float bitmapX, final float bitmapY) {
-        if (source == null) {
-            showGlassToast("图片读取失败", Toast.LENGTH_SHORT);
-            return;
-        }
-        if (!ensureSamNativeLoaded()) {
-            showGlassToast("AI贴纸模块没有准备好", Toast.LENGTH_SHORT);
-            return;
-        }
-        requestAiStickerCandidate(source, bitmapX, bitmapY, 0, new AiStickerHandler() {
-            @Override
-            public void onSticker(Bitmap sticker, String error) {
-                if (sticker == null) {
-                    showGlassToast(error == null ? "AI没有识别到合适的贴纸" : "AI贴纸生成失败", Toast.LENGTH_SHORT);
-                    return;
-                }
-                showAiStickerPreview(date, mealKey, source, bitmapX, bitmapY, 0, sticker);
-            }
-        });
-    }
 
-    private void requestAiStickerCandidate(final Bitmap source, final float bitmapX, final float bitmapY,
-                                           final int candidateIndex, final AiStickerHandler handler) {
-        final View loading = showAiCutoutLoading();
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                Bitmap input = null;
-                Bitmap output = null;
-                String error = null;
-                try {
-                    File embed = ensureAssetFile(SAM_EMBED_ASSET, SAM_EMBED_FILE);
-                    File segment = ensureAssetFile(SAM_SEGMENT_ASSET, SAM_SEGMENT_FILE);
-                    input = source.getConfig() == Bitmap.Config.ARGB_8888
-                            ? source.copy(Bitmap.Config.ARGB_8888, false)
-                            : source.copy(Bitmap.Config.ARGB_8888, false);
-                    if (input == null) {
-                        throw new Exception("input copy failed");
-                    }
-                    output = Bitmap.createBitmap(input.getWidth(), input.getHeight(), Bitmap.Config.ARGB_8888);
-                    boolean ok = nativeSamSticker(input, output, bitmapX, bitmapY, candidateIndex,
-                            embed.getAbsolutePath(), segment.getAbsolutePath());
-                    if (!ok) {
-                        throw new Exception("ai inference failed");
-                    }
-                    if (!hasVisibleAlpha(output)) {
-                        throw new Exception("empty mask");
-                    }
-                } catch (Exception e) {
-                    error = e.getMessage();
-                }
-                final Bitmap finalSticker = error == null ? output : null;
-                final String finalError = error;
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        closeAiCutoutLoading(loading);
-                        handler.onSticker(finalSticker, finalError);
-                    }
-                });
-            }
-        }).start();
-    }
 
-    private void showAiStickerPreview(final String date, final String mealKey, final Bitmap source,
-                                      final float bitmapX, final float bitmapY,
-                                      final int startCandidate, Bitmap sticker) {
-        closeAiStickerPreview();
-        final FrameLayout overlay = new FrameLayout(this);
-        aiPreviewOverlay = overlay;
-        overlay.setClickable(true);
-        overlay.setAlpha(0f);
-        overlay.setBackgroundColor(photoViewerBackgroundColor());
-
-        final AiStickerPreviewView preview = new AiStickerPreviewView(this);
-        preview.setBitmaps(source, sticker);
-        overlay.addView(preview, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        TextView title = label("挖出贴纸", 20, photoViewerTextColor(), true);
-        title.setPadding(dp(20), dp(54), dp(20), 0);
-        overlay.addView(title);
-        TextView hint = label("灰色是未选中部分，清晰区域会保存为贴纸", 13,
-                "white".equals(profile.optString("photoBg", "black")) ? Color.rgb(110, 114, 122) : Color.rgb(215, 218, 224), false);
-        hint.setPadding(dp(20), dp(86), dp(20), 0);
-        hint.setLineSpacing(dp(2), 1.05f);
-        overlay.addView(hint);
-
-        LinearLayout actions = row(Gravity.CENTER);
-        actions.setPadding(dp(18), dp(14), dp(18), dp(18));
-        actions.setBackground(round(photoViewerPillColor(), dp(28), 0, 0));
-        final TextView cancel = dialogButton("取消", Color.rgb(245, 246, 248), Color.rgb(90, 90, 90));
-        final TextView next = dialogButton("换一个", accentSoft, accent);
-        final TextView save = dialogButton("保存贴纸", accent, Color.WHITE);
-        final Bitmap[] currentSticker = new Bitmap[]{sticker};
-        final int[] candidate = new int[]{startCandidate};
-        final boolean[] busy = new boolean[]{false};
-
-        cancel.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                closeAiStickerPreview();
-            }
-        });
-        next.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                if (busy[0]) {
-                    return;
-                }
-                busy[0] = true;
-                next.setAlpha(0.55f);
-                candidate[0] = (candidate[0] + 1) % AI_STICKER_CANDIDATE_COUNT;
-                requestAiStickerCandidate(source, bitmapX, bitmapY, candidate[0], new AiStickerHandler() {
-                    @Override
-                    public void onSticker(Bitmap sticker, String error) {
-                        busy[0] = false;
-                        next.setAlpha(1f);
-                        if (sticker == null) {
-                            showGlassToast("这个候选也没识别好", Toast.LENGTH_SHORT);
-                            return;
-                        }
-                        currentSticker[0] = sticker;
-                        preview.setSticker(sticker);
-                    }
-                });
-            }
-        });
-        save.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Bitmap trimmed = trimTransparentSticker(currentSticker[0]);
-                if (trimmed == null) {
-                    showGlassToast("这张贴纸为空，换一个试试", Toast.LENGTH_SHORT);
-                    return;
-                }
-                saveMealSticker(date, mealKey, scaleInside(trimmed, 720));
-                closeAiStickerPreview();
-                closePhotoViewer();
-                root.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (inBookDetail) {
-                            renderBookDetail(date);
-                        } else {
-                            renderCurrent();
-                        }
-                    }
-                }, 180);
-            }
-        });
-
-        LinearLayout.LayoutParams cancelLp = new LinearLayout.LayoutParams(dp(86), dp(46));
-        cancelLp.rightMargin = dp(10);
-        LinearLayout.LayoutParams nextLp = new LinearLayout.LayoutParams(dp(96), dp(46));
-        nextLp.rightMargin = dp(10);
-        actions.addView(cancel, cancelLp);
-        actions.addView(next, nextLp);
-        actions.addView(save, new LinearLayout.LayoutParams(dp(112), dp(46)));
-        FrameLayout.LayoutParams actionsLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        actionsLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        actionsLp.bottomMargin = dp(34);
-        overlay.addView(actions, actionsLp);
-
-        content.addView(overlay, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        overlay.animate().alpha(1f).setDuration(170).start();
-    }
 
     private void closeAiStickerPreview() {
-        final View overlay = aiPreviewOverlay;
-        if (overlay == null) {
-            return;
-        }
-        aiPreviewOverlay = null;
-        if (overlay.getParent() == null) {
-            return;
-        }
-        overlay.animate().alpha(0f).setDuration(150).withEndAction(new Runnable() {
-            @Override
-            public void run() {
-                ViewParent parent = overlay.getParent();
-                if (parent instanceof ViewGroup) {
-                    ((ViewGroup) parent).removeView(overlay);
-                }
-            }
+        final View overlay=aiPreviewOverlay;if(overlay==null)return;
+        overlay.animate().cancel();
+        if(overlay.getParent()==null){if(aiPreviewOverlay==overlay){aiPreviewOverlay=null;resumeDeferredRootRefresh();}return;}
+        overlay.animate().alpha(0f).setDuration(150).withEndAction(()->{
+            ViewParent parent=overlay.getParent();if(parent instanceof ViewGroup)((ViewGroup)parent).removeView(overlay);
+            if(aiPreviewOverlay==overlay){aiPreviewOverlay=null;resumeDeferredRootRefresh();}
         }).start();
-    }
-
-    private View showAiCutoutLoading() {
-        final FrameLayout overlay = new FrameLayout(this);
-        overlay.setClickable(true);
-        overlay.setBackgroundColor(Color.argb(80, 0, 0, 0));
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setGravity(Gravity.CENTER);
-        panel.setPadding(dp(20), dp(16), dp(20), dp(16));
-        panel.setBackground(round(dialogSurfaceColor(), dp(22), surfaceStrokeColor(), nightDecoration() ? dp(1) : 0));
-        TextView title = label("AI正在挖出贴纸", 17, themedTextColor(Color.rgb(28, 28, 30)), true);
-        title.setGravity(Gravity.CENTER);
-        panel.addView(title);
-        TextView tip = label("第一次会准备模型，稍等一下下", 13, themedTextColor(Color.rgb(118, 122, 130)), false);
-        tip.setGravity(Gravity.CENTER);
-        tip.setPadding(0, dp(6), 0, 0);
-        panel.addView(tip);
-        FrameLayout.LayoutParams panelLp = new FrameLayout.LayoutParams(
-                (int) (getResources().getDisplayMetrics().widthPixels * 0.72f),
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-        panelLp.gravity = Gravity.CENTER;
-        overlay.addView(panel, panelLp);
-        content.addView(overlay, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        overlay.setAlpha(0f);
-        overlay.animate().alpha(1f).setDuration(150).start();
-        return overlay;
-    }
-
-    private void closeAiCutoutLoading(final View loading) {
-        if (loading == null || loading.getParent() == null) {
-            return;
-        }
-        loading.animate().alpha(0f).setDuration(130).withEndAction(new Runnable() {
-            @Override
-            public void run() {
-                ViewParent parent = loading.getParent();
-                if (parent instanceof ViewGroup) {
-                    ((ViewGroup) parent).removeView(loading);
-                }
-            }
-        }).start();
-    }
-
-    private boolean ensureSamNativeLoaded() {
-        if (samNativeLoaded) {
-            return true;
-        }
-        if (samNativeTried) {
-            return false;
-        }
-        samNativeTried = true;
-        try {
-            System.loadLibrary("c++_shared");
-            System.loadLibrary("MNN");
-            System.loadLibrary("MNN_Express");
-            System.loadLibrary("MNNOpenCV");
-            System.loadLibrary("eatsam");
-            samNativeLoaded = true;
-            return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private File ensureAssetFile(String assetName, String fileName) throws Exception {
-        File out = new File(getFilesDir(), fileName);
-        if (out.exists() && out.length() > 1024) {
-            return out;
-        }
-        InputStream in = getAssets().open(assetName);
-        FileOutputStream fos = new FileOutputStream(out);
-        byte[] buffer = new byte[1024 * 256];
-        int read;
-        try {
-            while ((read = in.read(buffer)) != -1) {
-                fos.write(buffer, 0, read);
-            }
-            fos.flush();
-        } finally {
-            try {
-                in.close();
-            } catch (Exception ignored) {
-            }
-            try {
-                fos.close();
-            } catch (Exception ignored) {
-            }
-        }
-        return out;
     }
 
     private Bitmap trimTransparentSticker(Bitmap src) {
@@ -18951,27 +14879,10 @@ public class MainActivity extends Activity {
         return Bitmap.createBitmap(src, left, top, right - left + 1, bottom - top + 1);
     }
 
-    private boolean hasVisibleAlpha(Bitmap src) {
-        if (src == null) {
-            return false;
-        }
-        int w = src.getWidth();
-        int h = src.getHeight();
-        int[] row = new int[w];
-        for (int y = 0; y < h; y++) {
-            src.getPixels(row, 0, w, 0, y, w, 1);
-            for (int x = 0; x < w; x++) {
-                if (Color.alpha(row[x]) > 8) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
 
     private TextView mediaEditControl(String symbol) {
         TextView control = label(symbol, 14, Color.WHITE, true);
-        control.setTypeface(Typeface.DEFAULT_BOLD);
+        control.setTypeface(AppTypography.typeface(MainActivity.this,true));
         control.setGravity(Gravity.CENTER);
         control.setVisibility(View.GONE);
         control.setBackground(round(Color.argb(232, 48, 50, 54), dp(10),
@@ -18983,21 +14894,42 @@ public class MainActivity extends Activity {
     private View mediaThumbView(final String date, final String mealKey, final String fileName,
                                 final String arrayKey, final String title, boolean sticker, int size) {
         final FrameLayout frame = mediaImageFrame(fileName, sticker, size);
+        PhotoAction action = bindMediaControls(frame, date, mealKey, fileName, arrayKey, title, 20,
+                () -> showPhotoViewer(date, mealKey, fileName));
+        action.mediaContent = frame.getChildAt(0);
+        JSONObject linked = NutritionStore.findByMedia(NutritionStore.meal(days, date, mealKey), fileName);
+        if (linked != null) {
+            action.foodId = linked.optString("id");
+            action.mediaContent.setRotation(NutritionStore.displayRotation(linked));
+        }
+        return frame;
+    }
+
+    /** Both journal imports and legacy stickers use the same selection/edit controller. */
+    private PhotoAction bindMediaControls(final FrameLayout frame, final String date, final String mealKey,
+                                          final String fileName, final String arrayKey, final String title,
+                                          int controlSize, final Runnable open) {
         frame.setClickable(true);
 
         final TextView rotate = mediaEditControl("↺");
-        FrameLayout.LayoutParams rotateLp = new FrameLayout.LayoutParams(dp(20), dp(20));
+        rotate.setContentDescription("向左旋转90度");
+        FrameLayout.LayoutParams rotateLp = new FrameLayout.LayoutParams(dp(controlSize), dp(controlSize));
         rotateLp.gravity = Gravity.LEFT | Gravity.TOP;
         rotateLp.topMargin = -dp(1);
         rotateLp.leftMargin = -dp(1);
         frame.addView(rotate, rotateLp);
 
         final TextView close = mediaEditControl("×");
-        FrameLayout.LayoutParams closeLp = new FrameLayout.LayoutParams(dp(20), dp(20));
+        close.setContentDescription("删除这张" + title);
+        FrameLayout.LayoutParams closeLp = new FrameLayout.LayoutParams(dp(controlSize), dp(controlSize));
         closeLp.gravity = Gravity.RIGHT | Gravity.TOP;
         closeLp.topMargin = -dp(1);
         closeLp.rightMargin = -dp(1);
         frame.addView(close, closeLp);
+        if (controlSize >= 48) {
+            rotate.setBackground(new android.graphics.drawable.InsetDrawable(rotate.getBackground(), dp(8)));
+            close.setBackground(new android.graphics.drawable.InsetDrawable(close.getBackground(), dp(8)));
+        }
 
         final PhotoAction action = new PhotoAction(date, mealKey, fileName, arrayKey, title, close, rotate);
         action.itemView = frame;
@@ -19008,7 +14940,7 @@ public class MainActivity extends Activity {
                 if (action.editing) {
                     return;
                 }
-                showPhotoViewer(date, mealKey, fileName);
+                open.run();
             }
         });
         close.setOnClickListener(new View.OnClickListener() {
@@ -19023,6 +14955,105 @@ public class MainActivity extends Activity {
                 rotateMealMediaLeft(action);
             }
         });
+        return action;
+    }
+
+    private View journalText(final String date,final DayFoodEntries.Entry entry,View text){
+        final FrameLayout frame=new FrameLayout(this);
+        text.setBackground(null);text.setOnClickListener(null);text.setClickable(false);text.setLongClickable(false);
+        text.setFocusable(false);text.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        frame.addView(text,new FrameLayout.LayoutParams(-1,-2));
+        TextView close=mediaEditControl("×");close.setTag("meal_text_delete");
+        close.setContentDescription("删除"+entry.mealTitle+"文字");
+        close.setBackground(new android.graphics.drawable.InsetDrawable(close.getBackground(),dp(8)));
+        FrameLayout.LayoutParams closeLp=new FrameLayout.LayoutParams(dp(48),dp(48),Gravity.TOP|Gravity.RIGHT);
+        frame.addView(close,closeLp);
+        final MealTextAction action=new MealTextAction(frame,close,date,entry.mealKey,entry.textValue);
+        frame.setTag(action);
+        frame.setFocusable(true);frame.setClickable(true);frame.setLongClickable(true);
+        frame.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        frame.setContentDescription(entry.mealTitle+"，"+entry.title+"，点按编辑，长按显示删除文字");
+        frame.setOnClickListener(v->{if(!action.editing){retainHomeFoodDate(date);showMealRecordEditor(date,entry.mealKey);}});
+        frame.setOnLongClickListener(v->{retainHomeFoodDate(date);exitMediaEditMode(false);editingMediaItems.add(frame);action.enterEdit();return true;});
+        close.setOnClickListener(v->confirmDeleteMealText(action));
+        return frame;
+    }
+
+    private void confirmDeleteMealText(final MealTextAction action){
+        PaperComponents.dialogBuilder(this,nightDecoration()).setTitle("删除这段文字？")
+            .setMessage("仅删除这餐填写的文字，餐图、营养和手动热量保留。")
+            .setNegativeButton("取消",null).setPositiveButton("删除",(dialog,which)->{
+                boolean removed=deleteMealText(action.date,action.meal,action.expected);
+                exitMediaEditMode(false);days=readJson(DATA_KEY);renderCurrent();
+                showGlassToast(removed?"文字已删除":"文字已更新，请核对后重试",Toast.LENGTH_SHORT);
+            }).show();
+    }
+
+    private boolean deleteMealText(String date,String mealKey,String expected){
+        synchronized(NutritionStore.LOCK){
+            JSONObject latest=NutritionStore.read(prefs,DATA_KEY),day=latest.optJSONObject(date),meal=NutritionStore.meal(latest,date,mealKey);
+            if(meal==null||expected==null||!expected.equals(meal.optString("text")))return false;
+            try{
+                JSONObject updated=ManualMealText.updatedInlineMeal(meal,"");
+                if(updated==null)return false;day.put(mealKey,updated);
+                if(!prefs.edit().putString(DATA_KEY,latest.toString()).commit())return false;
+                days=latest;return true;
+            }catch(JSONException failed){return false;}
+        }
+    }
+
+    private final class MealTextAction {
+        final FrameLayout frame;final View close;final String date,meal,expected;boolean editing;
+        MealTextAction(FrameLayout frame,View close,String date,String meal,String expected){this.frame=frame;this.close=close;this.date=date;this.meal=meal;this.expected=expected;}
+        void enterEdit(){
+            editing=true;playMediaEditFeedback();
+            frame.setBackground(round(adjustAlpha(accentSoft,nightDecoration()?105:90),dp(22),adjustAlpha(accent,65),dp(1)));
+            close.setVisibility(View.VISIBLE);close.bringToFront();
+        }
+        void exitEdit(){editing=false;close.setVisibility(View.GONE);frame.setBackground(null);}
+    }
+
+    private View journalMedia(final String date, final DayFoodEntries.Entry entry, View image) {
+        return journalMedia(date,entry,image,null);
+    }
+
+    private View journalMedia(final String date, final DayFoodEntries.Entry entry, View image, Runnable tap) {
+        FrameLayout frame = new FrameLayout(this) {
+            private boolean foodHit(MotionEvent event) {
+                return !(image instanceof TodayPaperView.HitTestMedia)
+                        || ((TodayPaperView.HitTestMedia)image).containsMediaPoint(
+                            event.getX()-image.getLeft()-image.getTranslationX(),
+                            event.getY()-image.getTop()-image.getTranslationY());
+            }
+            @Override public boolean dispatchTouchEvent(MotionEvent event) {
+                boolean editing=getTag() instanceof PhotoAction&&((PhotoAction)getTag()).editing;
+                if(entry.isFood()&&!editing){
+                    if(event.getActionMasked()==MotionEvent.ACTION_DOWN&&!foodHit(event))return false;
+                    if(event.getActionMasked()==MotionEvent.ACTION_UP&&!foodHit(event)){
+                        MotionEvent cancel=MotionEvent.obtain(event);cancel.setAction(MotionEvent.ACTION_CANCEL);
+                        boolean handled=super.dispatchTouchEvent(cancel);cancel.recycle();return handled;
+                    }
+                }
+                return super.dispatchTouchEvent(event);
+            }
+        };
+        frame.setClipChildren(false); frame.setClipToPadding(false);
+        FrameLayout.LayoutParams imageLp = new FrameLayout.LayoutParams(-1, -1);
+        imageLp.setMargins(dp(12), dp(12), dp(12), dp(12));
+        frame.addView(image, imageLp);
+        String arrayKey = entry.isFood() ? "photos" : entry.sticker ? "stickers" : "photos";
+        String file = entry.isFood() ? entry.item.optString("sourcePhoto") : entry.fileName;
+        PhotoAction action = bindMediaControls(frame, date, entry.mealKey, file, arrayKey,
+                entry.sticker || entry.isFood() ? "贴纸" : "图片", 48, tap!=null?tap:() -> {
+                    retainHomeFoodDate(date);
+                    if (entry.isFood()) foodUi().details(date, entry.mealKey, entry.item);
+                    else showPhotoViewer(date, entry.mealKey, entry.fileName);
+                });
+        action.foodId = entry.isFood() ? entry.item.optString("id") : "";
+        action.mediaContent = image;
+        installStandaloneMediaLongPress(frame);
+        frame.setFocusable(true);frame.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        frame.setContentDescription(entry.mealTitle + "，" + entry.title + (entry.isFood()?"，点按图片查看营养详情":"") + "，长按显示旋转和删除");
         return frame;
     }
 
@@ -19253,13 +15284,6 @@ public class MainActivity extends Activity {
         return "photos".equals(arrayKey) ? "photoStacks" : "stickerStacks";
     }
 
-    private boolean isMediaStackedAfter(JSONObject meal, String arrayKey, String fileName, String previousName) {
-        if (previousName == null || previousName.length() == 0) {
-            return false;
-        }
-        JSONObject stacks = meal.optJSONObject(mediaStackKey(arrayKey));
-        return stacks != null && previousName.equals(stacks.optString(fileName, ""));
-    }
 
     private boolean isMediaStacked(JSONObject meal, String arrayKey, String fileName) {
         JSONObject stacks = meal.optJSONObject(mediaStackKey(arrayKey));
@@ -19408,16 +15432,6 @@ public class MainActivity extends Activity {
         return true;
     }
 
-    private void applyStackLayout(View item, LinearLayout.LayoutParams lp, int size, int stackDepth) {
-        int depth = Math.max(1, Math.min(3, stackDepth));
-        lp.leftMargin = -Math.max(0, size - dp(3 + depth * 2));
-        lp.rightMargin = 0;
-        item.setPivotX(size * 0.50f);
-        item.setPivotY(size);
-        item.setRotation(depth % 2 == 0 ? -3.4f : 3.4f);
-        item.setTranslationY(dp(depth > 1 ? 1 : 0));
-        item.setElevation(dp(10 + depth));
-    }
 
     private void clearMediaStackRefs(JSONObject meal, String arrayKey, String fileName) {
         JSONObject stacks = meal.optJSONObject(mediaStackKey(arrayKey));
@@ -19439,122 +15453,28 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void clearAllMediaStacks() {
-        JSONArray dateNames = days.names();
-        if (dateNames == null) {
-            return;
-        }
-        for (int i = 0; i < dateNames.length(); i++) {
-            JSONObject day = days.optJSONObject(dateNames.optString(i));
-            if (day == null) {
-                continue;
-            }
-            for (MealOption mealOption : allMealOptions()) {
-                JSONObject meal = day.optJSONObject(mealOption.key);
-                if (meal != null) {
-                    meal.remove("photoStacks");
-                    meal.remove("stickerStacks");
-                }
-            }
-        }
-        saveDays();
-    }
 
-    private void addMediaGroupToRow(LinearLayout row, String date, String mealKey, List<String> group,
-                                    String arrayKey, String title, boolean sticker, int size) {
-        if (group == null || group.isEmpty()) {
-            return;
-        }
-        View item = group.size() > 1
-                ? mediaStackView(date, mealKey, new ArrayList<String>(group), arrayKey, title, sticker, size)
-                : mediaThumbView(date, mealKey, group.get(0), arrayKey, title, sticker, size);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
-        lp.rightMargin = dp(spaceByLayout(8, 6, 5));
-        row.addView(item, lp);
-    }
 
-    private View addMealPhotos(LinearLayout card, JSONObject meal, final String date, final String mealKey) {
-        JSONArray photos = meal.optJSONArray("photos");
-        if (photos == null || photos.length() == 0) {
-            return null;
-        }
-        card.setClipChildren(false);
-        card.setClipToPadding(false);
-        PhotoStripScrollView scroller = new PhotoStripScrollView(this);
-        scroller.setHorizontalScrollBarEnabled(false);
-        scroller.setClipChildren(false);
-        scroller.setClipToPadding(false);
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setClipChildren(false);
-        row.setClipToPadding(false);
-        row.setPadding(0, dp(spaceByLayout(8, 6, 4)), 0, 0);
-        scroller.addView(row);
-        String previousName = null;
-        List<String> group = new ArrayList<String>();
-        for (int i = 0; i < photos.length(); i++) {
-            final String storedName = photos.optString(i);
-            final File file = new File(getFilesDir(), storedName);
-            if (!file.exists()) {
-                continue;
-            }
-            int size = dp(spaceByLayout(76, 68, 60));
-            if (!group.isEmpty() && isMediaStackedAfter(meal, "photos", storedName, previousName)) {
-                group.add(storedName);
-            } else {
-                addMediaGroupToRow(row, date, mealKey, group, "photos", "图片", false, size);
-                group.clear();
-                group.add(storedName);
-            }
-            previousName = storedName;
-        }
-        addMediaGroupToRow(row, date, mealKey, group, "photos", "图片", false, dp(spaceByLayout(76, 68, 60)));
-        card.addView(scroller, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        return scroller;
-    }
 
-    private View addMealStickers(LinearLayout card, JSONObject meal, final String date, final String mealKey) {
-        JSONArray stickers = meal.optJSONArray("stickers");
-        if (stickers == null || stickers.length() == 0) {
-            return null;
-        }
-        card.setClipChildren(false);
-        card.setClipToPadding(false);
-        PhotoStripScrollView scroller = new PhotoStripScrollView(this);
-        scroller.setHorizontalScrollBarEnabled(false);
-        scroller.setClipChildren(false);
-        scroller.setClipToPadding(false);
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setClipChildren(false);
-        row.setClipToPadding(false);
-        row.setPadding(0, dp(spaceByLayout(7, 5, 4)), 0, 0);
-        scroller.addView(row);
-        String previousName = null;
-        List<String> group = new ArrayList<String>();
-        for (int i = 0; i < stickers.length(); i++) {
-            final String storedName = stickers.optString(i);
-            final File file = new File(getFilesDir(), storedName);
-            if (!file.exists()) {
-                continue;
-            }
-            int size = dp(spaceByLayout(64, 58, 54));
-            if (!group.isEmpty() && isMediaStackedAfter(meal, "stickers", storedName, previousName)) {
-                group.add(storedName);
-            } else {
-                addMediaGroupToRow(row, date, mealKey, group, "stickers", "贴纸", true, size);
-                group.clear();
-                group.add(storedName);
-            }
-            previousName = storedName;
-        }
-        addMediaGroupToRow(row, date, mealKey, group, "stickers", "贴纸", true, dp(spaceByLayout(64, 58, 54)));
-        card.addView(scroller, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        return scroller;
-    }
 
     private void rotateMealMediaLeft(final PhotoAction action) {
         if (action == null || action.rotating) {
+            return;
+        }
+        if (action.foodId == null || action.foodId.isEmpty()) {
+            JSONObject linked = NutritionStore.findByMedia(NutritionStore.meal(readJson(DATA_KEY), action.date, action.mealKey), action.fileName);
+            if (linked != null) action.foodId = linked.optString("id");
+        }
+        if (action.foodId != null && !action.foodId.isEmpty()) {
+            if (NutritionStore.rotateDisplayLeft(this, action.date, action.mealKey, action.foodId)) {
+                days = readJson(DATA_KEY);
+                JSONObject item = NutritionStore.find(NutritionStore.meal(days, action.date, action.mealKey), action.foodId);
+                if (action.mediaContent instanceof TodayPaperView.RotatableMedia)
+                    ((TodayPaperView.RotatableMedia) action.mediaContent).setMediaRotation(NutritionStore.displayRotation(item));
+                else if (action.mediaContent instanceof ImageView)
+                    action.mediaContent.setRotation(NutritionStore.displayRotation(item));
+                else renderCurrent();
+            } else showGlassToast("这张贴纸已移除，请刷新后重试", Toast.LENGTH_SHORT);
             return;
         }
         final File file = new File(getFilesDir(), action.fileName);
@@ -19585,6 +15505,8 @@ public class MainActivity extends Activity {
                                 return;
                             }
                             refreshRotatedMediaPreview(action);
+                            if (action.mediaContent instanceof TodayPaperView.RotatableMedia) renderCurrent();
+                            if ("photos".equals(action.arrayKey)) FoodAnalysisJobService.enqueue(MainActivity.this, action.date, action.mealKey, action.fileName, true);
                         }
                     });
                 }
@@ -19662,13 +15584,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void confirmDeleteMealPhoto(final String date, final String mealKey, final String fileName) {
-        confirmDeleteMedia(new PhotoAction(date, mealKey, fileName, "photos", "图片", null));
-    }
 
-    private void confirmDeleteMealSticker(final String date, final String mealKey, final String fileName) {
-        confirmDeleteMedia(new PhotoAction(date, mealKey, fileName, "stickers", "贴纸", null));
-    }
 
     private void confirmDeleteMedia(final PhotoAction action) {
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
@@ -19710,8 +15626,15 @@ public class MainActivity extends Activity {
     }
 
     private void deleteMealPhoto(String date, String mealKey, String fileName) {
+        synchronized (NutritionStore.LOCK) {
+        days = readJson(DATA_KEY);
         JSONObject meal = optObj(ensureDay(date), mealKey);
+        JSONObject linked = NutritionStore.findByMedia(meal, fileName);
+        if (linked != null) fileName = linked.optString("sourcePhoto", fileName);
+        JSONArray removedFood = NutritionStore.forSource(meal, fileName);
         JSONArray oldPhotos = meal.optJSONArray("photos");
+        String recycleKey = !NutritionStore.contains(oldPhotos, fileName)
+                && NutritionStore.contains(meal.optJSONArray("stickers"), fileName) ? "stickers" : "photos";
         JSONArray nextPhotos = new JSONArray();
         if (oldPhotos != null) {
             for (int i = 0; i < oldPhotos.length(); i++) {
@@ -19723,6 +15646,20 @@ public class MainActivity extends Activity {
         }
         try {
             clearMediaStackRefs(meal, "photos", fileName);
+            // Some imported backups also list the same food alpha as a legacy sticker.
+            JSONArray stickers = meal.optJSONArray("stickers");
+            if (stickers != null && removedFood.length() > 0) {
+                JSONArray keep = new JSONArray();
+                for (int i = 0; i < stickers.length(); i++) {
+                    String candidate = stickers.optString(i); boolean represented = fileName.equals(candidate);
+                    for (int f = 0; f < removedFood.length(); f++) {
+                        JSONObject food = removedFood.optJSONObject(f);
+                        if (food != null && candidate.equals(food.optString("cutoutFile"))) represented = true;
+                    }
+                    if (!represented) keep.put(candidate); else clearMediaStackRefs(meal, "stickers", candidate);
+                }
+                meal.put("stickers", keep);
+            }
             if (nextPhotos.length() > 0) {
                 meal.put("photos", nextPhotos);
             } else {
@@ -19735,7 +15672,9 @@ public class MainActivity extends Activity {
         } catch (JSONException ignored) {
         }
 
-        moveMediaToRecycle(date, mealKey, "photos", "图片", fileName);
+        moveMediaToRecycle(date, mealKey, recycleKey, "stickers".equals(recycleKey) ? "贴纸" : "图片", fileName);
+        attachFoodRecycleBundle(removedFood);
+        }
         showGlassToast("已移入回收站", Toast.LENGTH_SHORT);
         if (inBookDetail) {
             renderBookDetail(date);
@@ -19745,7 +15684,10 @@ public class MainActivity extends Activity {
     }
 
     private void deleteMealSticker(String date, String mealKey, String fileName) {
+        JSONObject linked = NutritionStore.findByMedia(NutritionStore.meal(readJson(DATA_KEY), date, mealKey), fileName);
+        if (linked != null) { deleteMealPhoto(date, mealKey, linked.optString("sourcePhoto")); return; }
         JSONObject meal = optObj(ensureDay(date), mealKey);
+        JSONArray removedFood = NutritionStore.forSource(meal, fileName);
         JSONArray oldStickers = meal.optJSONArray("stickers");
         JSONArray nextStickers = new JSONArray();
         if (oldStickers != null) {
@@ -19770,8 +15712,15 @@ public class MainActivity extends Activity {
         } catch (JSONException ignored) {
         }
         moveMediaToRecycle(date, mealKey, "stickers", "贴纸", fileName);
+        attachFoodRecycleBundle(removedFood);
         showGlassToast("已移入回收站", Toast.LENGTH_SHORT);
         renderCurrent();
+    }
+
+    private void attachFoodRecycleBundle(JSONArray foods) {
+        if(foods==null||foods.length()==0)return;
+        JSONArray bin=recycleBinArray(); JSONObject entry=bin.optJSONObject(bin.length()-1);
+        try {if(entry!=null){entry.put("foodItems",foods);saveProfile();}}catch(JSONException ignored){}
     }
 
     private void showPhotoViewer(final File file, final String date, final String mealKey, final String fileName) {
@@ -19779,34 +15728,51 @@ public class MainActivity extends Activity {
     }
 
     private void showPhotoViewer(final String date, final String mealKey, String fileName) {
+        showPhotoViewer(date,mealKey,fileName,()->true,opened->{if(!opened&&!isFinishing()&&!isDestroyed())showGlassToast("图片暂时无法打开",Toast.LENGTH_SHORT);});
+    }
+
+    private void showPhotoViewer(final String date,final String mealKey,final String fileName,
+            final java.util.function.BooleanSupplier current,final java.util.function.Consumer<Boolean> ready){
+        days=readJson(DATA_KEY);
         final List<String> photos = mealPhotoNames(date, mealKey);
-        if (photos.isEmpty()) {
-            showGlassToast("图片不见了", Toast.LENGTH_SHORT);
-            return;
-        }
-        int startIndex = 0;
-        for (int i = 0; i < photos.size(); i++) {
-            if (photos.get(i).equals(fileName)) {
-                startIndex = i;
-            }
-        }
+        final int startIndex=photos.indexOf(fileName);
+        if(startIndex<0){ready.accept(false);return;}
+        final long generation=++photoViewerGeneration;
+        final View owner=content.getChildCount()==0?null:content.getChildAt(0);
+        try{photoViewerExecutor.execute(()->{
+            Bitmap bitmap=null;
+            if(generation==photoViewerGeneration)bitmap=decodeFileSampled(new File(getFilesDir(),fileName),1920);
+            final Bitmap decoded=bitmap;
+            runOnUiThread(()->{
+                boolean valid=generation==photoViewerGeneration&&!rootStopped&&!isFinishing()&&!isDestroyed()
+                        &&current.getAsBoolean()&&content.getChildCount()>0&&content.getChildAt(0)==owner;
+                if(!valid||decoded==null){if(decoded!=null&&!decoded.isRecycled())decoded.recycle();ready.accept(false);return;}
+                installPhotoViewer(photos,startIndex,decoded);ready.accept(true);
+            });
+        });}catch(java.util.concurrent.RejectedExecutionException unavailable){ready.accept(false);}
+    }
+
+    private void installPhotoViewer(final List<String> photos,final int startIndex,final Bitmap firstImage){
         inPhotoViewer = true;
+        root.removeCallbacks(refreshRootPages);homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);
         if (photoOverlay != null) {
-            content.removeView(photoOverlay);
+            photoOverlay.animate().cancel();content.removeView(photoOverlay);
             photoOverlay = null;
         }
+        updateFab();
 
-        final FrameLayout viewer = new FrameLayout(this);
+        final FrameLayout viewer = new FrameLayout(this);viewer.setTag("photo_viewer");
         photoOverlay = viewer;
         viewer.setAlpha(0f);
         viewer.setBackgroundColor(photoViewerBackgroundColor());
         viewer.setClickable(true);
 
-        final ZoomImageView image = new ZoomImageView(this);
+        final ZoomImageView image = new ZoomImageView(this);image.setTag("photo_viewer_image");image.setContentDescription("原图预览");
         viewer.addView(image, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         final TextView counter = pill((startIndex + 1) + "/" + photos.size(),
                 photoViewerPillColor(), photoViewerTextColor(), 13);
+        counter.setTag("photo_viewer_counter");counter.setContentDescription("第"+(startIndex+1)+"张，共"+photos.size()+"张");
         counter.setGravity(Gravity.CENTER);
         counter.setVisibility(photos.size() > 1 ? View.VISIBLE : View.GONE);
         FrameLayout.LayoutParams counterLp = new FrameLayout.LayoutParams(dp(74), dp(34));
@@ -19814,19 +15780,20 @@ public class MainActivity extends Activity {
         counterLp.bottomMargin = dp(26);
         viewer.addView(counter, counterLp);
 
-        final int[] index = new int[]{startIndex};
+        final int[] index = new int[]{startIndex},desired=new int[]{startIndex};
+        resetPhotoViewerTarget=()->{if(photoOverlay==viewer)desired[0]=index[0];};
         image.setSwipeHandler(new PhotoSwipeHandler() {
             @Override
             public void onSwipe(int direction) {
                 if (photos.size() > 1) {
-                    index[0] = (index[0] + direction + photos.size()) % photos.size();
-                    counter.setText((index[0] + 1) + "/" + photos.size());
-                    switchViewerPhoto(image, photos.get(index[0]), direction);
+                    desired[0]=(desired[0]+direction+photos.size())%photos.size();
+                    switchViewerPhoto(viewer,image,photos,counter,index,desired,desired[0],direction);
                 }
             }
         });
         image.setLongPressHandler(null);
         TextView close = label("×", 34, Color.WHITE, false);
+        close.setContentDescription("关闭原图预览");
         close.setGravity(Gravity.CENTER);
         close.setBackground(round(Color.argb(118, 0, 0, 0), dp(24), 0, 0));
         attachPressAnimation(close);
@@ -19842,19 +15809,20 @@ public class MainActivity extends Activity {
         closeLp.rightMargin = dp(18);
         viewer.addView(close, closeLp);
 
+        image.setZoomBitmap(firstImage);image.setAlpha(1f);image.setTranslationX(0f);
         content.addView(viewer, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        switchViewerPhoto(image, photos.get(index[0]), 0);
         viewer.animate().alpha(1f).setDuration(170).start();
     }
 
     private List<String> mealPhotoNames(String date, String mealKey) {
         List<String> result = new ArrayList<String>();
-        JSONObject meal = optObj(ensureDay(date), mealKey);
+        JSONObject meal = NutritionStore.meal(days, date, mealKey);
+        if (meal == null) return result;
         JSONArray photos = meal.optJSONArray("photos");
         if (photos != null) {
             for (int i = 0; i < photos.length(); i++) {
                 String name = photos.optString(i);
-                if (new File(getFilesDir(), name).exists()) {
+                if (NutritionStore.safeName(name) && new File(getFilesDir(), name).isFile() && !result.contains(name)) {
                     result.add(name);
                 }
             }
@@ -19863,31 +15831,41 @@ public class MainActivity extends Activity {
         if (stickers != null) {
             for (int i = 0; i < stickers.length(); i++) {
                 String name = stickers.optString(i);
-                if (new File(getFilesDir(), name).exists() && !result.contains(name)) {
+                if (NutritionStore.safeName(name) && new File(getFilesDir(), name).isFile() && !result.contains(name)) {
                     result.add(name);
                 }
             }
         }
+        JSONArray foods = meal.optJSONArray("foodItems");
+        for (int i=0;foods!=null&&i<foods.length();i++) {
+            JSONObject food = foods.optJSONObject(i); if(food==null)continue;
+            String source = food.optString("sourcePhoto"), cutout = food.optString("cutoutFile");
+            String file = NutritionStore.safeName(source) && new File(getFilesDir(),source).isFile() ? source : cutout;
+            if (NutritionStore.safeName(file) && new File(getFilesDir(),file).isFile() && !result.contains(file)) result.add(file);
+        }
         return result;
     }
 
-    private void switchViewerPhoto(final ZoomImageView image, final String fileName, final int direction) {
-        final Bitmap bitmap = decodeFileSampled(new File(getFilesDir(), fileName), 1920);
-        if (bitmap == null) {
-            showGlassToast("图片读取失败", Toast.LENGTH_SHORT);
-            return;
-        }
-        image.animate().cancel();
-        if (direction == 0) {
-            image.setZoomBitmap(bitmap);
-            image.setAlpha(1f);
-            image.setTranslationX(0f);
-            return;
-        }
-        image.setZoomBitmap(bitmap);
-        image.setAlpha(1f);
-        image.setTranslationX(dp(46) * direction);
-        image.animate().translationX(0f).setDuration(170).start();
+    private void switchViewerPhoto(final View viewer,final ZoomImageView image,final List<String> photos,
+            final TextView counter,final int[] index,final int[] desired,final int candidate,final int direction){
+        final long generation=++photoViewerGeneration;
+        if(candidate==index[0])return;
+        try{photoViewerExecutor.execute(()->{
+            Bitmap bitmap=null;
+            if(generation==photoViewerGeneration)bitmap=decodeFileSampled(new File(getFilesDir(),photos.get(candidate)),1920);
+            final Bitmap decoded=bitmap;
+            runOnUiThread(()->{
+                if(generation!=photoViewerGeneration||photoOverlay!=viewer||viewer.getParent()!=content||rootStopped||isFinishing()||isDestroyed()){
+                    if(decoded!=null&&!decoded.isRecycled())decoded.recycle();return;
+                }
+                if(decoded==null){desired[0]=index[0];showGlassToast("图片读取失败，已保留当前图片",Toast.LENGTH_SHORT);return;}
+                // Image, committed index and counter change together, only after successful decode.
+                image.animate().cancel();image.setZoomBitmap(decoded);index[0]=candidate;
+                counter.setText((candidate+1)+"/"+photos.size());counter.setContentDescription("第"+(candidate+1)+"张，共"+photos.size()+"张");
+                image.setAlpha(1f);image.setTranslationX(ValueAnimator.areAnimatorsEnabled()?dp(46)*direction:0);
+                if(ValueAnimator.areAnimatorsEnabled())image.animate().translationX(0f).setDuration(170).start();
+            });
+        });}catch(java.util.concurrent.RejectedExecutionException unavailable){desired[0]=index[0];}
     }
 
     private int photoViewerBackgroundColor() {
@@ -19912,275 +15890,18 @@ public class MainActivity extends Activity {
     }
 
     private void closePhotoViewer() {
-        if (aiPreviewOverlay != null) {
-            closeAiStickerPreview();
-        }
-        final View overlay = photoOverlay;
-        if (overlay == null) {
-            inPhotoViewer = false;
-            return;
-        }
-        overlay.animate().alpha(0f).setDuration(160).withEndAction(new Runnable() {
-            @Override
-            public void run() {
-                content.removeView(overlay);
-                if (photoOverlay == overlay) {
-                    photoOverlay = null;
-                }
-                inPhotoViewer = false;
-            }
+        photoViewerGeneration++;
+        if(aiPreviewOverlay!=null)closeAiStickerPreview();
+        final View overlay=photoOverlay;
+        if(overlay==null){inPhotoViewer=false;updateFab();resumeDeferredRootRefresh();return;}
+        View preview=overlay.findViewWithTag("photo_viewer_image");
+        if(preview instanceof ZoomImageView)((ZoomImageView)preview).setSwipeHandler(null);
+        overlay.animate().cancel();
+        overlay.animate().alpha(0f).setDuration(160).withEndAction(()->{
+            boolean owns=photoOverlay==overlay;
+            ViewParent parent=overlay.getParent();if(parent instanceof ViewGroup)((ViewGroup)parent).removeView(overlay);
+            if(owns){photoOverlay=null;resetPhotoViewerTarget=null;inPhotoViewer=false;updateFab();resumeDeferredRootRefresh();}
         }).start();
-    }
-
-    private void bindMealSwipe(final String date, final String mealKey, final View card,
-                               final LinearLayout leftActionPanel, final LinearLayout rightActionPanel,
-                               final PhotoCollapseController photoController, View... touchTargets) {
-        final float[] downX = new float[1];
-        final float[] downY = new float[1];
-        final boolean[] horizontal = new boolean[]{false};
-        final boolean[] vertical = new boolean[]{false};
-        final boolean[] photoGesture = new boolean[]{false};
-        final boolean[] panelVisible = new boolean[]{false};
-        final int[] panelMode = new int[]{0};
-        final LinearLayout[] activePanel = new LinearLayout[]{null};
-        View.OnTouchListener listener = new View.OnTouchListener() {
-            @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                    clearCurrentTextFocus();
-                    if (v instanceof EditText) {
-                        ((EditText) v).setCursorVisible(true);
-                    }
-                    downX[0] = event.getRawX();
-                    downY[0] = event.getRawY();
-                    horizontal[0] = false;
-                    vertical[0] = false;
-                    photoGesture[0] = photoController != null && photoController.containsRaw(event.getRawX(), event.getRawY());
-                    ViewParent parent = v.getParent();
-                    if (parent != null) {
-                        parent.requestDisallowInterceptTouchEvent(true);
-                    }
-                } else if (event.getAction() == MotionEvent.ACTION_MOVE) {
-                    float dx = event.getRawX() - downX[0];
-                    float dy = event.getRawY() - downY[0];
-                    float absX = Math.abs(dx);
-                    float absY = Math.abs(dy);
-                    if (!horizontal[0] && !vertical[0] && absY > dp(10) && absY > absX * 1.15f) {
-                        vertical[0] = true;
-                        ViewParent parent = v.getParent();
-                        if (parent != null) {
-                            parent.requestDisallowInterceptTouchEvent(true);
-                        }
-                        return true;
-                    }
-                    if (!vertical[0] && absX > dp(12) && absX > absY * 0.7f) {
-                        if (!horizontal[0]) {
-                            horizontal[0] = true;
-                            suppressMealSwipeTextFocus(v);
-                            card.animate().scaleX(0.985f).scaleY(0.985f).setDuration(90).start();
-                        }
-                        ViewParent parent = v.getParent();
-                        if (parent != null) {
-                            parent.requestDisallowInterceptTouchEvent(true);
-                        }
-                    }
-                    if (vertical[0]) {
-                        return true;
-                    }
-                    if (horizontal[0]) {
-                        return true;
-                    }
-                } else if (event.getAction() == MotionEvent.ACTION_UP
-                        || event.getAction() == MotionEvent.ACTION_CANCEL) {
-                    float dx = event.getRawX() - downX[0];
-                    float dy = event.getRawY() - downY[0];
-                    if (vertical[0]) {
-                        if (photoController != null) {
-                            if (photoGesture[0] && dy < -dp(18)) {
-                                photoController.collapse();
-                            } else if (dy > dp(18)) {
-                                photoController.expand();
-                            }
-                        }
-                        if (horizontal[0]) {
-                            card.animate().scaleX(1f).scaleY(1f).setDuration(170).start();
-                        }
-                        return true;
-                    }
-                    if (dx > dp(44) && !panelVisible[0]) {
-                        if (showMealSwipePanel(leftActionPanel, card, v, panelVisible, panelMode,
-                                date, mealKey, mealTitle(mealKey), 1)) {
-                            activePanel[0] = leftActionPanel;
-                        }
-                    }
-                    if (dx < -dp(34) && !panelVisible[0]) {
-                        if (showMealSwipePanel(rightActionPanel, card, v, panelVisible, panelMode,
-                                date, mealKey, mealTitle(mealKey), -1)) {
-                            activePanel[0] = rightActionPanel;
-                        }
-                    } else if (((dx > dp(20) && panelMode[0] < 0) || (dx < -dp(20) && panelMode[0] > 0))
-                            && panelVisible[0]) {
-                        hideMealSwipePanel(activePanel[0], card, v, panelVisible, panelMode);
-                        activePanel[0] = null;
-                    }
-                    if (horizontal[0]) {
-                        card.animate().scaleX(1f).scaleY(1f).setDuration(170).start();
-                        return true;
-                    }
-                }
-                return false;
-            }
-        };
-        if (touchTargets == null || touchTargets.length == 0) {
-            card.setOnTouchListener(listener);
-        } else {
-            for (View target : touchTargets) {
-                if (target != null) {
-                    target.setOnTouchListener(listener);
-                }
-            }
-        }
-    }
-
-    private boolean showMealSwipePanel(final LinearLayout actionPanel, final View card,
-                                       final View stableHeightTarget,
-                                       final boolean[] panelVisible, final int[] panelMode,
-                                       String date, String mealKey, String title, int mode) {
-        if (actionPanel == null) {
-            return false;
-        }
-        if (!populateMealActionPanel(actionPanel, date, mealKey, title, mode)) {
-            return false;
-        }
-        lockMealSwipeContentHeight(stableHeightTarget);
-        int cardHeight = Math.max(card.getHeight(), card.getMeasuredHeight());
-        if (cardHeight > 0) {
-            ViewGroup.LayoutParams panelLp = actionPanel.getLayoutParams();
-            panelLp.height = cardHeight;
-            actionPanel.setLayoutParams(panelLp);
-        }
-        actionPanel.setMinimumHeight(0);
-        panelVisible[0] = true;
-        panelMode[0] = mode;
-        actionPanel.animate().cancel();
-        actionPanel.setVisibility(View.VISIBLE);
-        actionPanel.setAlpha(0f);
-        actionPanel.setTranslationX(mode > 0 ? -dp(18) : dp(18));
-        actionPanel.animate().alpha(1f).translationX(0f).setDuration(180).start();
-        suppressMealSwipeTextFocus(stableHeightTarget);
-        stableHeightTarget.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                suppressMealSwipeTextFocus(stableHeightTarget);
-            }
-        }, 48L);
-        return true;
-    }
-
-    private void hideMealSwipePanel(final LinearLayout actionPanel, final View card,
-                                    final View stableHeightTarget, final boolean[] panelVisible,
-                                    final int[] panelMode) {
-        if (actionPanel == null) {
-            panelVisible[0] = false;
-            panelMode[0] = 0;
-            return;
-        }
-        int mode = panelMode[0];
-        panelVisible[0] = false;
-        panelMode[0] = 0;
-        actionPanel.animate().cancel();
-        actionPanel.animate().alpha(0f).translationX(mode > 0 ? -dp(18) : dp(18)).setDuration(150).withEndAction(new Runnable() {
-            @Override
-            public void run() {
-                actionPanel.setVisibility(View.GONE);
-                actionPanel.removeAllViews();
-                unlockMealSwipeContentHeight(stableHeightTarget);
-                suppressMealSwipeTextFocus(stableHeightTarget);
-                card.requestLayout();
-            }
-        }).start();
-    }
-
-    private void lockMealSwipeContentHeight(View target) {
-        if (target == null || target.getHeight() <= 0) {
-            return;
-        }
-        ViewGroup.LayoutParams lp = target.getLayoutParams();
-        if (lp != null) {
-            lp.height = target.getHeight();
-            target.setLayoutParams(lp);
-        }
-    }
-
-    private void unlockMealSwipeContentHeight(View target) {
-        if (target == null) {
-            return;
-        }
-        ViewGroup.LayoutParams lp = target.getLayoutParams();
-        if (lp != null) {
-            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
-            target.setLayoutParams(lp);
-        }
-    }
-
-    private void suppressMealSwipeTextFocus(View target) {
-        if (!(target instanceof EditText)) {
-            return;
-        }
-        ((EditText) target).setCursorVisible(false);
-        target.clearFocus();
-        hideKeyboard();
-    }
-
-    private String quickExtraMealKey(String date, String sourceMealKey) {
-        if ("lunch".equals(sourceMealKey) && canAddDayExtraMeal(date, "afternoon_tea")) {
-            return "afternoon_tea";
-        }
-        if ("dinner".equals(sourceMealKey) && canAddDayExtraMeal(date, "snack")) {
-            return "snack";
-        }
-        return null;
-    }
-
-    private PhotoCollapseController bindPhotoCollapse(final String date, final String mealKey,
-                                                      final View photosView, final TextView status, final int photoCount) {
-        return bindMediaCollapse(date, mealKey, photosView, status, photoCount, "photo");
-    }
-
-    private PhotoCollapseController bindMediaCollapse(final String date, final String mealKey, final View photosView, final TextView status,
-                                                     final int mediaCount, final String mediaLabel) {
-        final PhotoCollapseController controller = new PhotoCollapseController(date, mealKey, photosView, status, mediaCount, mediaLabel);
-        if (photosView instanceof PhotoStripScrollView) {
-            ((PhotoStripScrollView) photosView).setPhotoCollapseController(controller);
-            return controller;
-        }
-        final float[] downY = new float[1];
-        View.OnTouchListener listener = new View.OnTouchListener() {
-            @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                    clearCurrentTextFocus();
-                    downY[0] = event.getRawY();
-                    ViewParent parent = v.getParent();
-                    if (parent != null) {
-                        parent.requestDisallowInterceptTouchEvent(true);
-                    }
-                } else if (event.getAction() == MotionEvent.ACTION_UP
-                        || event.getAction() == MotionEvent.ACTION_CANCEL) {
-                    float dy = event.getRawY() - downY[0];
-                    if (dy < -dp(18)) {
-                        controller.collapse();
-                        return true;
-                    } else if (dy > dp(18)) {
-                        controller.expand();
-                        return true;
-                    }
-                }
-                return false;
-            }
-        };
-        photosView.setOnTouchListener(listener);
-        return controller;
     }
 
     private void animateViewHeight(final View view, int startHeight, final int endHeight, long duration) {
@@ -20356,13 +16077,9 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject readProfile() {
-        JSONObject p;
+        JSONObject p = PrivateProfileStore.read(this);
         try {
-            p = new JSONObject(prefs.getString(PROFILE_KEY, "{}"));
-        } catch (JSONException e) {
-            p = new JSONObject();
-        }
-        try {
+            if(!p.has("foodRecognitionOnboardingSeen"))p.put("foodRecognitionOnboardingSeen",!p.optString("seenAnnouncementVersion").isEmpty()||FoodAnalysisJobService.apiConfigured(p));
             if (!p.has("name")) {
                 p.put("name", "给自己起个名字");
             }
@@ -20398,22 +16115,10 @@ public class MainActivity extends Activity {
                 p.put("layoutLevel", "compact".equals(layout) ? 0 : ("cozy".equals(layout) ? 100 : 50));
             }
             if (!p.has("decoration")) {
-                p.put("decoration", "green");
-            }
-            if (!p.has("startTab")) {
-                p.put("startTab", 0);
+                p.put("decoration", "yellow");
             }
             if (!p.has("photoBg")) {
                 p.put("photoBg", "black");
-            }
-            if (!p.has("timeline")) {
-                p.put("timeline", "bold");
-            }
-            if (!p.has("mealCardAlpha")) {
-                p.put("mealCardAlpha", 245);
-            }
-            if (!p.has("mealCardGlass")) {
-                p.put("mealCardGlass", 18);
             }
             if (!p.has("hideSettings")) {
                 p.put("hideSettings", false);
@@ -20467,16 +16172,13 @@ public class MainActivity extends Activity {
                 p.put("apiEndpoint", "https://api.deepseek.com/chat/completions");
             }
         if (!p.has("apiModel")) {
-            p.put("apiModel", "deepseek-chat");
+            p.put("apiModel", "deepseek-flash");
         }
         if (!p.has("apiModels")) {
             p.put("apiModels", new JSONArray());
         }
         if (!p.has("apiModelMode")) {
             p.put("apiModelMode", "fast");
-        }
-        if (!p.has("apiVisionSupported")) {
-            p.put("apiVisionSupported", false);
         }
         if (!p.has("aiAnalysisEnabled")) {
             p.put("aiAnalysisEnabled", false);
@@ -20543,12 +16245,6 @@ public class MainActivity extends Activity {
             if (!p.has("followSystemNight")) {
                 p.put("followSystemNight", false);
             }
-            if (!p.has("headerTransparent")) {
-                p.put("headerTransparent", false);
-            }
-            if (!p.has("globalFontFollowsBook")) {
-                p.put("globalFontFollowsBook", false);
-            }
             if (!p.has("autoCloudSync")) {
                 p.put("autoCloudSync", false);
             }
@@ -20562,7 +16258,7 @@ public class MainActivity extends Activity {
                 p.put("stickerGroupMode", "day");
             }
             if (!p.has("footprintLayout")) {
-                p.put("footprintLayout", "original");
+                p.put("footprintLayout", "expanded");
             }
             if (!p.has("footprintColumns")) {
                 p.put("footprintColumns", 4);
@@ -20583,7 +16279,7 @@ public class MainActivity extends Activity {
                 p.put("bookCoverStyle", "food");
             }
             if (!p.has("bookFont")) {
-                p.put("bookFont", "default");
+                p.put("bookFont", "xiaolai");
             }
             if (!p.has("notebookPageStyle")) {
                 p.put("notebookPageStyle", "cream");
@@ -20621,7 +16317,7 @@ public class MainActivity extends Activity {
         } catch (JSONException ignored) {
         }
         if (sanitizeStoredHomeHints(p)) {
-            prefs.edit().putString(PROFILE_KEY, p.toString()).apply();
+            PrivateProfileStore.apply(this, p);
         }
         return p;
     }
@@ -20661,11 +16357,17 @@ public class MainActivity extends Activity {
     }
 
     private void saveDays() {
-        prefs.edit().putString(DATA_KEY, days.toString()).apply();
+        synchronized (NutritionStore.LOCK) {
+            NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY));
+            prefs.edit().putString(DATA_KEY, days.toString()).apply();
+        }
     }
 
     private void saveProfile() {
-        prefs.edit().putString(PROFILE_KEY, profile.toString()).apply();
+        synchronized(NutritionStore.LOCK){
+            if(!PrivateProfileStore.apply(this, profile))
+                showGlassToast("设置保存失败，请检查剩余空间后重试",Toast.LENGTH_LONG);
+        }
     }
 
     private void saveCloudProfileFields() {
@@ -20895,7 +16597,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private JSONObject uploadCloudBackupRaw(byte[] backup, String dataHash,
+    private JSONObject uploadCloudBackupRaw(File backup, String dataHash,
                                             String clientKnownHash) throws Exception {
         HttpURLConnection conn = null;
         try {
@@ -20905,7 +16607,7 @@ public class MainActivity extends Activity {
             conn.setReadTimeout(60000);
             conn.setUseCaches(false);
             conn.setDoOutput(true);
-            conn.setFixedLengthStreamingMode(backup.length);
+            conn.setFixedLengthStreamingMode(backup.length());
             conn.setRequestProperty("Content-Type", "application/octet-stream");
             conn.setRequestProperty("Authorization", "Bearer " + profile.optString("cloudToken", ""));
             conn.setRequestProperty("X-User-Id", profile.optString("userId", ""));
@@ -20913,14 +16615,8 @@ public class MainActivity extends Activity {
             conn.setRequestProperty("X-Client-Known-Data-Hash",
                     clientKnownHash == null ? "" : clientKnownHash);
             OutputStream out = conn.getOutputStream();
-            try {
-                int offset = 0;
-                while (offset < backup.length) {
-                    int count = Math.min(64 * 1024, backup.length - offset);
-                    out.write(backup, offset, count);
-                    offset += count;
-                }
-                out.flush();
+            try (InputStream input=new FileInputStream(backup)) {
+                copyStream(input,out);
             } finally {
                 out.close();
             }
@@ -20957,12 +16653,17 @@ public class MainActivity extends Activity {
                 || value.contains("invalid start byte");
     }
 
-    private JSONObject uploadCloudBackupLegacy(byte[] backup, String dataHash,
+    private JSONObject uploadCloudBackupLegacy(File backup, String dataHash,
                                                String clientKnownHash) throws Exception {
         JSONObject body = new JSONObject();
         body.put("id", parseIntSafe(profile.optString("userId", "")));
         body.put("token", profile.optString("cloudToken", ""));
-        body.put("backupData", Base64.encodeToString(backup, Base64.NO_WRAP));
+        // An old JSON/base64 server cannot stream. Fail explicitly before allocating
+        // multiple unbounded copies; current raw servers continue to accept large files.
+        if(backup.length()>8L*1024*1024)throw new java.io.IOException("服务器需要更新，当前备份超过旧接口安全容量");
+        ByteArrayOutputStream bytes=new ByteArrayOutputStream((int)backup.length());
+        try(InputStream input=new FileInputStream(backup)){copyStream(input,bytes);}
+        body.put("backupData", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP));
         body.put("dataHash", dataHash == null ? "" : dataHash);
         body.put("clientKnownDataHash", clientKnownHash == null ? "" : clientKnownHash);
         return postJson(CLOUD_API_BASE + "/api/users/data/upload", body,
@@ -21246,9 +16947,10 @@ public class MainActivity extends Activity {
                 boolean authExpired = false;
                 boolean skipped = false;
                 boolean staleCloud = false;
+                File backup = null;
                 try {
                     if (showResult) updateCloudSyncProgress(18, "正在打包本机数据...");
-                    byte[] backup = buildBackupBytes(true);
+                    backup = buildBackupFile(true);
                     String backupHash = sha256Hex(backup);
                     String knownCloudHash = profile.optString("cloudDataHash", "");
                     if (backupHash.equals(knownCloudHash)) {
@@ -21290,6 +16992,8 @@ public class MainActivity extends Activity {
                 } catch (Exception e) {
                     message = e.getMessage() != null && e.getMessage().contains("服务器")
                             ? e.getMessage() : "无法连接云端";
+                } finally {
+                    if(backup!=null)backup.delete();
                 }
                 final boolean done = ok;
                 final boolean expired = authExpired;
@@ -21426,6 +17130,7 @@ public class MainActivity extends Activity {
                             handleCloudSessionExpired();
                             return;
                         }
+                        if(!done&&showPendingRestoreRecovery())return;
                         if (downloaded) {
                             updateSystemBars();
                             refreshChrome();
@@ -21689,6 +17394,13 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Rendering must not add blank meals to the live diary or create a day. */
+    private JSONObject dayReadSnapshot(String date) {
+        JSONObject stored = days.optJSONObject(date);
+        try { return stored == null ? new JSONObject() : new JSONObject(stored.toString()); }
+        catch (JSONException ignored) { return new JSONObject(); }
+    }
+
     private JSONObject ensureDay(String date) {
         JSONObject day = optObj(days, date);
         try {
@@ -21717,100 +17429,11 @@ public class MainActivity extends Activity {
         return child;
     }
 
-    private void setMealText(String date, String mealKey, String text) {
-        JSONObject meal = optObj(ensureDay(date), mealKey);
-        try {
-            if (text.trim().length() > 0) {
-                meal.put("text", text);
-                meal.remove("skipped");
-            } else {
-                meal.remove("text");
-            }
-            if (text.trim().length() > 0) {
-                meal.put("time", nowTime());
-            } else {
-                meal.remove("time");
-            }
-            saveDays();
-        } catch (JSONException ignored) {
-        }
-    }
 
-    private boolean toggleMealSkipped(String date, String mealKey) {
-        JSONObject meal = optObj(ensureDay(date), mealKey);
-        try {
-            if (meal.optBoolean("skipped", false)) {
-                meal.remove("skipped");
-                meal.remove("emoji");
-                if (meal.optString("text", "").trim().length() == 0) {
-                    meal.remove("time");
-                }
-                saveDays();
-                return false;
-            } else {
-                meal.put("skipped", true);
-                meal.put("emoji", "🍽");
-                meal.remove("time");
-                meal.remove("text");
-                saveDays();
-                return true;
-            }
-        } catch (JSONException ignored) {
-        }
-        return meal.optBoolean("skipped", false);
-    }
 
-    private String skippedReminder(String date, String mealKey, String title) {
-        int count = consecutiveSkippedDays(date, mealKey);
-        String message;
-        if (count >= 4) {
-            message = pickReminder(skipReminderList("many"), date, mealKey, title);
-        } else if (count == 3) {
-            message = pickReminder(skipReminderList("three"), date, mealKey, title);
-        } else if (count == 2) {
-            message = pickReminder(skipReminderList("two"), date, mealKey, title);
-        } else {
-            message = pickReminder(skipReminderList("one"), date, mealKey, title);
-        }
-        return softBreakReminder(message);
-    }
 
-    private String pickReminder(List<String> pool, String date, String mealKey, String title) {
-        if (pool.isEmpty()) {
-            return title + "缺席啦，下一次把它好好补回来(๑•̀ㅂ•́)و✧";
-        }
-        int seed = Math.abs((date + mealKey + title + hintSeed).hashCode());
-        return formatReminderTemplate(pool.get(seed % pool.size()), title);
-    }
 
-    private String formatReminderTemplate(String template, String title) {
-        if (template == null || template.length() == 0) {
-            return title + "缺席啦，下一次把它好好补回来(๑•̀ㅂ•́)و✧";
-        }
-        if (template.indexOf("%s") >= 0) {
-            try {
-                return String.format(Locale.CHINA, template, title);
-            } catch (Exception ignored) {
-                return template.replace("%s", title);
-            }
-        }
-        return template;
-    }
 
-    private String softBreakReminder(String message) {
-        if (message.length() <= 18) {
-            return message;
-        }
-        int comma = message.indexOf('，');
-        if (comma > 5 && comma < message.length() - 4) {
-            return message.substring(0, comma + 1) + "\n" + message.substring(comma + 1);
-        }
-        int bang = message.indexOf('！');
-        if (bang > 5 && bang < message.length() - 4) {
-            return message.substring(0, bang + 1) + "\n" + message.substring(bang + 1);
-        }
-        return message;
-    }
 
     private int consecutiveSkippedDays(String date, String mealKey) {
         Calendar cursor = calendarFromKey(date);
@@ -21834,26 +17457,7 @@ public class MainActivity extends Activity {
         return meal != null && meal.optBoolean("skipped", false);
     }
 
-    private void setMealSkipped(String date, String mealKey) {
-        JSONObject meal = optObj(ensureDay(date), mealKey);
-        try {
-            meal.put("skipped", true);
-            meal.put("emoji", "🍽");
-            meal.remove("time");
-            meal.remove("text");
-            saveDays();
-        } catch (JSONException ignored) {
-        }
-    }
 
-    private void setMealEmoji(String date, String mealKey, String emoji) {
-        JSONObject meal = optObj(ensureDay(date), mealKey);
-        try {
-            meal.put("emoji", emoji);
-            saveDays();
-        } catch (JSONException ignored) {
-        }
-    }
 
     private void setMood(String date, String emoji) {
         JSONObject day = ensureDay(date);
@@ -21918,20 +17522,6 @@ public class MainActivity extends Activity {
                 dp(14), selected ? 0 : surfaceStrokeColor(), dp(1)));
     }
 
-    private void toggleDayDiningMethod(String date, String method) {
-        JSONObject day = ensureDay(date);
-        JSONArray arr = copyStringArray(day.optJSONArray("diningMethods"));
-        toggleStringInArray(arr, method);
-        try {
-            if (arr.length() > 0) {
-                day.put("diningMethods", arr);
-            } else {
-                day.remove("diningMethods");
-            }
-            saveDays();
-        } catch (JSONException ignored) {
-        }
-    }
 
     private void toggleMealDiningMethod(String date, String mealKey, String method) {
         JSONObject day = ensureDay(date);
@@ -22044,15 +17634,6 @@ public class MainActivity extends Activity {
         return sb.toString();
     }
 
-    private String firstDayDiningMethodText(String date) {
-        for (MealOption meal : visibleMealsForDate(date)) {
-            List<String> methods = mealDiningMethods(date, meal.key);
-            if (!methods.isEmpty()) {
-                return methods.get(0);
-            }
-        }
-        return "";
-    }
 
     private String defaultDiningMealKey(String date) {
         JSONObject day = optObj(days, date);
@@ -22146,7 +17727,7 @@ public class MainActivity extends Activity {
     }
 
     private int mealCount(String date) {
-        JSONObject day = optObj(days, date);
+        JSONObject day = dayReadSnapshot(date);
         int count = 0;
         for (MealOption meal : allMealOptions()) {
             JSONObject mealObj = optObj(day, meal.key);
@@ -22163,7 +17744,7 @@ public class MainActivity extends Activity {
     }
 
     private String daySummary(String date) {
-        JSONObject day = optObj(days, date);
+        JSONObject day = dayReadSnapshot(date);
         List<String> parts = new ArrayList<String>();
         for (MealOption meal : allMealOptions()) {
             JSONObject mealObj = optObj(day, meal.key);
@@ -22198,31 +17779,13 @@ public class MainActivity extends Activity {
         return sb.toString();
     }
 
-    private String dayEmoji(String date) {
-        JSONObject day = optObj(days, date);
-        String mood = moodText(date);
-        if (mood.length() > 0) {
-            return mood;
-        }
-        for (MealOption meal : allMealOptions()) {
-            JSONObject mealObj = optObj(day, meal.key);
-            if (mealObj.optBoolean("skipped", false)) {
-                continue;
-            }
-            String emoji = mealObj.optString("emoji", "");
-            if (emoji.length() > 0) {
-                return emoji;
-            }
-        }
-        return "😀";
-    }
 
     private String primaryDayEmoji(String date) {
         String[] moods = moodEmojis(date);
         if (moods.length > 0) {
             return moods[0];
         }
-        JSONObject day = optObj(days, date);
+        JSONObject day = dayReadSnapshot(date);
         for (MealOption meal : allMealOptions()) {
             JSONObject mealObj = optObj(day, meal.key);
             if (mealObj.optBoolean("skipped", false)) {
@@ -22241,9 +17804,6 @@ public class MainActivity extends Activity {
                 cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH));
     }
 
-    private String nowTime() {
-        return new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(new Date());
-    }
 
     private String displayDate(String key) {
         try {
@@ -22274,22 +17834,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String displayDateWithWeek(String key) {
-        try {
-            Date date = new SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).parse(key);
-            return new SimpleDateFormat("yyyy年MM月dd日 E", Locale.CHINA).format(date);
-        } catch (ParseException e) {
-            return key;
-        }
-    }
 
-    private String formatHeaderDate(Calendar cal) {
-        return new SimpleDateFormat("MM月dd日 E", Locale.CHINA).format(cal.getTime());
-    }
 
-    private String formatHeaderWeek(Calendar cal) {
-        return new SimpleDateFormat("E", Locale.CHINA).format(cal.getTime());
-    }
 
     private LinearLayout basePage() {
         LinearLayout page = new LinearLayout(this);
@@ -22319,21 +17865,32 @@ public class MainActivity extends Activity {
         if (host == null || scroll == null || page == null || header == null) {
             return null;
         }
-        int height = dp(spaceByLayout(112, 106, 102));
-        page.addView(space(dp(spaceByLayout(60, 56, 52))), 0);
+        int height = dp(UiTokens.HEADER_CORE);
+        int fadeHeight = dp(UiTokens.HEADER_FADE);
+        if(nightDecoration()){
+            // The page owns the paper behind a transparent night header.
+            // Keep scrolling content below it instead of painting a second surface.
+            scroll.setPadding(scroll.getPaddingLeft(),scroll.getPaddingTop()+height,scroll.getPaddingRight(),scroll.getPaddingBottom());
+            scroll.setClipToPadding(true);scroll.setVerticalFadingEdgeEnabled(true);scroll.setFadingEdgeLength(fadeHeight);
+            page.setPadding(page.getPaddingLeft(),dp(12),page.getPaddingRight(),page.getPaddingBottom());
+            if(scroll instanceof ElasticScrollView)((ElasticScrollView)scroll).headerClipped=true;
+        }else{
+            int topSpace = Math.max(0, height + dp(12) - page.getPaddingTop());
+            page.addView(space(topSpace), 0);
+        }
         StickyGlassHeader glass = new StickyGlassHeader(this);
         activeStickyHeader = glass;
         glass.setSource(scroll, false);
         FrameLayout headerHost = new FrameLayout(this);
-        headerHost.setPadding(dp(spaceByLayout(22, 20, 18)), dp(spaceByLayout(50, 47, 44)),
-                dp(spaceByLayout(22, 20, 18)), dp(4));
+        headerHost.setPadding(dp(spaceByLayout(22, 20, 18)), dp(40),
+                dp(spaceByLayout(22, 20, 18)), dp(8));
         resetSystemTypefaceRecursive(header);
         headerHost.addView(header, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         glass.addView(headerHost, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                ViewGroup.LayoutParams.MATCH_PARENT, height));
         host.addView(glass, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, height, Gravity.TOP));
+                ViewGroup.LayoutParams.MATCH_PARENT, height + fadeHeight, Gravity.TOP));
         glass.bringToFront();
         return glass;
     }
@@ -22343,20 +17900,21 @@ public class MainActivity extends Activity {
         if (host == null || source == null || header == null) {
             return null;
         }
-        int height = dp(spaceByLayout(112, 106, 102));
+        int height = dp(UiTokens.HEADER_CORE);
+        int fadeHeight = dp(UiTokens.HEADER_FADE);
         StickyGlassHeader glass = new StickyGlassHeader(this);
         activeStickyHeader = glass;
         glass.setSource(source, continuous);
         FrameLayout headerHost = new FrameLayout(this);
-        headerHost.setPadding(dp(spaceByLayout(22, 20, 18)), dp(spaceByLayout(50, 47, 44)),
-                dp(spaceByLayout(22, 20, 18)), dp(4));
+        headerHost.setPadding(dp(spaceByLayout(22, 20, 18)), dp(40),
+                dp(spaceByLayout(22, 20, 18)), dp(8));
         resetSystemTypefaceRecursive(header);
         headerHost.addView(header, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         glass.addView(headerHost, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                ViewGroup.LayoutParams.MATCH_PARENT, height));
         host.addView(glass, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, height, Gravity.TOP));
+                ViewGroup.LayoutParams.MATCH_PARENT, height + fadeHeight, Gravity.TOP));
         glass.bringToFront();
         return glass;
     }
@@ -22392,15 +17950,22 @@ public class MainActivity extends Activity {
     }
 
     private void restoreScrollPosition(final ScrollView scroll, final int scrollY) {
-        if (scroll == null || scrollY <= 0) {
+        if (scroll == null || scrollY < 0) {
             return;
         }
-        scroll.post(new Runnable() {
-            @Override
-            public void run() {
-                scroll.scrollTo(0, scrollY);
-            }
-        });
+        new ScrollPositionRestore(scroll,scrollY).start();
+    }
+
+    private static final class ScrollPositionRestore implements ViewTreeObserver.OnPreDrawListener,View.OnAttachStateChangeListener {
+        private final ScrollView scroll;private final int target;
+        private ViewTreeObserver observer;private boolean disposed;
+        ScrollPositionRestore(ScrollView scroll,int target){this.scroll=scroll;this.target=target;}
+        void start(){scroll.addOnAttachStateChangeListener(this);if(scroll.isAttachedToWindow())observe();scroll.requestLayout();scroll.invalidate();}
+        private void observe(){if(!disposed&&observer==null){observer=scroll.getViewTreeObserver();observer.addOnPreDrawListener(this);}}
+        private void dispose(){disposed=true;if(observer!=null&&observer.isAlive())observer.removeOnPreDrawListener(this);observer=null;scroll.removeOnAttachStateChangeListener(this);}
+        @Override public boolean onPreDraw(){if(disposed)return true;boolean attached=scroll.isAttachedToWindow()&&scroll.getParent()!=null;dispose();if(attached)scroll.scrollTo(0,target);return true;}
+        @Override public void onViewAttachedToWindow(View view){observe();}
+        @Override public void onViewDetachedFromWindow(View view){dispose();}
     }
 
     private ScrollView currentPageScroll() {
@@ -22411,6 +17976,8 @@ public class MainActivity extends Activity {
     }
 
     private ScrollView findFirstScrollView(View view) {
+        if(view instanceof RootPagePager)return findFirstScrollView(((RootPagePager)view).selectedPage());
+        if(view instanceof TodayDayPager)return findFirstScrollView(((TodayDayPager)view).currentPage());
         if (view instanceof ScrollView) {
             return (ScrollView) view;
         }
@@ -22432,6 +17999,7 @@ public class MainActivity extends Activity {
             return;
         }
         final int scrollY = currentContentScrollY();
+        if(pageCrossfade!=null&&pageCrossfade.active())pageCrossfade.clear();
         boolean wasSuppressing = suppressEntryAnimation;
         suppressEntryAnimation = true;
         try {
@@ -22443,28 +18011,10 @@ public class MainActivity extends Activity {
     }
 
     private void animateIn(final LinearLayout page) {
-        if (suppressEntryAnimation) {
-            return;
-        }
-        page.post(new Runnable() {
-            @Override
-            public void run() {
-                for (int i = 0; i < page.getChildCount(); i++) {
-                    View child = page.getChildAt(i);
-                    if (child instanceof Space) {
-                        continue;
-                    }
-                    child.setAlpha(0.97f);
-                    child.setTranslationY(dp(6));
-                    child.animate()
-                            .alpha(1f)
-                            .translationY(0f)
-                            .setStartDelay(i * 16L)
-                            .setDuration(300)
-                            .start();
-                }
-            }
-        });
+        // Navigation owns its crossfade; never reveal an empty/transparent new page.
+        page.setAlpha(1f);page.setTranslationY(0f);
+        if(suppressEntryAnimation||!ValueAnimator.areAnimatorsEnabled())return;
+        page.setTranslationY(dp(4));page.animate().translationY(0).setDuration(250).setInterpolator(UiTokens.motionEaseOut()).start();
     }
 
     private void attachPressAnimation(final View view) {
@@ -22475,7 +18025,13 @@ public class MainActivity extends Activity {
                     return false;
                 }
                 if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                    v.animate().scaleX(0.985f).scaleY(0.985f).setDuration(115).start();
+                    // A short tap can finish before an animator's first frame.
+                    // Commit the pressed state now, then animate only its release.
+                    v.animate().cancel();
+                    String title=v instanceof TextView?((TextView)v).getText().toString():"";
+                    boolean back="‹".equals(title)||"×".equals(title)||title.startsWith("返回");
+                    if(back)navigationPress=new java.lang.ref.WeakReference<View>(v);
+                    v.setScaleX(back?.94f:.985f);v.setScaleY(back?.94f:.985f);
                 } else if (event.getAction() == MotionEvent.ACTION_UP
                         || event.getAction() == MotionEvent.ACTION_CANCEL) {
                     v.animate().scaleX(1f).scaleY(1f).setDuration(205).start();
@@ -22587,42 +18143,56 @@ public class MainActivity extends Activity {
     }
 
     private void showRoundedDialog(AlertDialog dialog, View contentView) {
-        activeGlassDialogCount++;
-        applyDialogBackgroundBlur();
+        cancelReturnFeedback();
+        if(dialog.isShowing()&&glassDialogOwners.containsKey(dialog))return;
+        final long owner=++glassDialogGeneration;
+        boolean first=glassDialogOwners.isEmpty();glassDialogOwners.put(dialog,owner);
+        activeGlassDialogCount=glassDialogOwners.size();
+        if(first)applyDialogBackgroundBlur();
         dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
             @Override
             public void onDismiss(android.content.DialogInterface dismissed) {
-                activeGlassDialogCount = Math.max(0, activeGlassDialogCount - 1);
+                Long current=glassDialogOwners.get(dialog);
+                if(current==null||current.longValue()!=owner)return;
+                glassDialogOwners.remove(dialog);activeGlassDialogCount=glassDialogOwners.size();
                 if (activeGlassDialogCount == 0) {
                     clearDialogBackgroundBlur();
+                    if(root!=null)root.post(()->maybeShowRecognitionSetup());
                 }
             }
         });
-        dialog.show();
         Window dialogWindow = dialog.getWindow();
         if (dialogWindow != null) {
             dialogWindow.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             dialogWindow.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            dialogWindow.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
+            // This also marks dimAmount as explicit, so decor/theme creation
+            // cannot replace it with the platform default during show().
+            dialogWindow.setDimAmount(nightDecoration()?0.10f:0.07f);
             WindowManager.LayoutParams attributes = dialogWindow.getAttributes();
             attributes.dimAmount = nightDecoration() ? 0.10f : 0.07f;
             if (platformBlurSupported()) {
-                try {
-                    attributes.setBlurBehindRadius(dp(12));
-                    dialogWindow.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
-                } catch (Throwable ignored) {
-                    dialogWindow.clearFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
-                }
+                try {attributes.setBlurBehindRadius(0);}catch(Throwable ignored){}
             }
             dialogWindow.setAttributes(attributes);
         }
-        dialog.setContentView(contentView);
+        // Configure the first window frame before show: the root supplies the only blur.
+        try{dialog.show();}catch(RuntimeException unavailable){
+            Long current=glassDialogOwners.get(dialog);
+            if(current!=null&&current.longValue()==owner){glassDialogOwners.remove(dialog);activeGlassDialogCount=glassDialogOwners.size();}
+            if(activeGlassDialogCount==0)clearDialogBackgroundBlur();throw unavailable;
+        }
+        PaperComponents.applyDialogTypography(contentView);
+        // The legacy custom dialogs share the same outer gutter as FoodUi's native dialogs.
+        // Normalize only the outer content padding, not field / button / nested card spacing.
+        if(!(contentView instanceof ScrollView))contentView.setPadding(dp(24),contentView.getPaddingTop(),dp(24),contentView.getPaddingBottom());
+        dialog.setContentView(PaperComponents.dialogContent(this,contentView));
         if (dialogWindow != null) {
             dialogWindow.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                     | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM);
             dialogWindow.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                     | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
-            dialogWindow.setLayout((int) (getResources().getDisplayMetrics().widthPixels * 0.86f),
-                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            PaperComponents.sizeDialog(dialog);
         }
     }
 
@@ -22699,10 +18269,12 @@ public class MainActivity extends Activity {
         title.setPadding(0, 0, 0, dp(10));
         box.addView(title);
 
-        ScrollView scroll = new ScrollView(this);
+        ScrollView scroll = new MaxHeightScrollView(this, dp(426));
+        scroll.setTag("book_font_choice_scroll");
         disableForceDark(scroll);
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout list = new LinearLayout(this);
+        list.setTag("book_font_choice_list");
         list.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(list);
         for (int i = 0; i < items.length && i < values.length; i++) {
@@ -22729,7 +18301,8 @@ public class MainActivity extends Activity {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(14), 0, dp(14), 0);
+            row.setPadding(dp(14), dp(8), dp(14), dp(8));
+            row.setMinimumHeight(dp(remote ? 68 : 58));
             row.setClickable(true);
             row.setBackground(round(i == selectedIndex ? accentSoft : Color.TRANSPARENT, dp(16), 0, 0));
             attachPressAnimation(row);
@@ -22754,11 +18327,11 @@ public class MainActivity extends Activity {
                 row.addView(action, new LinearLayout.LayoutParams(dp(36), dp(36)));
             }
             row.setOnClickListener(choose);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(remote ? 68 : 58));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             lp.topMargin = dp(6);
             list.addView(row, lp);
         }
-        box.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(426)));
+        box.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         showRoundedDialog(dialog, box);
     }
 
@@ -22918,6 +18491,7 @@ public class MainActivity extends Activity {
     }
 
     private void applyBookFontPreview(TextView view, String style, boolean selected) {
+        view.setTag("dialog_font_preview");
         int weight = selected ? Typeface.BOLD : Typeface.NORMAL;
         view.getPaint().setTextSkewX(0f);
         view.setTextScaleX(1f);
@@ -22963,8 +18537,8 @@ public class MainActivity extends Activity {
             navHost.setLayoutParams(navLp);
             navHost.setPadding(dp(7), dp(7), dp(7), dp(7));
             navHost.setBackgroundColor(Color.TRANSPARENT);
-            if (navHost instanceof LiquidGlassNavLayout) {
-                ((LiquidGlassNavLayout) navHost).refreshGlass();
+            if (navHost instanceof PaperNavLayout) {
+                ((PaperNavLayout) navHost).refreshPaper();
             }
             navHost.setElevation(0f);
             updateNavIndicator(false);
@@ -22991,6 +18565,9 @@ public class MainActivity extends Activity {
         TextView text = new TextView(this);
         disableForceDark(text);
         text.setText(value);
+        if("‹".equals(value))text.setContentDescription("返回上一页");
+        else if("×".equals(value))text.setContentDescription("关闭");
+        else if("↗".equals(value))text.setContentDescription("分享记录本");
         text.setTextSize(scaled(sp));
         text.setTextColor(themedTextColor(color));
         text.setIncludeFontPadding(true);
@@ -23000,31 +18577,8 @@ public class MainActivity extends Activity {
         return text;
     }
 
-    private void applyGlobalTextTypeface(TextView view, boolean bold) {
-        if (view == null || !globalFontFollowsBookEnabled()) {
-            return;
-        }
-        view.setTypeface(bookDetailTypeface(bold));
-    }
+    private void applyGlobalTextTypeface(TextView view, boolean bold) { if(view!=null)view.setTypeface(AppTypography.typeface(this,bold)); }
 
-    private void applyGlobalTypefaceRecursive(View view, boolean enabled) {
-        if (view == null) {
-            return;
-        }
-        if (view instanceof TextView) {
-            TextView text = (TextView) view;
-            Typeface current = text.getTypeface();
-            boolean bold = current != null && current.isBold();
-            text.setTypeface(enabled ? bookDetailTypeface(bold)
-                    : Typeface.create(Typeface.DEFAULT, bold ? Typeface.BOLD : Typeface.NORMAL));
-        }
-        if (view instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) view;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                applyGlobalTypefaceRecursive(group.getChildAt(i), enabled);
-            }
-        }
-    }
 
     private void resetSystemTypefaceRecursive(View view) {
         if (view == null) {
@@ -23034,7 +18588,7 @@ public class MainActivity extends Activity {
             TextView text = (TextView) view;
             Typeface current = text.getTypeface();
             boolean bold = current != null && current.isBold();
-            text.setTypeface(Typeface.create(Typeface.DEFAULT, bold ? Typeface.BOLD : Typeface.NORMAL));
+            text.setTypeface(AppTypography.typeface(this,bold));
         }
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup) view;
@@ -23044,14 +18598,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void refreshCurrentSurfaceTypefaces() {
-        applyGlobalTypefaceRecursive(content, globalFontFollowsBookEnabled());
-        resetSystemTypefaceRecursive(activeStickyHeader);
-        resetSystemTypefaceRecursive(navHost);
-        if (content != null) {
-            content.invalidate();
-        }
-    }
 
     private TextView pill(String value, int bg, int textColor, int sp) {
         TextView text = label(value, sp, textColor, true);
@@ -23075,7 +18621,7 @@ public class MainActivity extends Activity {
         TextView s = label(subtitle, 15, Color.rgb(126, 126, 126), false);
         s.setGravity(Gravity.CENTER);
         s.setPadding(0, dp(8), 0, 0);
-        box.addView(icon);
+        if(emoji!=null&&!emoji.isEmpty())box.addView(icon);
         box.addView(t);
         box.addView(s);
         return box;
@@ -23090,7 +18636,9 @@ public class MainActivity extends Activity {
     private GradientDrawable round(int color, int radius, int strokeColor, int strokeWidth) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(color);
-        d.setCornerRadius(radius);
+        int softerRadius = radius;
+        if(radius>0)softerRadius=Math.max(radius,radius>=dp(20)?dp(UiTokens.DIALOG_RADIUS):dp(UiTokens.CONTROL_RADIUS));
+        d.setCornerRadius(softerRadius);
         if (strokeWidth > 0) {
             d.setStroke(strokeWidth, strokeColor);
         }
@@ -23099,7 +18647,7 @@ public class MainActivity extends Activity {
 
     private Drawable pageBackground() {
         applyDecoration();
-        return new WavyBackground(pageBgTop, pageBgBottom, accentSoft, textureMode);
+        return new PaperComponents.Paper(this, nightDecoration(),dp(UiTokens.HEADER_CORE));
     }
 
     private int adjustAlpha(int color, int alpha) {
@@ -23205,31 +18753,11 @@ public class MainActivity extends Activity {
         return Math.round(medium + (cozy - medium) * t);
     }
 
-    private int timelineWidth() {
-        String timeline = profile == null ? "bold" : profile.optString("timeline", "bold");
-        return timelineWidthForValue(timeline);
-    }
 
-    private int timelineListInset() {
-        if (!timelineVisible()) {
-            return 0;
-        }
-        int base = spaceByLayout(28, 24, 20);
-        return Math.max(20, base + timelineWidth() - 8);
-    }
 
-    private boolean timelineVisible() {
-        return timelineWidth() > 0;
-    }
 
-    private boolean nightDecoration() {
-        return profile != null && ("night".equals(profile.optString("decoration", "green"))
-                || (followSystemNightMode() && systemNightActive()));
-    }
+    private boolean nightDecoration() { return AppearanceMode.isNight(profile,systemNightActive()); }
 
-    private boolean followSystemNightMode() {
-        return profile != null && profile.optBoolean("followSystemNight", false);
-    }
 
     private boolean systemNightActive() {
         int mode = android.content.res.Resources.getSystem().getConfiguration().uiMode
@@ -23239,99 +18767,44 @@ public class MainActivity extends Activity {
 
     @SuppressWarnings("deprecation")
     private void applyNightModeOverride() {
-        if (profile == null) {
-            return;
+        if(profile==null)return;
+        boolean night=nightDecoration();
+        android.content.res.Configuration current=new android.content.res.Configuration(getResources().getConfiguration());
+        int desired=night?android.content.res.Configuration.UI_MODE_NIGHT_YES:android.content.res.Configuration.UI_MODE_NIGHT_NO;
+        if((current.uiMode&android.content.res.Configuration.UI_MODE_NIGHT_MASK)!=desired){current.uiMode=(current.uiMode&~android.content.res.Configuration.UI_MODE_NIGHT_MASK)|desired;getResources().updateConfiguration(current,getResources().getDisplayMetrics());}
+        int theme=night?R.style.AppNightTheme:R.style.AppDayTheme;
+        setTheme(theme);getTheme().applyStyle(theme,true);
+        if(Build.VERSION.SDK_INT>=29)getTheme().rebase();
+        if(root!=null){
+            // DecorContext can retain a separate theme after the Activity changes.
+            // Align it BEFORE the platform reevaluates the window's dark treatment.
+            View decor=getWindow().getDecorView();
+            android.content.res.Resources.Theme decorTheme=decor.getContext().getTheme();
+            if(decorTheme!=getTheme())decorTheme.setTo(getTheme());
+            disableForceDark(decor);decor.invalidate();decor.requestLayout();
         }
-        try {
-            if (Build.VERSION.SDK_INT >= 31) {
-                android.app.UiModeManager manager = getSystemService(android.app.UiModeManager.class);
-                if (manager != null) {
-                    int mode = followSystemNightMode()
-                            ? manager.getNightMode()
-                            : android.app.UiModeManager.MODE_NIGHT_NO;
-                    if (mode < android.app.UiModeManager.MODE_NIGHT_AUTO
-                            || mode > android.app.UiModeManager.MODE_NIGHT_CUSTOM) {
-                        mode = android.app.UiModeManager.MODE_NIGHT_NO;
-                    }
-                    manager.setApplicationNightMode(mode);
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        int desired = followSystemNightMode() && systemNightActive()
-                ? android.content.res.Configuration.UI_MODE_NIGHT_YES
-                : android.content.res.Configuration.UI_MODE_NIGHT_NO;
-        android.content.res.Configuration current =
-                new android.content.res.Configuration(getResources().getConfiguration());
-        if ((current.uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK) == desired) {
-            return;
-        }
-        current.uiMode = (current.uiMode & ~android.content.res.Configuration.UI_MODE_NIGHT_MASK) | desired;
-        try {
-            getResources().updateConfiguration(current, getResources().getDisplayMetrics());
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private boolean settingsHidden() {
-        return profile != null && profile.optBoolean("hideSettings", false);
-    }
-
-    private boolean stickerGalleryHidden() {
-        return profile != null && profile.optBoolean("hideStickerGallery", false);
-    }
-
-    private boolean calendarHidden() {
-        return profile != null && profile.optBoolean("hideCalendar", false);
-    }
-
-    private boolean footprintCalendarMerged() {
-        return profile == null || profile.optBoolean("mergeFootprintCalendar", true);
-    }
-
-    private int surfaceColor() {
-        return nightDecoration() ? Color.argb(218, 34, 35, 39) : Color.argb(245, 255, 255, 255);
+        try { if(Build.VERSION.SDK_INT>=31){android.app.UiModeManager manager=getSystemService(android.app.UiModeManager.class);if(manager!=null)manager.setApplicationNightMode(night?android.app.UiModeManager.MODE_NIGHT_YES:android.app.UiModeManager.MODE_NIGHT_NO);} }catch(RuntimeException ignored){}
     }
 
     private int dialogSurfaceColor() {
-        return nightDecoration() ? Color.argb(190, 36, 37, 41) : Color.argb(174, 255, 255, 255);
+        return UiTokens.card(nightDecoration());
     }
 
     private int surfaceStrokeColor() {
-        return nightDecoration() ? Color.argb(112, 220, 226, 235) : Color.TRANSPARENT;
+        return UiTokens.line(nightDecoration());
     }
 
-    private int navSurfaceColor() {
-        if (navGlassEnabled()) {
-            return nightDecoration() ? Color.argb(164, 34, 36, 42) : Color.argb(172, 255, 255, 255);
-        }
-        return nightDecoration() ? Color.rgb(28, 29, 32) : Color.WHITE;
-    }
 
-    private int navStrokeColor() {
-        if (navGlassEnabled()) {
-            return nightDecoration() ? Color.argb(72, 255, 255, 255) : Color.argb(104, 255, 255, 255);
-        }
-        return surfaceStrokeColor();
-    }
 
-    private boolean profileGlassCardEnabled() {
-        return profile != null && profile.optBoolean("profileGlassCard", false);
-    }
 
-    private boolean navGlassEnabled() {
-        return profile != null && profile.optBoolean("navGlass", false);
-    }
 
-    private boolean headerTransparentEnabled() {
-        return profile != null && profile.optBoolean("headerTransparent", false);
-    }
 
-    private boolean globalFontFollowsBookEnabled() {
-        return profile != null && profile.optBoolean("globalFontFollowsBook", false);
-    }
 
     private int themedTextColor(int color) {
+        if (Color.alpha(color) > 0 && Math.abs(Color.red(color)-Color.green(color)) < 30
+                && Math.abs(Color.green(color)-Color.blue(color)) < 30 && Color.red(color) < 195) {
+            return Color.red(color) < 90 ? UiTokens.ink(nightDecoration()) : UiTokens.secondary(nightDecoration());
+        }
         if (!nightDecoration()) {
             return color;
         }
@@ -23350,19 +18823,9 @@ public class MainActivity extends Activity {
     }
 
     private GradientDrawable surfaceRound(int radius) {
-        if (nightDecoration()) {
-            return liquidGlassRound(radius);
-        }
-        return round(surfaceColor(), radius, surfaceStrokeColor(), 0);
+        return PaperComponents.rounded(this, nightDecoration());
     }
 
-    private GradientDrawable liquidGlassRound(int radius) {
-        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{Color.argb(226, 48, 50, 55), Color.argb(205, 27, 28, 32)});
-        d.setCornerRadius(radius);
-        d.setStroke(dp(1), surfaceStrokeColor());
-        return d;
-    }
 
     private void updateSystemBars() {
         Window window = getWindow();
@@ -23388,66 +18851,22 @@ public class MainActivity extends Activity {
     }
 
     private void applyDecoration() {
+
         if (profile == null) {
             return;
         }
-        String mode = profile.optString("decoration", "green");
-        if ("yellow".equals(mode)) {
-            accent = Color.rgb(238, 198, 38);
-            accentSoft = Color.rgb(255, 247, 204);
-            pageBgTop = Color.rgb(255, 248, 238);
-            pageBgBottom = Color.rgb(239, 246, 255);
-            textureMode = 1;
-        } else if ("red".equals(mode)) {
-            accent = Color.rgb(242, 103, 82);
-            accentSoft = Color.rgb(255, 226, 222);
-            pageBgTop = Color.rgb(255, 244, 246);
-            pageBgBottom = Color.rgb(237, 247, 255);
-            textureMode = 2;
-        } else if ("blue".equals(mode)) {
-            accent = Color.rgb(71, 157, 216);
-            accentSoft = Color.rgb(219, 240, 255);
-            pageBgTop = Color.rgb(246, 250, 255);
-            pageBgBottom = Color.rgb(239, 247, 241);
-            textureMode = 3;
-        } else if ("night".equals(mode)) {
-            accent = Color.rgb(185, 190, 196);
-            accentSoft = Color.rgb(54, 57, 64);
-            pageBgTop = Color.rgb(9, 11, 13);
-            pageBgBottom = Color.rgb(18, 18, 21);
-            textureMode = 4;
-        } else {
-            accent = Color.rgb(86, 191, 112);
-            accentSoft = Color.rgb(224, 246, 228);
-            pageBgTop = Color.rgb(250, 255, 252);
-            pageBgBottom = Color.rgb(238, 247, 255);
-            textureMode = 0;
-        }
-        if (!"night".equals(mode) && followSystemNightMode() && systemNightActive()) {
-            accent = blendColor(accent, Color.WHITE, 0.26f);
-            accentSoft = Color.rgb(54, 57, 64);
-            pageBgTop = Color.rgb(9, 11, 13);
-            pageBgBottom = Color.rgb(18, 18, 21);
-            textureMode = 4;
-        }
-    }
-
-    private class CalendarCell {
-        String date;
-        String label;
-        boolean header;
-        boolean outMonth;
-
-        CalendarCell(String date, String label, boolean header) {
-            this(date, label, header, false);
-        }
-
-        CalendarCell(String date, String label, boolean header, boolean outMonth) {
-            this.date = date;
-            this.label = label;
-            this.header = header;
-            this.outMonth = outMonth;
-        }
+        String mode = profile.optString("decoration", "yellow");
+        UiTokens.configure(mode);
+        boolean night = nightDecoration();
+        accent = night ? Color.rgb(224,184,103) : Color.rgb(135,88,46);
+        accentSoft = night ? Color.rgb(68,53,39) : Color.rgb(246,226,181);
+        // Paper stays warm; accents still honor the theme explicitly selected in personalization.
+        if ("green".equals(mode)) {accent = Color.rgb(68,133,83);accentSoft = Color.rgb(224,246,228);}
+        else if ("red".equals(mode)) {accent = Color.rgb(169,79,64);accentSoft = Color.rgb(255,226,222);}
+        else if ("blue".equals(mode)) {accent = Color.rgb(48,111,158);accentSoft = Color.rgb(219,240,255);}
+        else if ("night".equals(mode)) {accent=night?Color.rgb(202,211,231):Color.rgb(75,88,112);accentSoft=night?Color.rgb(63,72,90):Color.rgb(220,225,236);}
+        if(night && !"night".equals(mode)){accent=blendColor(accent,Color.WHITE,.35f);accentSoft=blendColor(accentSoft,UiTokens.card(true),.82f);}
+        pageBgTop = UiTokens.paper(night); pageBgBottom = UiTokens.paper(night); textureMode = night ? 4 : 1;
     }
 
     private class MaxHeightScrollView extends ScrollView {
@@ -23460,350 +18879,82 @@ public class MainActivity extends Activity {
 
         @Override
         protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-            int cappedHeight = View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST);
+            int mode=View.MeasureSpec.getMode(heightMeasureSpec);
+            int limit=maxHeight;
+            if(mode!=View.MeasureSpec.UNSPECIFIED)limit=Math.min(limit,View.MeasureSpec.getSize(heightMeasureSpec));
+            int cappedHeight = View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST);
             super.onMeasure(widthMeasureSpec, cappedHeight);
         }
     }
 
-    private class CalendarAdapter extends BaseAdapter {
-        private final List<CalendarCell> cells;
-
-        CalendarAdapter(List<CalendarCell> cells) {
-            this.cells = cells;
-        }
-
-        @Override
-        public int getCount() {
-            return cells.size();
-        }
-
-        @Override
-        public Object getItem(int position) {
-            return cells.get(position);
-        }
-
-        @Override
-        public long getItemId(int position) {
-            return position;
-        }
-
-        @Override
-        public View getView(int position, View convertView, ViewGroup parent) {
-            CalendarCell cell = cells.get(position);
-            LinearLayout box = new LinearLayout(MainActivity.this);
-            box.setOrientation(LinearLayout.VERTICAL);
-            box.setGravity(Gravity.CENTER);
-            box.setClipToPadding(false);
-            box.setPadding(dp(2), dp(3), dp(2), dp(3));
-            if (cell.header) {
-                box.addView(label(cell.label, 16, Color.rgb(90, 90, 90), true));
-                return box;
-            }
-            if (cell.date.length() == 0) {
-                return box;
-            }
-            boolean selected = cell.date.equals(selectedCalendarDate);
-            boolean today = cell.date.equals(dateKey(Calendar.getInstance()));
-            int dayColor = cell.outMonth ? Color.rgb(165, 165, 165) : Color.rgb(35, 35, 35);
-            TextView day = label(cell.label, 18, selected ? Color.WHITE : dayColor, true);
-            day.setGravity(Gravity.CENTER);
-            if (selected) {
-                day.setBackground(round(accent, dp(20), accentSoft, dp(2)));
-            } else if (today) {
-                day.setBackground(round(nightDecoration() ? Color.rgb(36, 37, 40) : Color.WHITE, dp(20), accentSoft, dp(2)));
-            }
-            LinearLayout.LayoutParams dayLp = new LinearLayout.LayoutParams(dp(40), dp(40));
-            box.addView(day, dayLp);
-            String holiday = holidayLabel(cell.date);
-            if (holiday.length() > 0) {
-                TextView holidayText = label(holiday, 9, cell.outMonth ? Color.rgb(165, 165, 165) : accent, true);
-                holidayText.setGravity(Gravity.CENTER);
-                holidayText.setSingleLine(true);
-                box.addView(holidayText, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(14)));
-            }
-            LinearLayout moodRow = row(Gravity.CENTER);
-            moodRow.setGravity(Gravity.CENTER);
-            String[] moods = moodEmojis(cell.date);
-            for (int i = 0; i < moods.length; i++) {
-                TextView mood = label(moods[i], 14, Color.rgb(35, 35, 35), false);
-                mood.setGravity(Gravity.CENTER);
-                LinearLayout.LayoutParams moodLp = new LinearLayout.LayoutParams(dp(20), dp(20));
-                moodRow.addView(mood, moodLp);
-            }
-            box.addView(moodRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22)));
-            return box;
-        }
-    }
-
+    /** A calendar is one non-scrolling grid inside the page's ScrollView. */
     private class StickyGlassHeader extends FrameLayout {
-        private final ImageView blurLayer;
-        private final Drawable backdrop;
-        private boolean transparentMode;
-        private View source;
-        private Bitmap snapshot;
-        private Bitmap workingSnapshot;
-        private int[] blurSourcePixels;
-        private int[] blurHorizontalPixels;
-        private int[] blurOutputPixels;
-        private boolean snapshotDirty = true;
-        private boolean capturePosted;
-        private boolean continuous;
-        private boolean continuousRequested;
-        private final Handler captureHandler = new Handler(Looper.getMainLooper());
-        private final Runnable captureRunnable = new Runnable() {
-            @Override
-            public void run() {
-                capturePosted = false;
-                if (source == null || !isAttachedToWindow()) {
-                    return;
-                }
-                captureSnapshotNow();
-                updateGlassProgress();
-            }
-        };
-        private final android.view.ViewTreeObserver.OnScrollChangedListener scrollListener =
-                new android.view.ViewTreeObserver.OnScrollChangedListener() {
-                    @Override
-                    public void onScrollChanged() {
-                        updateGlassProgress();
-                        requestSnapshot();
-                    }
-                };
+        private final Paint paperFadeMask = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private int veilHeight;
+        private boolean shieldTouch;
 
         StickyGlassHeader(Context context) {
             super(context);
+            setTag("sticky_paper_header");
             setWillNotDraw(false);
             setClipChildren(false);
             setClipToPadding(false);
             disableForceDark(this);
-            transparentMode = headerTransparentEnabled();
-            backdrop = pageBackground();
-            blurLayer = new ImageView(context);
-            blurLayer.setScaleType(ImageView.ScaleType.FIT_XY);
-            blurLayer.setAlpha(0f);
-            updateColorFilter();
-            disableForceDark(blurLayer);
-            addView(blurLayer, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            paperFadeMask.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN));
         }
 
-        void setSource(View source, boolean continuous) {
-            detachSourceListener();
-            this.source = source;
-            this.continuousRequested = continuous;
-            this.continuous = continuousRequested && transparentMode;
-            snapshotDirty = true;
-            if (transparentMode && source != null && source.getViewTreeObserver().isAlive()) {
-                source.getViewTreeObserver().addOnScrollChangedListener(scrollListener);
-            }
-            post(new Runnable() {
-                @Override
-                public void run() {
-                    updateGlassProgress();
-                    requestSnapshot();
-                }
-            });
+        void setSource(View source, boolean continuous) { }
+        void setTransparentMode(boolean enabled) { invalidate(); }
+
+        @Override public boolean onTouchEvent(MotionEvent event){
+            if(event.getActionMasked()==MotionEvent.ACTION_DOWN)shieldTouch=event.getY()<dp(UiTokens.HEADER_CORE);
+            boolean consumed=shieldTouch;
+            if(event.getActionMasked()==MotionEvent.ACTION_UP||event.getActionMasked()==MotionEvent.ACTION_CANCEL)shieldTouch=false;
+            return consumed;
         }
 
-        void setTransparentMode(boolean enabled) {
-            if (transparentMode == enabled) {
-                return;
-            }
-            detachSourceListener();
-            transparentMode = enabled;
-            continuous = continuousRequested && transparentMode;
-            updateColorFilter();
-            if (transparentMode && source != null && source.getViewTreeObserver().isAlive()) {
-                source.getViewTreeObserver().addOnScrollChangedListener(scrollListener);
-            }
-            snapshotDirty = true;
-            requestSnapshot();
-            invalidate();
-        }
-
-        private void updateColorFilter() {
-            ColorMatrix colorMatrix = new ColorMatrix();
-            colorMatrix.setSaturation(transparentMode ? (nightDecoration() ? 1.12f : 1.28f) : 1f);
-            blurLayer.setColorFilter(new ColorMatrixColorFilter(colorMatrix));
-        }
-
-        private void detachSourceListener() {
-            if (source != null && source.getViewTreeObserver().isAlive()) {
-                source.getViewTreeObserver().removeOnScrollChangedListener(scrollListener);
-            }
-        }
-
-        @Override
-        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
-            super.onSizeChanged(w, h, oldw, oldh);
-            updateGlassProgress();
-            requestSnapshot();
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
+        @Override protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            if (continuous && isShown()) {
-                updateGlassProgress();
-                requestSnapshot();
-                postInvalidateOnAnimation();
-            }
+            drawPaperVeil(canvas);
         }
 
-        private void updateGlassProgress() {
-            blurLayer.setAlpha(1f);
-            blurLayer.setVisibility(View.VISIBLE);
-            if (snapshotDirty) {
-                requestSnapshot();
+        private void drawPaperVeil(Canvas canvas) {
+            if(nightDecoration())return;
+            int height = getHeight();
+            if (height <= 0) return;
+            int paper = UiTokens.paper(nightDecoration());
+            int core = Math.max(1, height - dp(UiTokens.HEADER_FADE));
+            if (veilHeight != height) {
+                // RGB never owns the fade: only this mask's alpha is applied to
+                // the same drawColor paper fill used by the page background.
+                paperFadeMask.setShader(new LinearGradient(0, core, 0, height,
+                        new int[]{Color.BLACK, Color.BLACK, 0xee000000, 0x9c000000, 0x34000000, Color.TRANSPARENT},
+                        new float[]{0f, .02f, .24f, .56f, .82f, 1f}, Shader.TileMode.CLAMP));
+                veilHeight = height;
             }
-        }
-
-        private void requestSnapshot() {
-            snapshotDirty = true;
-            if (!capturePosted && isAttachedToWindow()) {
-                capturePosted = true;
-                captureHandler.postDelayed(captureRunnable, transparentMode ? 32L : 0L);
-            }
-        }
-
-        private void captureSnapshotNow() {
-            if (!snapshotDirty || source == null || getWidth() <= 0 || getHeight() <= 0
-                    || source.getWidth() <= 0 || source.getHeight() <= 0) {
-                return;
-            }
-            snapshotDirty = false;
-            int sample = transparentMode ? 8 : 2;
-            int width = Math.max(1, getWidth() / sample);
-            int height = Math.max(1, getHeight() / sample);
-            Bitmap target;
-            if (transparentMode) {
-                if (workingSnapshot == null || workingSnapshot.isRecycled()
-                        || workingSnapshot.getWidth() != width || workingSnapshot.getHeight() != height) {
-                    if (workingSnapshot != null && !workingSnapshot.isRecycled()) {
-                        workingSnapshot.recycle();
-                    }
-                    workingSnapshot = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-                }
-                target = workingSnapshot;
-            } else {
-                if (snapshot == null || snapshot.isRecycled()
-                        || snapshot.getWidth() != width || snapshot.getHeight() != height) {
-                    blurLayer.setImageDrawable(null);
-                    if (snapshot != null && !snapshot.isRecycled()) {
-                        snapshot.recycle();
-                    }
-                    snapshot = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-                }
-                target = snapshot;
-            }
-            target.eraseColor(Color.TRANSPARENT);
-            Canvas low = new Canvas(target);
-            low.scale(width / (float) getWidth(), height / (float) getHeight());
-            int backdropHeight = root == null ? source.getHeight() : root.getHeight();
-            backdrop.setBounds(0, 0, getWidth(), Math.max(getHeight(), backdropHeight));
-            backdrop.draw(low);
-            ScrollView captureScroll = source instanceof ScrollView ? (ScrollView) source : null;
-            boolean drawContent = transparentMode && (captureScroll == null || captureScroll.getScrollY() > 0);
-            if (drawContent && captureScroll != null && captureScroll.getChildCount() > 0) {
-                View child = captureScroll.getChildAt(0);
-                low.save();
-                low.translate(captureScroll.getLeft(), captureScroll.getTop() - captureScroll.getScrollY());
-                child.draw(low);
-                low.restore();
-            } else if (drawContent) {
-                source.draw(low);
-            }
-            if (transparentMode) {
-                boxBlurSnapshot(target, 6);
-                Bitmap previous = snapshot;
-                snapshot = target;
-                workingSnapshot = previous;
-            }
-            blurLayer.setImageBitmap(snapshot);
-            blurLayer.invalidate();
-        }
-
-        private void boxBlurSnapshot(Bitmap bitmap, int radius) {
-            if (bitmap == null || radius <= 0) {
-                return;
-            }
-            int width = bitmap.getWidth();
-            int height = bitmap.getHeight();
-            if (width < 2 || height < 2) {
-                return;
-            }
-            int size = width * height;
-            if (blurSourcePixels == null || blurSourcePixels.length != size) {
-                blurSourcePixels = new int[size];
-                blurHorizontalPixels = new int[size];
-                blurOutputPixels = new int[size];
-            }
-            bitmap.getPixels(blurSourcePixels, 0, width, 0, 0, width, height);
-            int window = radius * 2 + 1;
-            for (int y = 0; y < height; y++) {
-                int row = y * width;
-                for (int x = 0; x < width; x++) {
-                    int a = 0, r = 0, g = 0, b = 0;
-                    for (int k = -radius; k <= radius; k++) {
-                        int sx = Math.max(0, Math.min(width - 1, x + k));
-                        int color = blurSourcePixels[row + sx];
-                        a += Color.alpha(color);
-                        r += Color.red(color);
-                        g += Color.green(color);
-                        b += Color.blue(color);
-                    }
-                    blurHorizontalPixels[row + x] = Color.argb(a / window, r / window, g / window, b / window);
-                }
-            }
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    int a = 0, r = 0, g = 0, b = 0;
-                    for (int k = -radius; k <= radius; k++) {
-                        int sy = Math.max(0, Math.min(height - 1, y + k));
-                        int color = blurHorizontalPixels[sy * width + x];
-                        a += Color.alpha(color);
-                        r += Color.red(color);
-                        g += Color.green(color);
-                        b += Color.blue(color);
-                    }
-                    blurOutputPixels[y * width + x] = Color.argb(a / window, r / window, g / window, b / window);
-                }
-            }
-            bitmap.setPixels(blurOutputPixels, 0, width, 0, 0, width, height);
-        }
-
-        @Override
-        protected void onDetachedFromWindow() {
-            detachSourceListener();
-            captureHandler.removeCallbacks(captureRunnable);
-            capturePosted = false;
-            blurLayer.setImageDrawable(null);
-            if (snapshot != null && !snapshot.isRecycled()) {
-                snapshot.recycle();
-            }
-            snapshot = null;
-            if (workingSnapshot != null && !workingSnapshot.isRecycled()) {
-                workingSnapshot.recycle();
-            }
-            workingSnapshot = null;
-            blurSourcePixels = null;
-            blurHorizontalPixels = null;
-            blurOutputPixels = null;
-            source = null;
-            if (activeStickyHeader == this) {
-                activeStickyHeader = null;
-            }
-            super.onDetachedFromWindow();
+            int saved=canvas.save();
+            try{canvas.clipRect(0,0,getWidth(),core);canvas.drawColor(paper);}finally{canvas.restoreToCount(saved);}
+            // Isolate only the small fade strip. No full-screen bitmap or
+            // software layer, and no painted dark/gray shadow below the header.
+            int layer=canvas.saveLayer(0,core,getWidth(),height,null);
+            try{
+                canvas.clipRect(0,core,getWidth(),height);
+                canvas.drawColor(paper);
+                canvas.drawRect(0,core,getWidth(),height,paperFadeMask);
+            }finally{canvas.restoreToCount(layer);}
         }
     }
 
     private class ElasticScrollView extends ScrollView {
         private float lastY;
         private float elasticOffset;
+        private boolean headerClipped;
 
         ElasticScrollView(Context context) {
             super(context);
         }
+
+        @Override protected float getBottomFadingEdgeStrength(){return headerClipped?0:super.getBottomFadingEdgeStrength();}
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
@@ -24249,146 +19400,357 @@ public class MainActivity extends Activity {
         }
     }
 
+    private BookOpenView bookOpeningOverlay;
+
+    /** The selected cover grows into the real sheet and opens around its left spine. */
     private class BookOpenView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF start = new RectF();
-        private final RectF target = new RectF();
-        private final RectF current = new RectF();
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final RectF start = new RectF(), target = new RectF(), current = new RectF();
+        private final RectF localPaper = new RectF();
+        private final Path paperCaptureClip=new Path(),pageOutline=new Path(),projectedCover=new Path();
+        private float sourceCornerX,sourceCornerY;
+        private float paperElevation,paperTranslationZ;
+        private final Matrix coverMatrix = new Matrix();
+        private final android.animation.TimeInterpolator growEase=UiTokens.motionEaseSoft();
+        private final float[] coverSource = new float[8], coverDestination = new float[8];
         private final String date;
-        private float progress = 0f;
-        private Runnable endAction;
-
-        BookOpenView(Context context, String date) {
-            super(context);
-            this.date = date;
-            setWillNotDraw(false);
-            setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        }
-
-        void setSource(View source) {
-            if (source == null || root == null) {
-                start.set(dp(80), dp(190), getResources().getDisplayMetrics().widthPixels - dp(80), dp(380));
-                return;
+        private Bitmap outgoingScreen, pageImage, coverImage;
+        private Canvas pageCanvas;
+        private boolean mediaRefreshPosted;
+        private final Runnable refreshMedia = new Runnable() {
+            @Override public void run() {
+                mediaRefreshPosted = false;
+                if (!ownsDetail() || !paperHidden || pageCanvas == null
+                        || pageImage == null || pageImage.isRecycled()) return;
+                if (paper.getWidth() != pageImage.getWidth()
+                        || paper.getHeight() != pageImage.getHeight()) { finish(); return; }
+                try {
+                    drawPaperTexture();
+                    invalidate();
+                } catch (OutOfMemoryError | RuntimeException unavailable) { finish(); }
             }
-            int[] src = new int[2];
-            int[] base = new int[2];
-            source.getLocationOnScreen(src);
-            root.getLocationOnScreen(base);
-            start.set(src[0] - base[0], src[1] - base[1],
-                    src[0] - base[0] + source.getWidth(), src[1] - base[1] + source.getHeight());
+        };
+        private LinearGradient coverBack, spineShadow;
+        private ValueAnimator animator;
+        private ViewTreeObserver.OnPreDrawListener pending;
+        private View paper, sourceCover;
+        private float paperAlpha = 1f, progress;
+        private boolean finished, paperHidden,closing;
+        private View closingDestination,shelfCover;
+        private float shelfAlpha,shelfElevation,shelfZ,closingStartProgress,closingCornerX,closingCornerY;
+        private final RectF closingFrom=new RectF();
+        private int closingLayoutPass;
+        private Runnable endAction;
+        BookOpenView(Context context, String date) {
+            super(context); this.date = date;
+            setWillNotDraw(false);
+            setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
 
-        void start(final Runnable endAction) {
-            this.endAction = endAction;
-            post(new Runnable() {
-                @Override
-                public void run() {
-                    if (start.width() <= 0 || start.height() <= 0) {
-                        start.set(dp(80), dp(190), getWidth() - dp(80), dp(380));
+        void setSource(View source){setSource(source,true);}
+        private void setSource(View source,boolean captureBackdrop) {
+            // Use the visible cover, excluding the date caption below a grid/carousel book.
+            View cover = source == null ? null : source.findViewWithTag("footprint_plain_cover");
+            if (cover != null) source = cover;
+            if (source != null && root != null && source.getWidth() > 0 && source.getHeight() > 0) {
+                sourceCover = source;
+                // Map through the carousel and press transforms into this root's coordinates.
+                // getWidth()/getHeight() alone would reopen a scaled cover at a larger size.
+                float[] corners = {0, 0, source.getWidth(), 0,
+                        source.getWidth(), source.getHeight(), 0, source.getHeight()};
+                View node = source;
+                while (node != root) {
+                    node.getMatrix().mapPoints(corners);
+                    ViewParent parent = node.getParent();
+                    if (!(parent instanceof View)) { sourceCover = null; break; }
+                    View parentView = (View) parent;
+                    float x = node.getLeft()-parentView.getScrollX();
+                    float y = node.getTop()-parentView.getScrollY();
+                    for (int i=0; i<corners.length; i+=2) { corners[i]+=x; corners[i+1]+=y; }
+                    node = parentView;
+                }
+                if (sourceCover != null) {
+                    start.set(corners[0],corners[1],corners[0],corners[1]);
+                    for (int i=2; i<corners.length; i+=2) {
+                        start.left=Math.min(start.left,corners[i]); start.right=Math.max(start.right,corners[i]);
+                        start.top=Math.min(start.top,corners[i+1]); start.bottom=Math.max(start.bottom,corners[i+1]);
                     }
-                    float targetW = Math.min(getWidth() - dp(48), dp(340));
-                    float targetH = Math.min(getHeight() - dp(170), dp(520));
-                    float left = (getWidth() - targetW) / 2f;
-                    float top = Math.max(dp(86), (getHeight() - targetH) / 2f - dp(18));
-                    target.set(left, top, left + targetW, top + targetH);
-                    ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
-                    animator.setDuration(860);
-                    animator.setInterpolator(new android.view.animation.DecelerateInterpolator(1.25f));
-                    animator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-                        @Override
-                        public void onAnimationUpdate(ValueAnimator animation) {
-                            progress = (Float) animation.getAnimatedValue();
-                            if (progress > 0.74f) {
-                                setAlpha(Math.max(0f, (1f - progress) / 0.26f));
-                            } else {
-                                setAlpha(1f);
-                            }
-                            invalidate();
-                        }
+                }
+            }
+            if(cover==null)sourceCover=null;
+            // One short-lived snapshot preserves the shelf until the growing book reveals its page.
+            // It is never stored, and capture failure leaves a fully usable live detail page.
+            if (captureBackdrop&&root != null && root.getWidth() > 0 && root.getHeight() > 0) {
+                try {
+                    outgoingScreen = Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);
+                    root.draw(new Canvas(outgoingScreen));
+                } catch (OutOfMemoryError | RuntimeException unavailable) {
+                    recycle(outgoingScreen); outgoingScreen = null;
+                }
+            }
+        }
+
+        void start(Runnable endAction) {
+            if (finished) { if (endAction != null) endAction.run(); return; }
+            this.endAction = endAction;
+            pending = new ViewTreeObserver.OnPreDrawListener() {
+                @Override public boolean onPreDraw() {
+                    if(pending!=this){if(getViewTreeObserver().isAlive())getViewTreeObserver().removeOnPreDrawListener(this);return true;}
+                    removePending();
+                    if (!ownsDetail() || !preparePaper()) { finish(); return true; }
+                    animator = ValueAnimator.ofFloat(0f, 1f);
+                    animator.setDuration(UiTokens.BOOK_OPEN_MS);
+                    // A real clock keeps the cover reveal visible instead of front-loading it.
+                    animator.setInterpolator(new android.view.animation.LinearInterpolator());
+                    animator.addUpdateListener(value -> {
+                        if (!ownsDetail()) { finish(); return; }
+                        progress = (Float) value.getAnimatedValue(); invalidate();
                     });
                     animator.addListener(new android.animation.AnimatorListenerAdapter() {
-                        @Override
-                        public void onAnimationEnd(android.animation.Animator animation) {
-                            if (BookOpenView.this.endAction != null) {
-                                BookOpenView.this.endAction.run();
-                            }
-                        }
+                        @Override public void onAnimationEnd(android.animation.Animator value) { finish(); }
                     });
                     animator.start();
+                    return true;
                 }
-            });
+            };
+            getViewTreeObserver().addOnPreDrawListener(pending);
+            invalidate();
         }
 
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            paint.setColor(Color.argb((int) (92 * progress), 0, 0, 0));
-            canvas.drawRect(0, 0, getWidth(), getHeight(), paint);
-            float eased = 1f - (float) Math.pow(1f - progress, 2.2);
-            current.set(
-                    lerp(start.left, target.left, eased),
-                    lerp(start.top, target.top, eased),
-                    lerp(start.right, target.right, eased),
-                    lerp(start.bottom, target.bottom, eased)
-            );
-            float radius = dp(18);
-            paint.setColor(Color.argb(46, 0, 0, 0));
-            RectF shadow = new RectF(current);
-            shadow.offset(0, dp(10) * progress);
-            canvas.drawRoundRect(shadow, radius, radius, paint);
-
-            Drawable paper = new NotebookPageDrawable();
-            paper.setBounds(Math.round(current.left), Math.round(current.top),
-                    Math.round(current.right), Math.round(current.bottom));
-            paper.draw(canvas);
-            drawOpenNotebookPreview(canvas, current);
-
-            int save = canvas.save();
-            float flip = Math.min(1f, Math.max(0f, (progress - 0.10f) / 0.82f));
-            canvas.rotate(-108f * flip, current.left + dp(4), current.centerY());
-            Drawable cover = new BookCoverDrawable(date, bookPalette(date, accent), bookCoverStyle());
-            cover.setBounds(Math.round(current.left), Math.round(current.top),
-                    Math.round(current.right), Math.round(current.bottom));
-            cover.draw(canvas);
-            canvas.restoreToCount(save);
-
-            if (flip > 0.08f) {
-                paint.setColor(Color.argb((int) (26 * flip), 255, 255, 255));
-                canvas.drawRoundRect(current, radius, radius, paint);
-            }
+        private boolean ownsDetail(){
+            if(finished||bookOpeningOverlay!=this||!isAttachedToWindow())return false;
+            if(closing)return !inBookDetail&&closingDestination!=null&&closingDestination.getParent()==content&&content.indexOfChild(closingDestination)>=0;
+            return inBookDetail&&date.equals(bookDetailDate);
         }
 
-        private void drawOpenNotebookPreview(Canvas canvas, RectF rect) {
-            JSONObject day = ensureDay(date);
-            paint.setShader(null);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setTypeface(bookDetailTypeface(true));
-            paint.setColor(Color.rgb(92, 82, 66));
-            paint.setTextSize(dp(19));
-            float x = rect.left + dp(34);
-            float y = rect.top + dp(58);
-            canvas.drawText(displayNotebookDate(date), x, y, paint);
-            paint.setTextSize(dp(15));
-            paint.setColor(Color.rgb(74, 70, 66));
-            paint.setTypeface(bookDetailTypeface(false));
-            y += dp(42);
-            List<String> lines = notebookStoryLines(date, day);
-            for (int i = 0; i < Math.min(lines.size(), 4); i++) {
-                String line = fitPreviewLine(lines.get(i), rect.width() - dp(68));
-                canvas.drawText(line, x, y, paint);
-                y += dp(32);
+        void onMediaReady(View media) {
+            if(closing||!ownsDetail()||!paperHidden||pageCanvas==null||media==null)return;
+            View node = media;
+            while (node != paper) {
+                ViewParent parent = node.getParent();
+                if (!(parent instanceof View)) return;
+                node = (View) parent;
+            }
+            // Coalesce images that finish together. Repaint the existing texture only when
+            // media arrives, so the opening sheet stays live without decoding on the UI thread.
+            if (!mediaRefreshPosted) {
+                mediaRefreshPosted = true;
+                postOnAnimation(refreshMedia);
             }
         }
+        private void drawPaperTexture(){
+            pageImage.eraseColor(Color.TRANSPARENT);
+            int saved=pageCanvas.save();
+            try{pageCanvas.clipPath(paperCaptureClip);paper.draw(pageCanvas);}
+            finally{pageCanvas.restoreToCount(saved);}
+        }
+        private void captureCoverTexture(){
+            float sourceWidth=sourceCover==null?start.width():sourceCover.getWidth(),sourceHeight=sourceCover==null?start.height():sourceCover.getHeight();
+            float r=Math.min(dp(UiTokens.BOOK_COVER_RADIUS_DP),Math.min(sourceWidth,sourceHeight)*.5f);
+            sourceCornerX=r*pageImage.getWidth()/Math.max(1,sourceWidth);sourceCornerY=r*pageImage.getHeight()/Math.max(1,sourceHeight);
+            coverImage.eraseColor(Color.TRANSPARENT);Canvas canvas=new Canvas(coverImage);
+            if(sourceCover!=null){
+                canvas.scale(coverImage.getWidth()/(float)sourceCover.getWidth(),coverImage.getHeight()/(float)sourceCover.getHeight());Drawable background=sourceCover.getBackground();
+                if(background instanceof BookCoverDrawable){
+                    // Closing captures a freshly laid-out shelf before its first draw.
+                    // View has not necessarily assigned background bounds yet.
+                    Rect previous=background.copyBounds();
+                    try{background.setBounds(0,0,sourceCover.getWidth(),sourceCover.getHeight());((BookCoverDrawable)background).drawFlat(canvas);}
+                    finally{background.setBounds(previous);}
+                }else sourceCover.draw(canvas);
+            }else{
+                BookCoverDrawable cover=new BookCoverDrawable(date,bookPalette(date,accent),bookCoverStyle());cover.setBounds(0,0,coverImage.getWidth(),coverImage.getHeight());cover.drawFlat(canvas);
+            }
+            sourceCover=null;
+        }
+        private void stopAnimator(){
+            if(animator!=null){ValueAnimator previous=animator;animator=null;previous.removeAllUpdateListeners();previous.removeAllListeners();previous.cancel();}
+        }
+        private boolean captureClosingBackdrop(){
+            BookDetailSwipeFrame frame=bookDetailSwipeFrame;float alpha=frame==null?1:frame.getAlpha();int visibility=getVisibility();
+            try{
+                setVisibility(View.INVISIBLE);if(frame!=null)frame.setAlpha(0);
+                if(outgoingScreen==null||outgoingScreen.isRecycled()||outgoingScreen.getWidth()!=root.getWidth()||outgoingScreen.getHeight()!=root.getHeight()){
+                    recycle(outgoingScreen);outgoingScreen=Bitmap.createBitmap(root.getWidth(),root.getHeight(),Bitmap.Config.ARGB_8888);
+                }
+                outgoingScreen.eraseColor(Color.TRANSPARENT);root.draw(new Canvas(outgoingScreen));return true;
+            }catch(OutOfMemoryError|RuntimeException unavailable){return false;}
+            finally{if(frame!=null)frame.setAlpha(alpha);setVisibility(visibility);}
+        }
+        private View positionShelfCover(){
+            View scope=closingDestination instanceof RootPagePager?((RootPagePager)closingDestination).selectedPage():closingDestination;
+            View found=findBookCover(scope,date);if(found==null)found=findBookCover(scope,bookEntryDate);
+            ScrollView scroll=findFirstScrollView(scope);
+            if(found==null)return null;
+            boolean entry=bookEntryDate!=null&&found.getBackground() instanceof BookCoverDrawable&&bookEntryDate.equals(((BookCoverDrawable)found.getBackground()).date);
+            if(entry&&closingLayoutPass==0&&scroll!=null)scroll.scrollTo(0,bookShelfScrollY);
+            View carousel=scope.findViewWithTag("footprints_book_carousel");if(entry&&carousel instanceof HorizontalScrollView)((HorizontalScrollView)carousel).scrollTo(bookShelfScrollX,0);
+            found.requestRectangleOnScreen(new Rect(0,0,found.getWidth(),found.getHeight()),true);
+            if(scroll!=null){
+                int[] at=new int[2],base=new int[2],nav=new int[2];found.getLocationOnScreen(at);root.getLocationOnScreen(base);navHost.getLocationOnScreen(nav);
+                int top=base[1]+dp(UiTokens.HEADER_CORE+12),bottom=nav[1]-dp(12);int delta=0;
+                if(at[1]<top)delta=at[1]-top;else if(at[1]+found.getHeight()>bottom)delta=at[1]+found.getHeight()-bottom;
+                if(delta!=0)scroll.scrollTo(0,Math.max(0,scroll.getScrollY()+delta));
+            }
+            return found;
+        }
+        boolean beginClosing(boolean favorites){
+            if(finished||pageImage==null||pageImage.isRecycled())return false;
+            removePending();stopAnimator();removeCallbacks(refreshMedia);mediaRefreshPosted=false;
+            closingStartProgress=Math.max(0,Math.min(1,progress));float grown=growEase.getInterpolation(Math.min(1,progress/.30f));
+            closingFrom.set(current.isEmpty()?new RectF(lerp(start.left,target.left,grown),lerp(start.top,target.top,grown),lerp(start.right,target.right,grown),lerp(start.bottom,target.bottom,grown)):current);
+            float radius=Math.min(dp(UiTokens.NOTEBOOK_RADIUS_DP),Math.min(localPaper.width(),localPaper.height())*.5f);
+            closingCornerX=lerp(sourceCornerX,radius,grown);closingCornerY=lerp(sourceCornerY,radius,grown);
+            if(!captureClosingBackdrop())return false;
+            closing=true;setClickable(true);renderBookReturn(favorites);
+            if(content.getChildCount()==0)return false;closingDestination=content.getChildAt(0);
+            endAction=()->{ViewParent parent=getParent();if(parent instanceof ViewGroup)((ViewGroup)parent).removeView(this);};
+            setVisibility(View.VISIBLE);bringToFront();
+            pending=new ViewTreeObserver.OnPreDrawListener(){public boolean onPreDraw(){
+                if(pending!=this){if(getViewTreeObserver().isAlive())getViewTreeObserver().removeOnPreDrawListener(this);return true;}
+                if(!ownsDetail()){finish();return true;}
+                View destination=positionShelfCover();
+                if(closingLayoutPass++==0){root.requestLayout();invalidate();return false;}
+                removePending();
+                try{
+                    if(destination!=null&&destination.getWidth()>0&&destination.getHeight()>0){
+                        setSource(destination,false);captureCoverTexture();shelfCover=destination;shelfAlpha=destination.getAlpha();shelfElevation=destination.getElevation();shelfZ=destination.getTranslationZ();
+                        destination.setElevation(0);destination.setTranslationZ(0);destination.setAlpha(0);
+                    }
+                }catch(OutOfMemoryError|RuntimeException unavailable){finish();return true;}
+                animator=ValueAnimator.ofFloat(closingStartProgress,0);animator.setDuration(Math.round(UiTokens.BOOK_CLOSE_MS*closingStartProgress));animator.setInterpolator(new android.view.animation.LinearInterpolator());
+                animator.addUpdateListener(value->{if(!ownsDetail()){finish();return;}progress=(Float)value.getAnimatedValue();invalidate();});
+                animator.addListener(new android.animation.AnimatorListenerAdapter(){@Override public void onAnimationEnd(android.animation.Animator value){finish();}});animator.start();return true;
+            }};
+            getViewTreeObserver().addOnPreDrawListener(pending);requestLayout();invalidate();return true;
+        }
+        private boolean preparePaper() {
+            paper = bookDetailSwipeFrame == null ? null
+                    : bookDetailSwipeFrame.findViewWithTag(TAG_BOOK_NOTEBOOK_PAGE);
+            if (paper == null || paper.getWidth() <= 0 || paper.getHeight() <= 0) return false;
+            int[] location = new int[2], base = new int[2];
+            paper.getLocationOnScreen(location); getLocationOnScreen(base);
+            target.set(location[0]-base[0], location[1]-base[1],
+                    location[0]-base[0]+paper.getWidth(), location[1]-base[1]+paper.getHeight());
+            if (start.isEmpty()) {
+                float w = target.width() * .38f, h = target.height() * .38f;
+                start.set(target.centerX()-w/2, target.centerY()-h/2,
+                        target.centerX()+w/2, target.centerY()+h/2);
+            }
+            if(sourceCover==null&&!start.isEmpty()){
+                float height=Math.min(start.height(),start.width()*target.height()/target.width());
+                float width=height*target.width()/target.height(),cx=start.centerX(),cy=start.centerY();
+                start.set(cx-width*.5f,cy-height*.5f,cx+width*.5f,cy+height*.5f);
+            }
+            float width=paper.getWidth(),height=paper.getHeight();localPaper.set(0,0,width,height);
+            float radius=Math.min(dp(UiTokens.NOTEBOOK_RADIUS_DP),Math.min(width,height)*.5f);
+            paperCaptureClip.reset();paperCaptureClip.addRoundRect(localPaper,radius,radius,Path.Direction.CW);
+            float sourceWidth=sourceCover==null?start.width():sourceCover.getWidth();
+            float sourceHeight=sourceCover==null?start.height():sourceCover.getHeight();
+            float sourceRadius=Math.min(dp(UiTokens.BOOK_COVER_RADIUS_DP),Math.min(sourceWidth,sourceHeight)*.5f);
+            sourceCornerX=sourceRadius*width/Math.max(1,sourceWidth);sourceCornerY=sourceRadius*height/Math.max(1,sourceHeight);
+            try {
+                pageImage = Bitmap.createBitmap(paper.getWidth(), paper.getHeight(), Bitmap.Config.ARGB_8888);
+                pageCanvas = new Canvas(pageImage);
+                drawPaperTexture();
+                coverImage = Bitmap.createBitmap(paper.getWidth(),paper.getHeight(),Bitmap.Config.ARGB_8888);
+                captureCoverTexture();
+            } catch (OutOfMemoryError | RuntimeException unavailable) { return false; }
+            paperAlpha=paper.getAlpha();paperElevation=paper.getElevation();paperTranslationZ=paper.getTranslationZ();
+            paper.setElevation(0);paper.setTranslationZ(0);paper.setAlpha(0f);paperHidden=true;
+            float w = pageImage.getWidth(), h = pageImage.getHeight();
+            localPaper.set(0, 0, w, h);
+            coverSource[0]=0; coverSource[1]=0; coverSource[2]=w; coverSource[3]=0;
+            coverSource[4]=w; coverSource[5]=h; coverSource[6]=0; coverSource[7]=h;
+            int[] colors = notebookPaperPalette(notebookPageStyle());
+            coverBack = new LinearGradient(0, 0, 0, h, colors[0], colors[1], Shader.TileMode.CLAMP);
+            spineShadow = new LinearGradient(0, 0, w*.24f, 0,
+                    new int[]{0x44000000,0x10000000,0x00000000},
+                    new float[]{0,.35f,1}, Shader.TileMode.CLAMP);
+            return true;
+        }
 
-        private String fitPreviewLine(String text, float maxWidth) {
-            if (paint.measureText(text) <= maxWidth) {
-                return text;
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);if(finished)return;
+            paint.setShader(null);paint.setStyle(Paint.Style.FILL);paint.setColor(Color.WHITE);paint.setAlpha(255);
+            if(outgoingScreen!=null&&!outgoingScreen.isRecycled()){
+                paint.setAlpha(Math.round(255*(closing?Math.min(1,progress/.35f):1-Math.min(1,progress/.35f))));canvas.drawBitmap(outgoingScreen,0,0,paint);paint.setAlpha(255);
             }
-            String suffix = "...";
-            while (text.length() > 2 && paint.measureText(text + suffix) > maxWidth) {
-                text = text.substring(0, text.length() - 1);
+            if(pageImage==null||pageImage.isRecycled())return;
+            float grow=growEase.getInterpolation(Math.min(1,progress/.30f));
+            float shapeGrow=grow;
+            if(closing){float range=Math.min(.30f,closingStartProgress);float fraction=range<=0?1:Math.max(0,Math.min(1,(range-progress)/range));shapeGrow=1-growEase.getInterpolation(fraction);}
+            RectF expanded=closing?closingFrom:target;
+            current.set(lerp(start.left,expanded.left,shapeGrow),lerp(start.top,expanded.top,shapeGrow),lerp(start.right,expanded.right,shapeGrow),lerp(start.bottom,expanded.bottom,shapeGrow));
+            float w=localPaper.width(),h=localPaper.height();
+            float radius=Math.min(dp(UiTokens.NOTEBOOK_RADIUS_DP),Math.min(w,h)*.5f);
+            float rx=Math.min(w*.5f,lerp(sourceCornerX,closing?closingCornerX:radius,closing?shapeGrow:grow)),ry=Math.min(h*.5f,lerp(sourceCornerY,closing?closingCornerY:radius,closing?shapeGrow:grow));
+            pageOutline.reset();pageOutline.addRoundRect(localPaper,rx,ry,Path.Direction.CW);
+            float opening=Math.max(0,Math.min(1,(progress-.22f)/.78f));
+            float angle=(float)Math.PI*.94f*opening,sine=(float)Math.sin(angle),cosine=(float)Math.cos(angle);
+            int coverAlpha=Math.round(255*(1-Math.max(0,(opening-.80f)/.20f)));
+            float perspective=3f*w/(3f*w-w*sine),edge=w*cosine*perspective,top=h*.5f*(1-perspective),bottom=h-top;
+            coverDestination[0]=0;coverDestination[1]=0;coverDestination[2]=edge;coverDestination[3]=top;
+            coverDestination[4]=edge;coverDestination[5]=bottom;coverDestination[6]=0;coverDestination[7]=h;
+            boolean faceVisible=coverAlpha>0&&Math.abs(cosine)>.015f&&coverMatrix.setPolyToPoly(coverSource,0,coverDestination,0,4);
+            projectedCover.reset();if(faceVisible)pageOutline.transform(coverMatrix,projectedCover);
+            int saved=canvas.save();canvas.translate(current.left,current.top);canvas.scale(current.width()/w,current.height()/h);
+            // A closed cover has no paper behind its transparent corner pixels. Once
+            // opening starts, expose only paper genuinely uncovered by the front face.
+            if(opening>0){
+                int paperSave=canvas.save();canvas.clipPath(pageOutline);canvas.clipPath(paperCaptureClip);
+                if(faceVisible&&cosine>=0)canvas.clipOutPath(projectedCover);
+                paint.setShader(null);paint.setAlpha(255);canvas.drawBitmap(pageImage,0,0,paint);
+                if(coverAlpha>0){
+                    paint.setShader(spineShadow);paint.setAlpha(Math.round(160*sine));
+                    canvas.drawRect(0,0,w*.24f,h,paint);paint.setShader(null);paint.setAlpha(255);
+                }
+                canvas.restoreToCount(paperSave);
             }
-            return text + suffix;
+            if(faceVisible){
+                int face=canvas.save();canvas.concat(coverMatrix);canvas.clipPath(pageOutline);paint.setAlpha(coverAlpha);
+                if(cosine>=0&&coverImage!=null&&!coverImage.isRecycled())canvas.drawBitmap(coverImage,0,0,paint);
+                else{paint.setShader(coverBack);canvas.drawPath(pageOutline,paint);paint.setShader(null);}
+                canvas.restoreToCount(face);paint.setAlpha(255);
+            }
+            canvas.restoreToCount(saved);
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent event) {
+            // The next touch belongs to the actual page/navigation, even before opening settles.
+            if(closing)return true;
+            View close=content==null?null:content.findViewWithTag("book_detail_close");
+            if(event.getActionMasked()==MotionEvent.ACTION_DOWN&&(close==null||!containsRawPoint(close,event.getRawX(),event.getRawY())))finish();
+            return false;
+        }
+        private void removePending() {
+            if (pending != null && getViewTreeObserver().isAlive())
+                getViewTreeObserver().removeOnPreDrawListener(pending);
+            pending = null;
+        }
+        void finish() {
+            if (finished) return;
+            finished = true; removePending();
+            removeCallbacks(refreshMedia); mediaRefreshPosted = false; pageCanvas = null;
+            stopAnimator();
+            if(paperHidden&&paper!=null){paper.setElevation(paperElevation);paper.setTranslationZ(paperTranslationZ);paper.setAlpha(paperAlpha);}
+            paperHidden = false;
+            if(shelfCover!=null){shelfCover.setElevation(shelfElevation);shelfCover.setTranslationZ(shelfZ);shelfCover.setAlpha(shelfAlpha);shelfCover=null;}
+            recycle(outgoingScreen); recycle(pageImage); recycle(coverImage);
+            outgoingScreen=pageImage=coverImage=null; sourceCover=null;
+            if (bookOpeningOverlay == this) bookOpeningOverlay=null;
+            Runnable completed=endAction;endAction=null;setClickable(false);
+            if(completed!=null)completed.run();else{ViewParent parent=getParent();if(parent instanceof ViewGroup)((ViewGroup)parent).removeView(this);}
+        }
+        private void recycle(Bitmap bitmap) { if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle(); }
+        @Override protected void onDetachedFromWindow() { finish(); super.onDetachedFromWindow(); }
+        @Override protected void onWindowVisibilityChanged(int visibility) {
+            super.onWindowVisibilityChanged(visibility);
+            if (visibility != VISIBLE && bookOpeningOverlay == this) finish();
+        }
+        @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w,h,oldw,oldh);
+            if (paperHidden && (w != oldw || h != oldh)) finish();
         }
     }
 
@@ -24397,994 +19759,324 @@ public class MainActivity extends Activity {
     }
 
     private class BookDetailSwipeFrame extends FrameLayout {
-        private View currentPage;
-        private View nextPage;
-        private String currentDate;
-        private String nextDate;
-        private float downX;
-        private float downY;
-        private long downTime;
-        private boolean dragging;
-        private boolean edgeDragging;
-        private boolean settling;
-        private int offset;
-        private float travel;
-        private BookPageCurlView curlView;
-        private float flipProgress;
-        private final Paint foldPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Path foldPath = new Path();
-        private final RectF foldRect = new RectF();
-
-        BookDetailSwipeFrame(Context context) {
-            super(context);
-            setWillNotDraw(false);
-            setBackground(pageBackground());
+        private View currentPage,nextPage;
+        private String currentDate,nextDate;
+        private final List<String> pageDates=new ArrayList<>();
+        private NotebookPageMotion motion;
+        private float downX,downY,dragOrigin,position,travel,flipProgress,edgeOrigin;
+        private boolean dragging,edgeDragging,settling,commitTarget,useCurl,gestureCancelled;
+        private int offset,pointer=-1;
+        private long lastDown=Long.MIN_VALUE,trackedTime=Long.MIN_VALUE;
+        private int trackedAction=-1;
+        private float trackedX,trackedY;
+        private android.view.VelocityTracker tracker;
+        private NotebookTurnRenderer turn;
+        private int turnWidth,turnHeight;
+        private boolean mediaRefreshPosted;
+        private final Runnable refreshMedia=()->{
+            mediaRefreshPosted=false;
+            if(turn==null||nextPage==null||!isAttachedToWindow()||bookDetailSwipeFrame!=BookDetailSwipeFrame.this||!inBookDetail)return;
+            try{if(!turn.refresh(bookFlipTarget(offset>0?currentPage:nextPage))){cancelRunningAnimations();return;}invalidate();}
+            catch(OutOfMemoryError|RuntimeException unavailable){cancelRunningAnimations();}
+        };
+        private final GestureSpring spring;
+        private Runnable afterTurn;
+        void finishForClosing(Runnable action){
+            if(motion==null||nextPage==null&&!spring.isRunning()){action.run();return;}
+            spring.cancel();releaseInput();motion.select(Math.round(motion.position()));afterTurn=action;settleMotion(0);
         }
-
-        @Override
-        protected void dispatchDraw(Canvas canvas) {
-            super.dispatchDraw(canvas);
-        }
-
-        private void drawBookFoldBack(Canvas canvas) {
-            if (!bookFlipAnimationEnabled() || offset == 0 || flipProgress <= 0.025f
-                    || flipProgress >= 0.985f || getWidth() <= 0 || getHeight() <= 0
-                    || (!dragging && !settling)) {
-                return;
-            }
-            float p = Math.max(0f, Math.min(1f, flipProgress));
-            float ease = p * p * (3f - 2f * p);
-            float wave = (float) Math.sin(Math.PI * ease);
-            View paper = bookFlipTarget(offset > 0 ? currentPage : nextPage);
-            if (paper == null || paper.getWidth() <= 0 || paper.getHeight() <= 0
-                    || !bookPaperRect(paper, foldRect)) {
-                return;
-            }
-            float pageScale = Math.max(0.045f, Math.min(1f, paper.getScaleX()));
-            float edge = foldRect.left + foldRect.width() * pageScale;
-            float strip = dp(24) + dp(66) * wave;
-            float left = Math.max(foldRect.left, edge - strip * 0.46f);
-            float right = Math.min(foldRect.right, edge + strip * 0.58f);
-            if (right - left < dp(5)) {
-                return;
-            }
-
-            float top = foldRect.top;
-            float bottom = foldRect.bottom;
-            float h = foldRect.height();
-            float topLift = dp(8) * wave;
-            float bottomLift = dp(9) * wave;
-            foldPath.reset();
-            foldPath.moveTo(left, top + topLift);
-            foldPath.cubicTo(edge - strip * 0.18f, top + h * 0.19f,
-                    edge + strip * 0.34f, top + h * 0.52f,
-                    left, bottom - bottomLift);
-            foldPath.lineTo(right, bottom - bottomLift * 0.35f);
-            foldPath.cubicTo(edge + strip * 0.58f, top + h * 0.70f,
-                    edge + strip * 0.26f, top + h * 0.26f,
-                    right, top + topLift * 0.35f);
-            foldPath.close();
-
-            int save = canvas.save();
-            canvas.clipRect(foldRect);
-            int paperLeft = adjustAlpha(blendColor(notebookPaperBackgroundTop(), Color.WHITE, 0.68f), 248);
-            int paperRight = adjustAlpha(Color.WHITE, 246);
-            foldPaint.setShader(new LinearGradient(left, top, right, top,
-                    paperLeft, paperRight, Shader.TileMode.CLAMP));
-            foldPaint.setStyle(Paint.Style.FILL);
-            canvas.drawPath(foldPath, foldPaint);
-            foldPaint.setShader(null);
-
-            foldPaint.setStyle(Paint.Style.STROKE);
-            foldPaint.setStrokeWidth(dp(1));
-            foldPaint.setColor(Color.argb((int) (38 * wave), 190, 178, 150));
-            canvas.drawPath(foldPath, foldPaint);
-            foldPaint.setStyle(Paint.Style.FILL);
-
-            foldPaint.setShader(new LinearGradient(left, top, right, top,
-                    Color.argb((int) (54 * wave), 80, 70, 52),
-                    Color.argb(0, 255, 255, 255), Shader.TileMode.CLAMP));
-            canvas.drawRect(left, top, right, bottom, foldPaint);
-            foldPaint.setShader(null);
-            canvas.restoreToCount(save);
-        }
-
-        private boolean bookPaperRect(View view, RectF out) {
-            int[] self = new int[2];
-            int[] child = new int[2];
-            getLocationOnScreen(self);
-            view.getLocationOnScreen(child);
-            out.set(child[0] - self[0], child[1] - self[1],
-                    child[0] - self[0] + view.getWidth(),
-                    child[1] - self[1] + view.getHeight());
-            return out.width() > 0 && out.height() > 0;
-        }
-
-        private View bookFlipTarget(View page) {
-            View paper = findBookPaperView(page);
-            return paper == null ? page : paper;
-        }
-
-        private View findBookPaperView(View rootView) {
-            if (rootView == null) {
-                return null;
-            }
-            Object tag = rootView.getTag();
-            if (TAG_BOOK_NOTEBOOK_PAGE.equals(tag)) {
-                return rootView;
-            }
-            if (rootView instanceof ViewGroup) {
-                ViewGroup group = (ViewGroup) rootView;
-                for (int i = 0; i < group.getChildCount(); i++) {
-                    View found = findBookPaperView(group.getChildAt(i));
-                    if (found != null) {
-                        return found;
-                    }
-                }
-            }
-            return null;
-        }
-
-        private void resetBookPageAndPaper(View page) {
-            if (page == null) {
-                return;
-            }
-            page.setTranslationX(0f);
-            page.setRotationY(0f);
-            page.setScaleX(1f);
-            page.setScaleY(1f);
-            page.setAlpha(1f);
-            View paper = findBookPaperView(page);
-            if (paper != null && paper != page) {
-                paper.setTranslationX(0f);
-                paper.setRotationY(0f);
-                paper.setScaleX(1f);
-                paper.setScaleY(1f);
-                paper.setAlpha(1f);
-            }
-        }
-
-        private void scaleBookPaper(View page, float scaleX) {
-            View target = bookFlipTarget(page);
-            if (target == null) {
-                return;
-            }
-            target.setPivotX(0f);
-            target.setPivotY(target.getHeight() / 2f);
-            target.setTranslationX(0f);
-            target.setRotationY(0f);
-            target.setAlpha(1f);
-            target.setScaleX(Math.max(0.045f, Math.min(1f, scaleX)));
-            target.setScaleY(1f);
-        }
-
-        void setCurrentPage(View page, String date) {
-            removeAllViews();
-            currentPage = page;
-            currentDate = date;
-            if (currentPage != null) {
-                resetBookPageAndPaper(currentPage);
-                currentPage.setLayerType(View.LAYER_TYPE_NONE, null);
-                addView(currentPage, new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            }
-        }
-
-        void slideToDate(String date, int direction) {
-            if (settling || currentPage == null || date == null) {
-                return;
-            }
-            cancelRunningAnimations();
-            offset = direction;
-            nextDate = date;
-            travel = swipeTravel();
-            ensureNextPage();
-            if (nextPage == null) {
-                return;
-            }
-            if (bookFlipAnimationEnabled()) {
-                playPageFlipSound();
-            }
-            settling = true;
-            settle(true, direction < 0 ? dp(120) : -dp(120));
-        }
-
-        @Override
-        public boolean onInterceptTouchEvent(MotionEvent event) {
-            int action = event.getActionMasked();
-            if (action == MotionEvent.ACTION_DOWN) {
-                if (settling) {
-                    return true;
-                }
-                rememberDown(event);
-                return false;
-            }
-            if (settling) {
-                return true;
-            }
-            if (action == MotionEvent.ACTION_MOVE && currentPage != null) {
-                float dx = event.getX() - downX;
-                float dy = event.getY() - downY;
-                if (shouldStartHorizontal(dx, dy)) {
-                    beginHorizontalDrag(dx);
-                    updateDrag(dx);
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        @Override
-        public boolean onTouchEvent(MotionEvent event) {
-            int action = event.getActionMasked();
-            if (action == MotionEvent.ACTION_DOWN) {
-                if (settling) {
-                    return true;
-                }
-                rememberDown(event);
-                return true;
-            }
-            if (settling) {
-                return true;
-            }
-            if (action == MotionEvent.ACTION_MOVE) {
-                float dx = event.getX() - downX;
-                float dy = event.getY() - downY;
-                if (!dragging && !edgeDragging && shouldStartHorizontal(dx, dy)) {
-                    beginHorizontalDrag(dx);
-                }
-                if (dragging || edgeDragging) {
-                    updateDrag(dx);
-                    return true;
-                }
-            }
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                if (dragging && nextPage != null) {
-                    float dx = event.getX() - downX;
-                    boolean commit = shouldCommit(dx, event.getEventTime() - downTime);
-                    settle(commit, dx);
-                    return true;
-                }
-                if (edgeDragging) {
-                    settleEdge();
-                    return true;
-                }
-                resetTouchState();
-            }
-            return dragging || edgeDragging || super.onTouchEvent(event);
-        }
-
-        private void rememberDown(MotionEvent event) {
-            downX = event.getX();
-            downY = event.getY();
-            downTime = event.getEventTime();
-            dragging = false;
-            edgeDragging = false;
-            offset = 0;
-            nextDate = null;
-            travel = swipeTravel();
-            cancelRunningAnimations();
-        }
-
-        private boolean shouldStartHorizontal(float dx, float dy) {
-            float absX = Math.abs(dx);
-            float absY = Math.abs(dy);
-            return absX > dp(14) && absX > absY * 1.18f;
-        }
-
-        private void beginHorizontalDrag(float dx) {
-            offset = dx < 0 ? 1 : -1;
-            nextDate = adjacentBookDate(currentDate, offset);
-            ViewParent parent = getParent();
-            if (parent != null) {
-                parent.requestDisallowInterceptTouchEvent(true);
-            }
-            if (nextDate == null) {
-                edgeDragging = true;
-                dragging = false;
-                if (currentPage != null) {
-                    currentPage.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-                }
-                return;
-            }
-            dragging = true;
-            edgeDragging = false;
-            playPageSwipeFeedback();
-            if (bookFlipAnimationEnabled()) {
-                playPageFlipSound();
-            }
-            ensureNextPage();
-        }
-
-        private void ensureNextPage() {
-            if (nextPage != null || nextDate == null) {
-                return;
-            }
-            nextPage = buildBookDetailPage(nextDate, false);
-            nextPage.setAlpha(1f);
-            nextPage.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-            if (currentPage != null) {
-                currentPage.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-            }
-            prepareBookFlipTransforms();
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-            if (bookFlipAnimationEnabled()) {
-                nextPage.setTranslationX(0f);
-                nextPage.setAlpha(1f);
-                scaleBookPaper(nextPage, offset < 0 ? 0.045f : 1f);
-                if (offset > 0) {
-                    addView(nextPage, 0, lp);
-                    if (currentPage != null) {
-                        currentPage.bringToFront();
-                    }
-                } else {
-                    addView(nextPage, lp);
-                }
-            } else {
-                nextPage.setTranslationX(bookSwipeStartX(offset, travel));
-                addView(nextPage, lp);
-            }
-        }
-
-        private void updateDrag(float dx) {
-            if (currentPage == null) {
-                return;
-            }
-            if (edgeDragging) {
-                float edgeMove = dx * 0.24f;
-                edgeMove = Math.max(-dp(52), Math.min(dp(52), edgeMove));
-                currentPage.setTranslationX(edgeMove);
-                return;
-            }
-            if (nextPage == null) {
-                return;
-            }
-            if (bookFlipAnimationEnabled()) {
-                float move = dx;
-                if ((offset > 0 && move > 0) || (offset < 0 && move < 0)) {
-                    move *= 0.28f;
-                }
-                applyBookFlipTransform(move);
-                return;
-            }
-            float move = dx;
-            if ((offset > 0 && move > 0) || (offset < 0 && move < 0)) {
-                move *= 0.28f;
-            }
-            float limit = travel;
-            move = Math.max(-limit, Math.min(limit, move));
-            currentPage.setTranslationX(move);
-            nextPage.setTranslationX(bookSwipeStartX(offset, travel) + move);
-            applyBookFlipTransform(move);
-        }
-
-        private void prepareBookFlipTransforms() {
-            if (!bookFlipAnimationEnabled() || currentPage == null || nextPage == null) {
-                return;
-            }
-            currentPage.setTranslationX(0f);
-            currentPage.setAlpha(1f);
-            nextPage.setTranslationX(0f);
-            nextPage.setAlpha(1f);
-            resetBookPageAndPaper(currentPage);
-            resetBookPageAndPaper(nextPage);
-            scaleBookPaper(nextPage, offset < 0 ? 0.045f : 1f);
-        }
-
-        private void applyBookFlipTransform(float move) {
-            if (!bookFlipAnimationEnabled() || currentPage == null || nextPage == null || travel <= 0f) {
-                return;
-            }
-            float signed = offset > 0 ? -move : move;
-            float progress = Math.max(0f, Math.min(1f, signed / Math.max(dp(120), travel * 0.58f)));
-            flipProgress = progress;
-            currentPage.setTranslationX(0f);
-            currentPage.setRotationY(0f);
-            currentPage.setAlpha(1f);
-            nextPage.setAlpha(1f);
-            if (offset > 0) {
-                scaleBookPaper(currentPage, 1f - progress * 0.955f);
-                scaleBookPaper(nextPage, 1f);
-            } else {
-                scaleBookPaper(currentPage, 1f);
-                scaleBookPaper(nextPage, progress);
-            }
-            invalidate();
-        }
-
-        private boolean shouldCommit(float dx, long elapsedMs) {
-            float signed = offset > 0 ? -dx : dx;
-            float distanceNeeded = Math.min(dp(86), travel * 0.18f);
-            boolean farEnough = signed > distanceNeeded;
-            boolean quickEnough = elapsedMs < 260 && signed > dp(44);
-            return farEnough || quickEnough;
-        }
-
-        private void settle(final boolean commit, float dx) {
-            if (currentPage == null || nextPage == null) {
-                settleEdge();
-                return;
-            }
-            if (bookFlipAnimationEnabled()) {
-                settleBookFlip(commit, dx);
-                return;
-            }
-            settling = true;
-            final View oldPage = currentPage;
-            final View incoming = nextPage;
-            final String incomingDate = nextDate;
-            float oldTarget = commit ? (offset > 0 ? -travel : travel) : 0f;
-            float nextTarget = commit ? 0f : bookSwipeStartX(offset, travel);
-            long duration = commit ? swipeSettleDuration(dx) : 300L;
-            android.view.animation.Interpolator interpolator = commit
-                    ? new android.view.animation.DecelerateInterpolator(1.35f)
-                    : new android.view.animation.DecelerateInterpolator(1.7f);
-            oldPage.animate()
-                    .translationX(oldTarget)
-                    .rotationY(bookFlipAnimationEnabled() && commit ? (offset > 0 ? -18f : 18f) : 0f)
-                    .setDuration(duration)
-                    .setInterpolator(interpolator)
-                    .start();
-            incoming.animate()
-                    .translationX(nextTarget)
-                    .rotationY(0f)
-                    .setDuration(duration)
-                    .setInterpolator(interpolator)
-                    .withEndAction(new Runnable() {
-                        @Override
-                        public void run() {
-                            oldPage.setLayerType(View.LAYER_TYPE_NONE, null);
-                            incoming.setLayerType(View.LAYER_TYPE_NONE, null);
-                            resetBookPageAndPaper(oldPage);
-                            resetBookPageAndPaper(incoming);
-                            if (commit) {
-                                if (oldPage.getParent() == BookDetailSwipeFrame.this) {
-                                    removeView(oldPage);
-                                }
-                                currentPage = incoming;
-                                currentDate = incomingDate;
-                                bookDetailDate = incomingDate;
-                                updateBookDetailHeader(incomingDate);
-                                currentPage.setTranslationX(0f);
-                                currentPage.setAlpha(1f);
-                                for (int i = getChildCount() - 1; i >= 0; i--) {
-                                    View child = getChildAt(i);
-                                    if (child != currentPage) {
-                                        removeViewAt(i);
-                                    }
-                                }
-                            } else {
-                                if (incoming.getParent() == BookDetailSwipeFrame.this) {
-                                    removeView(incoming);
-                                }
-                                oldPage.setTranslationX(0f);
-                                oldPage.setRotationY(0f);
-                                oldPage.setAlpha(1f);
-                                currentPage = oldPage;
-                            }
-                            nextPage = null;
-                            nextDate = null;
-                            resetTouchState();
-                        }
-                    })
-                    .start();
-        }
-
-        private void settleBookFlip(final boolean commit, float dx) {
-            if (currentPage == null || nextPage == null) {
-                settleEdge();
-                return;
-            }
-            settling = true;
-            final View oldPage = currentPage;
-            final View incoming = nextPage;
-            final String incomingDate = nextDate;
-            final float startProgress = flipProgress;
-            final float endProgress = commit ? 1f : 0f;
-            long duration = commit ? Math.max(520L, swipeSettleDuration(dx)) : 300L;
-            android.view.animation.Interpolator interpolator = commit
-                    ? new android.view.animation.AccelerateDecelerateInterpolator()
-                    : new android.view.animation.DecelerateInterpolator(1.45f);
-            incoming.setAlpha(1f);
-            oldPage.setAlpha(1f);
-            incoming.setTranslationX(0f);
-            oldPage.setTranslationX(0f);
-            ValueAnimator animator = ValueAnimator.ofFloat(startProgress, endProgress);
-            animator.setDuration(duration);
-            animator.setInterpolator(interpolator);
-            animator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
-                @Override
-                public void onAnimationUpdate(ValueAnimator animation) {
-                    flipProgress = (Float) animation.getAnimatedValue();
-                    float p = Math.max(0f, Math.min(1f, flipProgress));
-                    if (offset > 0) {
-                        scaleBookPaper(oldPage, 1f - p * 0.955f);
-                        scaleBookPaper(incoming, 1f);
-                    } else {
-                        scaleBookPaper(oldPage, 1f);
-                        scaleBookPaper(incoming, p);
-                    }
-                    invalidate();
-                }
+        BookDetailSwipeFrame(Context context){
+            super(context);setWillNotDraw(false);setBackground(pageBackground());setFocusable(true);
+            spring=new GestureSpring(new GestureSpring.Listener(){
+                public void onUpdate(float value){if(motion!=null){motion.animate(value/Math.max(1,travel));syncPresentation();}}
+                public void onEnd(){finishTurn();}
             });
-            animator.addListener(new android.animation.AnimatorListenerAdapter() {
-                        @Override
-                        public void onAnimationEnd(android.animation.Animator animation) {
-                            if (commit) {
-                                resetBookPageAndPaper(incoming);
-                                oldPage.setAlpha(1f);
-                            } else {
-                                resetBookPageAndPaper(oldPage);
-                                incoming.setAlpha(1f);
-                            }
-                            flipProgress = 0f;
-                            finishBookFlip(commit, oldPage, incoming, incomingDate);
-                            invalidate();
-                        }
-                    });
-            animator.start();
+            setContentDescription("吃饭记录本，向左翻到较早记录，向右翻到较新记录");
         }
-
-        private void finishBookFlip(boolean commit, View oldPage, View incoming, String incomingDate) {
-                            oldPage.setLayerType(View.LAYER_TYPE_NONE, null);
-                            incoming.setLayerType(View.LAYER_TYPE_NONE, null);
-                            resetBookPageAndPaper(oldPage);
-                            resetBookPageAndPaper(incoming);
-                            incoming.setTranslationX(0f);
-                            if (commit) {
-                                if (oldPage.getParent() == BookDetailSwipeFrame.this) {
-                                    removeView(oldPage);
-                                }
-                                currentPage = incoming;
-                                currentDate = incomingDate;
-                                bookDetailDate = incomingDate;
-                                updateBookDetailHeader(incomingDate);
-                                for (int i = getChildCount() - 1; i >= 0; i--) {
-                                    View child = getChildAt(i);
-                                    if (child != currentPage) {
-                                        removeViewAt(i);
-                                    }
-                                }
-                            } else {
-                                if (incoming.getParent() == BookDetailSwipeFrame.this) {
-                                    removeView(incoming);
-                                }
-                                currentPage = oldPage;
-                            }
-                            nextPage = null;
-                            nextDate = null;
-                            resetTouchState();
-                            invalidate();
+        void setCurrentPage(View page,String date){
+            cancelRunningAnimations();removeAllViews();pageDates.clear();pageDates.addAll(recordedDates());
+            if(!pageDates.contains(date))pageDates.add(0,date);
+            currentPage=page;currentDate=date;motion=new NotebookPageMotion(pageDates.size(),pageDates.indexOf(date));
+            addView(page,new FrameLayout.LayoutParams(-1,-1));travel=swipeTravel();
         }
-
-        private void ensureCurlOverlay() {
-            if (!bookFlipAnimationEnabled() || currentPage == null || curlView != null) {
-                return;
-            }
-            if (currentPage.getWidth() <= 0 || currentPage.getHeight() <= 0) {
-                return;
-            }
-            Bitmap snapshot = Bitmap.createBitmap(currentPage.getWidth(), currentPage.getHeight(), Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(snapshot);
-            currentPage.draw(canvas);
-            Bitmap incomingSnapshot = null;
-            if (nextPage != null && nextPage.getWidth() > 0 && nextPage.getHeight() > 0) {
-                incomingSnapshot = Bitmap.createBitmap(nextPage.getWidth(), nextPage.getHeight(), Bitmap.Config.ARGB_8888);
-                Canvas incomingCanvas = new Canvas(incomingSnapshot);
-                nextPage.draw(incomingCanvas);
-            }
-            curlView = new BookPageCurlView(getContext(), snapshot, incomingSnapshot, offset < 0);
-            curlView.setProgress(flipProgress);
-            addView(curlView, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            curlView.bringToFront();
-            currentPage.setAlpha(0f);
-            if (nextPage != null) {
-                nextPage.setAlpha(0f);
-            }
+        void slideToDate(String date,int direction){
+            int index=pageDates.indexOf(date);if(motion==null||index<0)return;
+            spring.cancel();releaseInput();motion.select(index);settleMotion(0);
         }
-
-        private class BookPageCurlView extends View {
-            private final Bitmap bitmap;
-            private final Bitmap incomingBitmap;
-            private final boolean reverse;
-            private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-            private final Paint paperPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            private float progress;
-
-            BookPageCurlView(Context context, Bitmap bitmap, Bitmap incomingBitmap, boolean reverse) {
-                super(context);
-                this.bitmap = bitmap;
-                this.incomingBitmap = incomingBitmap;
-                this.reverse = reverse;
-                setWillNotDraw(false);
-                setLayerType(View.LAYER_TYPE_HARDWARE, null);
-            }
-
-            float getProgress() {
-                return progress;
-            }
-
-            void setProgress(float value) {
-                progress = Math.max(0f, Math.min(1f, value));
-                invalidate();
-            }
-
-            @Override
-            protected void onDraw(Canvas canvas) {
-                super.onDraw(canvas);
-                if (bitmap == null || bitmap.isRecycled()) {
-                    return;
-                }
-                float w = getWidth();
-                float h = getHeight();
-                float p = smoothStep(progress);
-                paint.setAlpha(255);
-                float pageLeft = pageLeftBound(w);
-                float pageRight = pageRightBound(w);
-                if (reverse) {
-                    float revealRight = lerp(pageLeft, pageRight, p);
-                    drawBitmapSide(canvas, bitmap, pageLeft, pageRight, h);
-                    drawBitmapSide(canvas, incomingBitmap, pageLeft, revealRight, h);
-                    drawPaperEdge(canvas, revealRight, h, p, true);
-                } else {
-                    float paperRight = lerp(pageRight, pageLeft, p);
-                    drawBitmapSide(canvas, incomingBitmap, pageLeft, pageRight, h);
-                    drawBitmapSide(canvas, bitmap, pageLeft, paperRight, h);
-                    float stripLeft = Math.max(pageLeft, paperRight - dp(78));
-                    drawPaperBack(canvas, stripLeft, paperRight, h, p, false);
-                    drawPageShadow(canvas, paperRight, h, p, false);
-                }
-            }
-
-            private float smoothStep(float value) {
-                float t = Math.max(0f, Math.min(1f, value));
-                return t * t * (3f - 2f * t);
-            }
-
-            private float pageLeftBound(float w) {
-                return Math.min(dp(64), w * 0.18f);
-            }
-
-            private float pageRightBound(float w) {
-                return Math.max(w - dp(28), w * 0.92f);
-            }
-
-            private void drawPaperBack(Canvas canvas, float left, float right, float h, float p, boolean returning) {
-                if (right - left <= 1f || p <= 0.002f) {
-                    return;
-                }
-                float curl = dp(18) * (float) Math.sin(Math.min(1f, p) * Math.PI);
-                Path page = new Path();
-                page.moveTo(left, curl * 0.22f);
-                page.cubicTo(lerp(left, right, 0.42f), -curl, lerp(left, right, 0.72f), curl * 0.45f, right, curl * 0.12f);
-                page.lineTo(right, h - curl * 0.12f);
-                page.cubicTo(lerp(left, right, 0.72f), h - curl * 0.45f, lerp(left, right, 0.42f), h + curl, left, h - curl * 0.22f);
-                page.close();
-                paperPaint.setShader(new LinearGradient(left, 0, right, h,
-                        blendColor(notebookPaperBackgroundTop(), Color.WHITE, 0.18f),
-                        blendColor(notebookPaperBackgroundBottom(), Color.WHITE, 0.10f),
-                        Shader.TileMode.CLAMP));
-                canvas.drawPath(page, paperPaint);
-                paperPaint.setShader(null);
-                paperPaint.setStyle(Paint.Style.STROKE);
-                paperPaint.setStrokeWidth(dp(1));
-                paperPaint.setColor(Color.argb((int) (44 * p), 210, 198, 170));
-                canvas.drawPath(page, paperPaint);
-                paperPaint.setStyle(Paint.Style.FILL);
-                paperPaint.setColor(Color.argb((int) (18 * p), 90, 74, 52));
-                if (returning) {
-                    canvas.drawRect(Math.max(0, right - dp(4)), 0, right, h, paperPaint);
-                } else {
-                    canvas.drawRect(left, 0, Math.min(right, left + dp(4)), h, paperPaint);
-                }
-            }
-
-            private void drawBitmapSide(Canvas canvas, Bitmap source, float left, float right, float h) {
-                if (source == null || source.isRecycled() || right <= left + 1f) {
-                    return;
-                }
-                Rect src = new Rect(Math.round(left), 0, Math.round(right), Math.round(h));
-                RectF dst = new RectF(left, 0, right, h);
-                paint.setAlpha(255);
-                canvas.drawBitmap(source, src, dst, paint);
-            }
-
-            private void drawPageShadow(Canvas canvas, float edge, float h, float p, boolean returning) {
-                if (p <= 0.002f) {
-                    return;
-                }
-                float left = returning ? edge - dp(4) : edge - dp(22);
-                float right = returning ? edge + dp(22) : edge + dp(4);
-                paint.setShader(new LinearGradient(left, 0, right, 0,
-                        returning ? Color.TRANSPARENT : Color.argb((int) (74 * p), 72, 62, 50),
-                        returning ? Color.argb((int) (74 * p), 72, 62, 50) : Color.TRANSPARENT,
-                        Shader.TileMode.CLAMP));
-                canvas.drawRect(left, 0, right, h, paint);
-                paint.setShader(null);
-                paint.setAlpha(255);
-            }
-
-            private void drawPaperEdge(Canvas canvas, float edge, float h, float p, boolean returning) {
-                if (p <= 0.002f || edge <= pageLeftBound(getWidth()) + 1f) {
-                    return;
-                }
-                float left = returning ? edge - dp(5) : edge - dp(18);
-                float right = returning ? edge + dp(18) : edge + dp(5);
-                paperPaint.setShader(new LinearGradient(left, 0, right, 0,
-                        returning ? Color.argb(68, 255, 252, 238) : Color.argb(90, 196, 178, 136),
-                        returning ? Color.argb(90, 196, 178, 136) : Color.argb(68, 255, 252, 238),
-                        Shader.TileMode.CLAMP));
-                canvas.drawRect(left, 0, right, h, paperPaint);
-                paperPaint.setShader(null);
-            }
+        private View bookFlipTarget(View page){return page==null?null:page.findViewWithTag(TAG_BOOK_NOTEBOOK_PAGE);}
+        void onMediaReady(View media){
+            if(turn==null||nextPage==null||!isAttachedToWindow()||bookDetailSwipeFrame!=this||!inBookDetail||media==null)return;
+            View sheet=bookFlipTarget(offset>0?currentPage:nextPage),node=media;if(sheet==null)return;
+            while(node!=sheet){ViewParent parent=node.getParent();if(!(parent instanceof View))return;node=(View)parent;}
+            if(!mediaRefreshPosted){mediaRefreshPosted=true;postOnAnimation(refreshMedia);}
         }
-
-        private long swipeSettleDuration(float dx) {
-            float progress = Math.min(1f, Math.abs(dx) / Math.max(1f, travel));
-            return (long) (620 - 150 * progress);
+        private void discardNext(){releaseTurn();if(nextPage!=null)removeView(nextPage);nextPage=null;nextDate=null;}
+        private void layoutPage(View page){
+            if(getWidth()>0&&getHeight()>0){page.measure(View.MeasureSpec.makeMeasureSpec(getWidth(),View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(getHeight(),View.MeasureSpec.EXACTLY));page.layout(0,0,getWidth(),getHeight());}
         }
-
-        private void settleEdge() {
-            if (currentPage == null) {
-                resetTouchState();
-                return;
-            }
-            settling = true;
-            currentPage.animate()
-                    .translationX(0f)
-                    .rotationY(0f)
-                    .alpha(1f)
-                    .setDuration(260)
-                    .setInterpolator(new android.view.animation.DecelerateInterpolator(1.75f))
-                    .withEndAction(new Runnable() {
-                        @Override
-                    public void run() {
-                            if (currentPage != null) {
-                                currentPage.setLayerType(View.LAYER_TYPE_NONE, null);
-                                resetBookPageAndPaper(currentPage);
-                            }
-                        resetTouchState();
-                    }
-                    })
-                    .start();
+        private void promotePage(int index){
+            String date=pageDates.get(index);View retained=date.equals(nextDate)?nextPage:null;
+            releaseTurn();if(currentPage!=null)removeView(currentPage);
+            if(nextPage!=null&&nextPage!=retained)removeView(nextPage);
+            currentPage=retained!=null?retained:buildBookDetailPage(date,false);
+            if(currentPage.getParent()!=this){addView(currentPage,new FrameLayout.LayoutParams(-1,-1));layoutPage(currentPage);}
+            currentDate=date;bookDetailDate=date;nextPage=null;nextDate=null;
+            currentPage.setTranslationX(0);currentPage.setAlpha(1);updateBookDetailHeader(date);
         }
-
-        private float swipeTravel() {
-            int width = getWidth();
-            if (width <= 0 && content != null) {
-                width = content.getWidth();
+        /** Only swap page ownership at an actual whole-page endpoint, never at DOWN. */
+        private void syncPresentation(){
+            if(motion==null||currentPage==null||pageDates.isEmpty())return;
+            float absolute=motion.position();int current=pageDates.indexOf(currentDate);
+            if(absolute>=current+1){promotePage(Math.min(pageDates.size()-1,(int)Math.floor(absolute)));current=pageDates.indexOf(currentDate);}
+            else if(absolute<=current-1){promotePage(Math.max(0,(int)Math.ceil(absolute)));current=pageDates.indexOf(currentDate);}
+            float difference=absolute-current;int direction=difference>0?1:difference<0?-1:0;
+            position=Math.min(travel,Math.abs(difference)*travel);flipProgress=travel<=0?0:position/travel;
+            if(direction==0){discardNext();useCurl=false;currentPage.setTranslationX(0);currentPage.setAlpha(1);invalidate();return;}
+            String wanted=pageDates.get(current+direction);
+            if(nextPage==null||!wanted.equals(nextDate)){
+                discardNext();offset=direction;nextDate=wanted;
+                nextPage=buildBookDetailPage(wanted,false);addView(nextPage,0,new FrameLayout.LayoutParams(-1,-1));layoutPage(nextPage);
+                useCurl=bookFlipAnimationEnabled()&&ValueAnimator.areAnimatorsEnabled();if(useCurl)playPageFlipSound();requestLayout();
             }
-            if (width <= 0) {
-                width = getResources().getDisplayMetrics().widthPixels;
-            }
-            return Math.max(dp(260), width);
+            prepareTurn();applyTurn();
         }
-
-        private float bookSwipeStartX(int direction, float width) {
-            float gap = dp(12);
-            return direction > 0 ? width + gap : -width - gap;
+        @Override protected void onLayout(boolean changed,int l,int t,int r,int b){
+            super.onLayout(changed,l,t,r,b);
+            if(turn!=null&&(turnWidth!=getWidth()||turnHeight!=getHeight())||changed&&travel>0&&Math.abs(travel-getWidth())>1){cancelRunningAnimations();travel=swipeTravel();return;}
+            prepareTurn();applyTurn();
         }
-
-        private void cancelRunningAnimations() {
-            if (currentPage != null) {
-                currentPage.animate().cancel();
-                resetBookPageAndPaper(currentPage);
-            }
-            if (nextPage != null) {
-                nextPage.animate().cancel();
-                resetBookPageAndPaper(nextPage);
-                if (nextPage.getParent() == this) {
-                    removeView(nextPage);
-                }
-                nextPage = null;
-                nextDate = null;
-            }
-            if (curlView != null) {
-                if (curlView.getParent() == this) {
-                    removeView(curlView);
-                }
-                curlView = null;
-            }
-            flipProgress = 0f;
+        private void prepareTurn(){
+            if(!useCurl||turn!=null||nextPage==null)return;
+            View paper=bookFlipTarget(offset>0?currentPage:nextPage);if(paper==null||paper.getWidth()==0||paper.getHeight()==0)return;
+            Rect rect=new Rect(0,0,paper.getWidth(),paper.getHeight());offsetDescendantRectToMyCoords(paper,rect);
+            int[] colors=notebookPaperPalette(notebookPageStyle());
+            Rect viewport=getClipBounds();float viewportLeft=viewport==null?0:viewport.left;
+            if(getClipToPadding())viewportLeft=Math.max(viewportLeft,getPaddingLeft());
+            try{turn=new NotebookTurnRenderer(paper,new RectF(rect),colors[0],colors[1],viewportLeft);turnWidth=getWidth();turnHeight=getHeight();}
+            catch(OutOfMemoryError|RuntimeException unavailable){useCurl=false;}
+        }
+        @Override protected void dispatchDraw(Canvas canvas){
+            if(nextPage!=null&&useCurl&&turn!=null){drawChild(canvas,offset>0?nextPage:currentPage,getDrawingTime());turn.draw(canvas,flipProgress,offset>0);}
+            else if(nextPage!=null&&useCurl){if(currentPage!=null)drawChild(canvas,currentPage,getDrawingTime());}
+            else super.dispatchDraw(canvas);
+        }
+        private void applyTurn(){
+            if(currentPage==null)return;currentPage.setAlpha(1);currentPage.setScaleX(1);currentPage.setScaleY(1);
+            if(nextPage!=null){nextPage.setAlpha(1);currentPage.setTranslationX(useCurl?0:-offset*position);nextPage.setTranslationX(useCurl?0:offset*(travel-position));}
             invalidate();
         }
-
-        private void resetTouchState() {
-            dragging = false;
-            edgeDragging = false;
-            settling = false;
-            offset = 0;
-            ViewParent parent = getParent();
-            if (parent != null) {
-                parent.requestDisallowInterceptTouchEvent(false);
+        private boolean horizontal(float dx,float dy){return Math.abs(dx)>dp(14)&&Math.abs(dx)>Math.abs(dy)*1.3f;}
+        private void rememberDown(MotionEvent event){
+            // The same DOWN visits onIntercept and onTouch; capture its origin once.
+            if(lastDown==event.getDownTime())return;lastDown=event.getDownTime();
+            spring.cancel();settling=dragging=edgeDragging=gestureCancelled=false;
+            if(currentPage!=null)currentPage.animate().cancel();travel=swipeTravel();edgeOrigin=0;
+            downX=event.getX();downY=event.getY();pointer=event.getPointerId(0);
+            if(motion!=null){motion.grab(pageDates.indexOf(currentDate));dragOrigin=motion.position()*travel;}
+            recycleTracker();tracker=android.view.VelocityTracker.obtain();track(event);
+        }
+        private void track(MotionEvent event){
+            if(tracker==null)return;int action=event.getAction();float x=event.getX(),y=event.getY();
+            if(trackedTime==event.getEventTime()&&trackedAction==action&&trackedX==x&&trackedY==y)return;
+            trackedTime=event.getEventTime();trackedAction=action;trackedX=x;trackedY=y;tracker.addMovement(event);
+        }
+        @Override public boolean onInterceptTouchEvent(MotionEvent event){
+            // Closing already owns the settling page. A new DOWN must not cancel
+            // that spring or leave the afterTurn continuation waiting for an UP.
+            if(afterTurn!=null)return true;
+            int action=event.getActionMasked();
+            if(action==MotionEvent.ACTION_DOWN){boolean turning=nextPage!=null||settling;rememberDown(event);return turning;}
+            if(gestureCancelled)return true;
+            if(action==MotionEvent.ACTION_POINTER_DOWN){abortGesture();return true;}
+            if(action==MotionEvent.ACTION_MOVE){track(event);int index=event.findPointerIndex(pointer);if(index<0){abortGesture();return true;}
+                float dx=event.getX(index)-downX,dy=event.getY(index)-downY;
+                if(horizontal(dx,dy)){beginDrag();updateDrag(dx);return true;}}
+            if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL){
+                if(!dragging&&!edgeDragging&&nextPage==null){if(motion!=null)motion.release(0,action==MotionEvent.ACTION_CANCEL);releaseInput();}
             }
+            return dragging||edgeDragging;
+        }
+        private void beginDrag(){dragging=true;if(getParent()!=null)getParent().requestDisallowInterceptTouchEvent(true);}
+        private void updateDrag(float dx){
+            if(motion==null)return;motion.drag(-dx/Math.max(1,travel));syncPresentation();
+            edgeDragging=Math.abs(motion.overscroll())>0&&nextPage==null;
+            if(edgeDragging&&currentPage!=null)currentPage.setTranslationX(-HomeDayMotion.rubber(motion.overscroll()*travel,dp(54)));
+        }
+        @Override public boolean onTouchEvent(MotionEvent event){
+            if(afterTurn!=null)return true;
+            int action=event.getActionMasked();if(action==MotionEvent.ACTION_DOWN){rememberDown(event);return true;}
+            if(gestureCancelled){if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL){gestureCancelled=false;releaseInput();}return true;}
+            track(event);int index=event.findPointerIndex(pointer);float dx=index<0?0:event.getX(index)-downX,dy=index<0?0:event.getY(index)-downY;
+            if(action==MotionEvent.ACTION_MOVE){if(index<0){abortGesture();return true;}if(!dragging&&horizontal(dx,dy))beginDrag();if(dragging)updateDrag(dx);return true;}
+            if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL||action==MotionEvent.ACTION_POINTER_DOWN){
+                boolean abort=action!=MotionEvent.ACTION_UP;float velocity=0;
+                if(tracker!=null&&pointer>=0){tracker.computeCurrentVelocity(1000);velocity=tracker.getXVelocity(pointer);}
+                if(!abort&&index>=0&&dragging)updateDrag(dx);
+                if(motion!=null)motion.release(-velocity/Math.max(1,travel),abort);
+                gestureCancelled=action==MotionEvent.ACTION_POINTER_DOWN;releaseInput();settleMotion(-velocity);return true;
+            }
+            return true;
+        }
+        private void abortGesture(){if(motion!=null)motion.release(0,true);gestureCancelled=true;releaseInput();settleMotion(0);}
+        private void settleMotion(float velocity){
+            if(motion==null)return;settling=true;commitTarget=motion.target()!=pageDates.indexOf(currentDate);
+            if(!ValueAnimator.areAnimatorsEnabled()||!isAttachedToWindow()){motion.finish();syncPresentation();finishTurn();return;}
+            spring.start(motion.position()*travel,motion.target()*travel,velocity);
+        }
+        private void finishTurn(){
+            spring.cancel();if(motion!=null){motion.finish();syncPresentation();}discardNext();position=flipProgress=0;useCurl=false;settling=false;
+            if(currentPage!=null){currentPage.animate().cancel();currentPage.setTranslationX(0);currentPage.setAlpha(1);}
+            releaseInput();invalidate();sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED);
+            Runnable completed=afterTurn;afterTurn=null;if(completed!=null)completed.run();
+        }
+        private void releaseTurn(){removeCallbacks(refreshMedia);mediaRefreshPosted=false;if(turn!=null){turn.release();turn=null;}}
+        private void cancelRunningAnimations(){
+            if(afterTurn!=null){afterTurn=null;if(bookDetailSwipeFrame==this)cancelPendingBookClose();}
+            spring.cancel();discardNext();if(motion!=null)motion.reset(pageDates.size(),Math.max(0,pageDates.indexOf(currentDate)));
+            position=flipProgress=0;useCurl=false;settling=false;gestureCancelled=false;lastDown=Long.MIN_VALUE;
+            if(currentPage!=null){currentPage.animate().cancel();currentPage.setTranslationX(0);currentPage.setAlpha(1);}releaseInput();
+        }
+        private void recycleTracker(){if(tracker!=null){tracker.recycle();tracker=null;}trackedTime=Long.MIN_VALUE;trackedAction=-1;}
+        private void releaseInput(){recycleTracker();dragging=edgeDragging=false;pointer=-1;if(getParent()!=null)getParent().requestDisallowInterceptTouchEvent(false);}
+        private float swipeTravel(){return getWidth()>0?getWidth():getResources().getDisplayMetrics().widthPixels;}
+        @Override protected void onDetachedFromWindow(){cancelRunningAnimations();super.onDetachedFromWindow();}
+        @Override protected void onWindowVisibilityChanged(int visibility){super.onWindowVisibilityChanged(visibility);if(visibility!=VISIBLE&&spring!=null)cancelRunningAnimations();}
+        @Override public void onInitializeAccessibilityNodeInfo(android.view.accessibility.AccessibilityNodeInfo info){
+            super.onInitializeAccessibilityNodeInfo(info);info.setScrollable(true);
+            if(adjacentBookDate(currentDate,1)!=null)info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);
+            if(adjacentBookDate(currentDate,-1)!=null)info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
+        }
+        @Override public boolean performAccessibilityAction(int action,Bundle args){
+            int direction=action==android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_FORWARD?1:action==android.view.accessibility.AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD?-1:0;
+            String date=direction==0?null:adjacentBookDate(currentDate,direction);if(date!=null){slideToDate(date,direction);return true;}return super.performAccessibilityAction(action,args);
         }
     }
 
     private class LiquidGlassBarLayout extends LinearLayout {
-        private final Paint glassPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        private final Path glassPath = new Path();
-        private final RectF glassRect = new RectF();
+        private final Paint glassPaint=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
+        private final Path glassPath=new Path();
+        private final RectF glassRect=new RectF(),bubbleRect=new RectF();
+        private final int[] sourcePos=new int[2],ownPos=new int[2];
         private View blurSource;
-        private Bitmap blurBitmap;
-        private long lastBlurAt;
-        private boolean capturingBackdrop;
-        private int tintColor;
-        private int strokeColor;
+        private Bitmap blurBitmap,captureBitmap;
+        private Canvas captureCanvas;
+        private int[] blurInput,blurMid,blurOutput;
+        private int tintColor,strokeColor,shaderWidth=-1,shaderHeight=-1;
+        private int capturedSourceX,capturedSourceY,capturedOwnX,capturedOwnY;
         private float radius;
-
-        LiquidGlassBarLayout(Context context) {
-            super(context);
-            setWillNotDraw(false);
+        private boolean capturingBackdrop,backdropDirty=true,refreshPosted,shaderNight;
+        private long lastBlurAt;
+        private int captureCount;
+        private LinearGradient glassGradient,highlightGradient;
+        private ViewTreeObserver backdropObserver;
+        private final ViewTreeObserver.OnGlobalLayoutListener layoutChanged=()->markBackdropDirty();
+        private final ViewTreeObserver.OnScrollChangedListener scrollChanged=()->markBackdropDirty();
+        private final Runnable refreshBackdrop=()->{
+            refreshPosted=false;
+            if(isAttachedToWindow()&&getWindowVisibility()==VISIBLE&&backdropDirty)invalidate();
+        };
+        LiquidGlassBarLayout(Context context){super(context);setWillNotDraw(false);}
+        void setGlass(View source,int tint,int stroke,float cornerRadius){
+            detachBackdropObservers();blurSource=source;tintColor=tint;strokeColor=stroke;radius=cornerRadius;
+            shaderWidth=-1;if(isAttachedToWindow())attachBackdropObservers();markBackdropDirty();
         }
-
-        void setGlass(View source, int tint, int stroke, float cornerRadius) {
-            blurSource = source;
-            tintColor = tint;
-            strokeColor = stroke;
-            radius = cornerRadius;
+        void markBackdropDirty(){
+            backdropDirty=true;
+            if(!refreshPosted&&isAttachedToWindow()&&getWindowVisibility()==VISIBLE){refreshPosted=true;postOnAnimation(refreshBackdrop);}
         }
-
-        @Override
-        public void draw(Canvas canvas) {
-            if (capturingBackdrop) {
-                return;
-            }
-            super.draw(canvas);
+        private void attachBackdropObservers(){
+            if(blurSource==null)return;backdropObserver=blurSource.getViewTreeObserver();
+            if(backdropObserver.isAlive()){backdropObserver.addOnGlobalLayoutListener(layoutChanged);backdropObserver.addOnScrollChangedListener(scrollChanged);}
         }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            drawBlurredGlass(canvas);
-            super.onDraw(canvas);
+        private void detachBackdropObservers(){
+            if(backdropObserver!=null&&backdropObserver.isAlive()){
+                backdropObserver.removeOnGlobalLayoutListener(layoutChanged);backdropObserver.removeOnScrollChangedListener(scrollChanged);
+            }
+            backdropObserver=null;
         }
-
-        private void drawBlurredGlass(Canvas canvas) {
-            int w = getWidth();
-            int h = getHeight();
-            if (w <= 0 || h <= 0) {
-                return;
-            }
-            glassRect.set(0, 0, w, h);
-            glassPath.reset();
-            glassPath.addRoundRect(glassRect, radius, radius, Path.Direction.CW);
-
-            Bitmap backdrop = captureBackdropIfNeeded(w, h);
-            int save = canvas.save();
-            canvas.clipPath(glassPath);
-            if (backdrop != null && !backdrop.isRecycled()) {
-                glassPaint.setAlpha(255);
-                glassPaint.setShader(null);
-                canvas.drawBitmap(backdrop, null, glassRect, glassPaint);
-            }
-
-            glassPaint.setShader(new LinearGradient(0, 0, w, h,
-                    nightDecoration() ? Color.argb(134, 66, 68, 74) : Color.argb(126, 255, 255, 252),
-                    nightDecoration() ? Color.argb(104, 26, 27, 31) : Color.argb(88, 235, 238, 236),
-                    Shader.TileMode.CLAMP));
-            canvas.drawRoundRect(glassRect, radius, radius, glassPaint);
-            glassPaint.setShader(null);
-            glassPaint.setColor(tintColor);
-            canvas.drawRoundRect(glassRect, radius, radius, glassPaint);
-
-            glassPaint.setShader(new LinearGradient(0, 0, 0, h * 0.62f,
-                    Color.argb(nightDecoration() ? 64 : 118, 255, 255, 255),
-                    Color.argb(0, 255, 255, 255), Shader.TileMode.CLAMP));
-            canvas.drawRoundRect(glassRect, radius, radius, glassPaint);
-            glassPaint.setShader(null);
-
-            float bubble = Math.max(dp(24), h * 0.64f);
-            glassPaint.setColor(nightDecoration() ? Color.argb(32, 255, 255, 255) : Color.argb(54, 255, 255, 255));
-            canvas.drawOval(new RectF(dp(20), dp(7), dp(20) + bubble * 1.7f, dp(7) + bubble), glassPaint);
-            glassPaint.setColor(nightDecoration() ? Color.argb(20, 255, 255, 255) : Color.argb(38, 255, 255, 255));
-            canvas.drawOval(new RectF(w - bubble * 1.55f - dp(18), h - bubble * 0.95f,
-                    w - dp(18), h + bubble * 0.08f), glassPaint);
-
-            canvas.restoreToCount(save);
-
-            glassPaint.setStyle(Paint.Style.STROKE);
-            glassPaint.setStrokeWidth(dp(1));
-            glassPaint.setColor(strokeColor);
-            canvas.drawRoundRect(glassRect, radius, radius, glassPaint);
-            glassPaint.setStyle(Paint.Style.FILL);
-
-            postInvalidateDelayed(86);
+        @Override protected void onAttachedToWindow(){super.onAttachedToWindow();attachBackdropObservers();markBackdropDirty();}
+        @Override protected void onWindowVisibilityChanged(int visibility){super.onWindowVisibilityChanged(visibility);if(visibility==VISIBLE)markBackdropDirty();}
+        @Override protected void onSizeChanged(int w,int h,int ow,int oh){super.onSizeChanged(w,h,ow,oh);shaderWidth=-1;markBackdropDirty();}
+        @Override public void draw(Canvas canvas){if(!capturingBackdrop)super.draw(canvas);}
+        private void prepareGlass(int w,int h){
+            boolean night=nightDecoration();if(shaderWidth==w&&shaderHeight==h&&shaderNight==night)return;
+            shaderWidth=w;shaderHeight=h;shaderNight=night;glassRect.set(0,0,w,h);
+            glassPath.reset();glassPath.addRoundRect(glassRect,radius,radius,Path.Direction.CW);
+            glassGradient=new LinearGradient(0,0,w,h,night?Color.argb(134,66,68,74):Color.argb(126,255,255,252),
+                    night?Color.argb(104,26,27,31):Color.argb(88,235,238,236),Shader.TileMode.CLAMP);
+            highlightGradient=new LinearGradient(0,0,0,h*.62f,Color.argb(night?64:118,255,255,255),Color.argb(0,255,255,255),Shader.TileMode.CLAMP);
+            backdropDirty=true;
         }
-
-        private Bitmap captureBackdropIfNeeded(int w, int h) {
-            if (blurSource == null || blurSource == this || blurSource.getWidth() <= 0 || blurSource.getHeight() <= 0) {
-                return null;
+        @Override protected void onDraw(Canvas canvas){
+            int w=getWidth(),h=getHeight();if(w<=0||h<=0)return;prepareGlass(w,h);
+            Bitmap backdrop=captureBackdropIfNeeded(w,h);int saved=canvas.save();canvas.clipPath(glassPath);
+            glassPaint.setStyle(Paint.Style.FILL);glassPaint.setAlpha(255);glassPaint.setShader(null);
+            if(backdrop!=null&&!backdrop.isRecycled())canvas.drawBitmap(backdrop,null,glassRect,glassPaint);
+            glassPaint.setShader(glassGradient);canvas.drawRoundRect(glassRect,radius,radius,glassPaint);glassPaint.setShader(null);
+            glassPaint.setColor(tintColor);canvas.drawRoundRect(glassRect,radius,radius,glassPaint);
+            glassPaint.setShader(highlightGradient);canvas.drawRoundRect(glassRect,radius,radius,glassPaint);glassPaint.setShader(null);
+            float bubble=Math.max(dp(24),h*.64f);
+            glassPaint.setColor(shaderNight?Color.argb(32,255,255,255):Color.argb(54,255,255,255));
+            bubbleRect.set(dp(20),dp(7),dp(20)+bubble*1.7f,dp(7)+bubble);canvas.drawOval(bubbleRect,glassPaint);
+            glassPaint.setColor(shaderNight?Color.argb(20,255,255,255):Color.argb(38,255,255,255));
+            bubbleRect.set(w-bubble*1.55f-dp(18),h-bubble*.95f,w-dp(18),h+bubble*.08f);canvas.drawOval(bubbleRect,glassPaint);
+            canvas.restoreToCount(saved);glassPaint.setStyle(Paint.Style.STROKE);glassPaint.setStrokeWidth(dp(1));glassPaint.setColor(strokeColor);
+            canvas.drawRoundRect(glassRect,radius,radius,glassPaint);glassPaint.setStyle(Paint.Style.FILL);super.onDraw(canvas);
+        }
+        private Bitmap captureBackdropIfNeeded(int w,int h){
+            if(blurSource==null||blurSource==this||!blurSource.isAttachedToWindow()||blurSource.getWidth()<=0||blurSource.getHeight()<=0)return blurBitmap;
+            blurSource.getLocationInWindow(sourcePos);getLocationInWindow(ownPos);
+            if(sourcePos[0]!=capturedSourceX||sourcePos[1]!=capturedSourceY||ownPos[0]!=capturedOwnX||ownPos[1]!=capturedOwnY)backdropDirty=true;
+            if(!backdropDirty)return blurBitmap;
+            long now=android.os.SystemClock.uptimeMillis(),remaining=48-(now-lastBlurAt);
+            if(blurBitmap!=null&&remaining>0){
+                if(!refreshPosted){refreshPosted=true;postDelayed(refreshBackdrop,remaining);}return blurBitmap;
             }
-            long now = System.currentTimeMillis();
-            if (blurBitmap != null && !blurBitmap.isRecycled() && now - lastBlurAt < 72) {
-                return blurBitmap;
-            }
-            int sample = 6;
-            int bw = Math.max(1, w / sample);
-            int bh = Math.max(1, h / sample);
-            Bitmap raw = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
-            raw.eraseColor(Color.TRANSPARENT);
-            Canvas c = new Canvas(raw);
-            int[] sourcePos = new int[2];
-            int[] ownPos = new int[2];
-            blurSource.getLocationInWindow(sourcePos);
-            getLocationInWindow(ownPos);
-            c.scale(1f / sample, 1f / sample);
-            c.translate(-(ownPos[0] - sourcePos[0]), -(ownPos[1] - sourcePos[1]));
-            capturingBackdrop = true;
-            try {
-                blurSource.draw(c);
-            } finally {
-                capturingBackdrop = false;
-            }
-            Bitmap blurred = boxBlur(raw, 5);
-            if (blurBitmap != null && blurBitmap != blurred && !blurBitmap.isRecycled()) {
-                blurBitmap.recycle();
-            }
-            blurBitmap = blurred;
-            lastBlurAt = now;
+            backdropDirty=false;lastBlurAt=now;
+            capturedSourceX=sourcePos[0];capturedSourceY=sourcePos[1];capturedOwnX=ownPos[0];capturedOwnY=ownPos[1];
+            int sample=6,bw=Math.max(1,w/sample),bh=Math.max(1,h/sample),count=bw*bh;
+            try{
+                if(captureBitmap==null||captureBitmap.isRecycled()||captureBitmap.getWidth()!=bw||captureBitmap.getHeight()!=bh){
+                    Bitmap replacement=Bitmap.createBitmap(bw,bh,Bitmap.Config.ARGB_8888);
+                    if(captureBitmap!=null&&!captureBitmap.isRecycled())captureBitmap.recycle();captureBitmap=replacement;
+                }
+                if(blurInput==null||blurInput.length!=count||blurMid==null||blurMid.length!=count||blurOutput==null||blurOutput.length!=count){
+                    int[] input=new int[count],mid=new int[count],output=new int[count];
+                    blurInput=input;blurMid=mid;blurOutput=output;
+                }
+                if(captureCanvas==null)captureCanvas=new Canvas();captureCanvas.setBitmap(captureBitmap);
+                captureBitmap.eraseColor(Color.TRANSPARENT);int saved=captureCanvas.save();
+                capturingBackdrop=true;
+                try{captureCanvas.scale(1f/sample,1f/sample);captureCanvas.translate(-(ownPos[0]-sourcePos[0]),-(ownPos[1]-sourcePos[1]));blurSource.draw(captureCanvas);}
+                finally{capturingBackdrop=false;captureCanvas.restoreToCount(saved);}
+                boxBlur(captureBitmap,5);
+                Bitmap previous=blurBitmap;blurBitmap=captureBitmap;captureBitmap=previous;
+                captureCanvas.setBitmap(null);captureCount++;
+                capturedSourceX=sourcePos[0];capturedSourceY=sourcePos[1];capturedOwnX=ownPos[0];capturedOwnY=ownPos[1];
+            }catch(OutOfMemoryError|RuntimeException unavailable){capturingBackdrop=false;}
             return blurBitmap;
         }
-
-        private Bitmap boxBlur(Bitmap source, int radius) {
-            if (source == null || source.isRecycled() || radius <= 0) {
-                return source;
+        private void boxBlur(Bitmap source,int r){
+            int w=source.getWidth(),h=source.getHeight(),size=r*2+1;source.getPixels(blurInput,0,w,0,0,w,h);
+            for(int y=0;y<h;y++)for(int x=0;x<w;x++){
+                int a=0,red=0,g=0,b=0;
+                for(int k=-r;k<=r;k++){int c=blurInput[y*w+Math.max(0,Math.min(w-1,x+k))];a+=Color.alpha(c);red+=Color.red(c);g+=Color.green(c);b+=Color.blue(c);}
+                blurMid[y*w+x]=Color.argb(a/size,red/size,g/size,b/size);
             }
-            int w = source.getWidth();
-            int h = source.getHeight();
-            int[] input = new int[w * h];
-            int[] mid = new int[w * h];
-            int[] output = new int[w * h];
-            source.getPixels(input, 0, w, 0, 0, w, h);
-            int size = radius * 2 + 1;
-            for (int y = 0; y < h; y++) {
-                int row = y * w;
-                for (int x = 0; x < w; x++) {
-                    int a = 0;
-                    int r = 0;
-                    int g = 0;
-                    int b = 0;
-                    for (int k = -radius; k <= radius; k++) {
-                        int px = Math.max(0, Math.min(w - 1, x + k));
-                        int color = input[row + px];
-                        a += Color.alpha(color);
-                        r += Color.red(color);
-                        g += Color.green(color);
-                        b += Color.blue(color);
-                    }
-                    mid[row + x] = Color.argb(a / size, r / size, g / size, b / size);
-                }
+            for(int y=0;y<h;y++)for(int x=0;x<w;x++){
+                int a=0,red=0,g=0,b=0;
+                for(int k=-r;k<=r;k++){int c=blurMid[Math.max(0,Math.min(h-1,y+k))*w+x];a+=Color.alpha(c);red+=Color.red(c);g+=Color.green(c);b+=Color.blue(c);}
+                blurOutput[y*w+x]=Color.argb(a/size,red/size,g/size,b/size);
             }
-            for (int y = 0; y < h; y++) {
-                for (int x = 0; x < w; x++) {
-                    int a = 0;
-                    int r = 0;
-                    int g = 0;
-                    int b = 0;
-                    for (int k = -radius; k <= radius; k++) {
-                        int py = Math.max(0, Math.min(h - 1, y + k));
-                        int color = mid[py * w + x];
-                        a += Color.alpha(color);
-                        r += Color.red(color);
-                        g += Color.green(color);
-                        b += Color.blue(color);
-                    }
-                    output[y * w + x] = Color.argb(a / size, r / size, g / size, b / size);
-                }
-            }
-            source.setPixels(output, 0, w, 0, 0, w, h);
-            return source;
+            source.setPixels(blurOutput,0,w,0,0,w,h);
         }
-
-        @Override
-        protected void onDetachedFromWindow() {
-            if (blurBitmap != null && !blurBitmap.isRecycled()) {
-                blurBitmap.recycle();
-            }
-            blurBitmap = null;
-            super.onDetachedFromWindow();
+        @Override protected void onDetachedFromWindow(){
+            detachBackdropObservers();removeCallbacks(refreshBackdrop);refreshPosted=false;
+            if(aiChatBar==this)aiChatBar=null;
+            if(captureCanvas!=null)captureCanvas.setBitmap(null);captureCanvas=null;
+            if(blurBitmap!=null&&!blurBitmap.isRecycled())blurBitmap.recycle();
+            if(captureBitmap!=null&&!captureBitmap.isRecycled())captureBitmap.recycle();
+            blurBitmap=captureBitmap=null;blurInput=blurMid=blurOutput=null;backdropDirty=true;super.onDetachedFromWindow();
         }
     }
 
@@ -25411,62 +20103,6 @@ public class MainActivity extends Activity {
             canvas.clipPath(clipPath);
             super.dispatchDraw(canvas);
             canvas.restoreToCount(save);
-        }
-    }
-
-    private class CalendarSwipeLayout extends LinearLayout {
-        private float downX;
-        private float downY;
-        private boolean handled;
-
-        CalendarSwipeLayout(Context context) {
-            super(context);
-        }
-
-        @Override
-        public boolean dispatchTouchEvent(MotionEvent event) {
-            if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                downX = event.getX();
-                downY = event.getY();
-                handled = false;
-                getParent().requestDisallowInterceptTouchEvent(true);
-            } else if (event.getAction() == MotionEvent.ACTION_MOVE && !handled) {
-                if (handleCalendarDelta(event.getX() - downX, event.getY() - downY)) {
-                    handled = true;
-                    return true;
-                }
-            } else if ((event.getAction() == MotionEvent.ACTION_UP
-                    || event.getAction() == MotionEvent.ACTION_CANCEL) && !handled) {
-                if (handleCalendarDelta(event.getX() - downX, event.getY() - downY)) {
-                    handled = true;
-                    return true;
-                }
-            }
-            return handled || super.dispatchTouchEvent(event);
-        }
-
-        private boolean handleCalendarDelta(float dx, float dy) {
-            float absX = Math.abs(dx);
-            float absY = Math.abs(dy);
-            if (absX > dp(18) && absX > absY * 1.15f) {
-                if (calendarCollapsed) {
-                    moveWeek(dx < 0 ? 1 : -1);
-                } else {
-                    moveMonth(dx < 0 ? 1 : -1);
-                }
-                return true;
-            }
-            if (dy < -dp(7) && absY > absX * 0.65f && !calendarCollapsed) {
-                calendarCollapsed = true;
-                refreshCalendarOnly(true);
-                return true;
-            }
-            if (dy > dp(7) && absY > absX * 0.65f && calendarCollapsed) {
-                calendarCollapsed = false;
-                refreshCalendarOnly(true);
-                return true;
-            }
-            return false;
         }
     }
 
@@ -25686,356 +20322,17 @@ public class MainActivity extends Activity {
         }
     }
 
-    private class AiStickerPreviewView extends View {
-        private final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint dimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF imageDst = new RectF();
-        private Bitmap source;
-        private Bitmap sticker;
 
-        AiStickerPreviewView(Context context) {
-            super(context);
-            bitmapPaint.setFilterBitmap(true);
-            bitmapPaint.setDither(true);
-            dimPaint.setColor(Color.argb(142, 80, 82, 88));
-            borderPaint.setStyle(Paint.Style.STROKE);
-            borderPaint.setStrokeWidth(dp(2));
-            borderPaint.setColor(adjustAlpha(accent, 180));
-        }
 
-        void setBitmaps(Bitmap source, Bitmap sticker) {
-            this.source = source;
-            this.sticker = sticker;
-            invalidate();
-        }
-
-        void setSticker(Bitmap sticker) {
-            this.sticker = sticker;
-            invalidate();
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            canvas.drawColor(photoViewerBackgroundColor());
-            if (source == null || source.getWidth() <= 0 || source.getHeight() <= 0) {
-                return;
-            }
-            float maxW = Math.max(1f, getWidth() - dp(28));
-            float maxH = Math.max(1f, getHeight() - dp(220));
-            float fit = Math.min(maxW / source.getWidth(), maxH / source.getHeight());
-            float w = source.getWidth() * fit;
-            float h = source.getHeight() * fit;
-            float left = (getWidth() - w) / 2f;
-            float top = dp(116) + (maxH - h) / 2f;
-            imageDst.set(left, top, left + w, top + h);
-            canvas.drawBitmap(source, null, imageDst, bitmapPaint);
-            canvas.drawRoundRect(imageDst, dp(14), dp(14), dimPaint);
-            if (sticker != null) {
-                canvas.drawBitmap(sticker, null, imageDst, bitmapPaint);
-            }
-            canvas.drawRoundRect(imageDst, dp(14), dp(14), borderPaint);
-        }
-    }
-
-    private class CropStickerView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint dimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF imageDst = new RectF();
-        private final RectF cropRect = new RectF();
-        private Bitmap bitmap;
-        private float scale = 1f;
-        private float lastX;
-        private float lastY;
-
-        CropStickerView(Context context) {
-            super(context);
-            dimPaint.setColor(Color.argb(118, 0, 0, 0));
-        }
-
-        void setBitmap(Bitmap bitmap) {
-            this.bitmap = bitmap;
-            invalidate();
-        }
-
-        @Override
-        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
-            super.onSizeChanged(w, h, oldw, oldh);
-            layoutCrop();
-        }
-
-        private void layoutCrop() {
-            if (bitmap == null || getWidth() == 0 || getHeight() == 0) {
-                return;
-            }
-            scale = Math.min(getWidth() / (float) bitmap.getWidth(), getHeight() / (float) bitmap.getHeight());
-            float dw = bitmap.getWidth() * scale;
-            float dh = bitmap.getHeight() * scale;
-            imageDst.set((getWidth() - dw) / 2f, (getHeight() - dh) / 2f,
-                    (getWidth() + dw) / 2f, (getHeight() + dh) / 2f);
-            float side = Math.min(dw, dh) * 0.58f;
-            cropRect.set(imageDst.centerX() - side / 2f, imageDst.centerY() - side / 2f,
-                    imageDst.centerX() + side / 2f, imageDst.centerY() + side / 2f);
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            if (bitmap == null) {
-                return;
-            }
-            if (imageDst.width() <= 0) {
-                layoutCrop();
-            }
-            canvas.drawBitmap(bitmap, null, imageDst, paint);
-            canvas.drawRect(0, 0, getWidth(), cropRect.top, dimPaint);
-            canvas.drawRect(0, cropRect.bottom, getWidth(), getHeight(), dimPaint);
-            canvas.drawRect(0, cropRect.top, cropRect.left, cropRect.bottom, dimPaint);
-            canvas.drawRect(cropRect.right, cropRect.top, getWidth(), cropRect.bottom, dimPaint);
-
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(3));
-            paint.setColor(accent);
-            canvas.drawRoundRect(cropRect, dp(18), dp(18), paint);
-            paint.setStrokeWidth(dp(1));
-            paint.setColor(Color.WHITE);
-            canvas.drawRoundRect(cropRect.left + dp(4), cropRect.top + dp(4),
-                    cropRect.right - dp(4), cropRect.bottom - dp(4), dp(14), dp(14), paint);
-            paint.setStyle(Paint.Style.FILL);
-        }
-
-        @Override
-        public boolean onTouchEvent(MotionEvent event) {
-            if (bitmap == null) {
-                return true;
-            }
-            if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                lastX = event.getX();
-                lastY = event.getY();
-                return true;
-            }
-            if (event.getAction() == MotionEvent.ACTION_MOVE) {
-                float dx = event.getX() - lastX;
-                float dy = event.getY() - lastY;
-                cropRect.offset(dx, dy);
-                keepCropInside();
-                lastX = event.getX();
-                lastY = event.getY();
-                invalidate();
-                return true;
-            }
-            return true;
-        }
-
-        private void keepCropInside() {
-            float dx = 0f;
-            float dy = 0f;
-            if (cropRect.left < imageDst.left) {
-                dx = imageDst.left - cropRect.left;
-            } else if (cropRect.right > imageDst.right) {
-                dx = imageDst.right - cropRect.right;
-            }
-            if (cropRect.top < imageDst.top) {
-                dy = imageDst.top - cropRect.top;
-            } else if (cropRect.bottom > imageDst.bottom) {
-                dy = imageDst.bottom - cropRect.bottom;
-            }
-            cropRect.offset(dx, dy);
-        }
-
-        private Bitmap selectedCropBitmap() {
-            if (bitmap == null || scale <= 0f) {
-                return null;
-            }
-            int sx = Math.max(0, Math.round((cropRect.left - imageDst.left) / scale));
-            int sy = Math.max(0, Math.round((cropRect.top - imageDst.top) / scale));
-            int sw = Math.min(bitmap.getWidth() - sx, Math.max(1, Math.round(cropRect.width() / scale)));
-            int sh = Math.min(bitmap.getHeight() - sy, Math.max(1, Math.round(cropRect.height() / scale)));
-            return Bitmap.createBitmap(bitmap, sx, sy, sw, sh);
-        }
-
-    }
-
-    private class LiquidGlassNavLayout extends FrameLayout {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        private final Path glassPath = new Path();
-        private final RectF glassRect = new RectF();
-        private View blurSource;
-        private Bitmap blurBitmap;
-        private int[] blurInput;
-        private int[] blurMiddle;
-        private int[] blurOutput;
-        private long lastBlurAt;
-
-        LiquidGlassNavLayout(Context context) {
-            super(context);
-            setWillNotDraw(false);
-            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-        }
-
-        void setBlurSource(View source) {
-            blurSource = source;
-            refreshGlass();
-        }
-
-        void refreshGlass() {
-            lastBlurAt = 0L;
-            invalidate();
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            int width = getWidth();
-            int height = getHeight();
-            if (width <= 0 || height <= 0) {
-                return;
-            }
-            float inset = dp(6);
-            glassRect.set(inset, inset, width - inset, height - inset);
-            float radius = glassRect.height() / 2f;
-            glassPath.reset();
-            glassPath.addRoundRect(glassRect, radius, radius, Path.Direction.CW);
-
-            paint.setShader(null);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(nightDecoration() ? Color.argb(28, 40, 42, 48) : Color.argb(20, 255, 255, 255));
-            paint.setShadowLayer(dp(5), 0f, 0f,
-                    nightDecoration() ? Color.argb(70, 0, 0, 0) : Color.argb(44, 72, 82, 96));
-            canvas.drawRoundRect(glassRect, radius, radius, paint);
-            paint.clearShadowLayer();
-
-            int save = canvas.save();
-            canvas.clipPath(glassPath);
-            if (navGlassEnabled()) {
-                Bitmap backdrop = captureBlurredBackdrop(width, height);
-                if (backdrop != null && !backdrop.isRecycled()) {
-                    paint.setAlpha(255);
-                    canvas.drawBitmap(backdrop, null, new RectF(0, 0, width, height), paint);
-                }
-                paint.setAlpha(255);
-                paint.setColor(navSurfaceColor());
-                canvas.drawRoundRect(glassRect, radius, radius, paint);
-                paint.setShader(new LinearGradient(0, glassRect.top, 0,
-                        glassRect.top + glassRect.height() * 0.56f,
-                        nightDecoration() ? Color.argb(46, 255, 255, 255) : Color.argb(92, 255, 255, 255),
-                        Color.TRANSPARENT, Shader.TileMode.CLAMP));
-                canvas.drawRoundRect(glassRect, radius, radius, paint);
-                paint.setShader(null);
-            } else {
-                paint.setAlpha(255);
-                paint.setShader(null);
-                paint.setColor(navSurfaceColor());
-                canvas.drawRoundRect(glassRect, radius, radius, paint);
-            }
-            canvas.restoreToCount(save);
-
-            int strokeColor = navStrokeColor();
-            if (Color.alpha(strokeColor) > 0) {
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dp(1));
-                paint.setColor(strokeColor);
-                canvas.drawRoundRect(glassRect, radius, radius, paint);
-                paint.setStyle(Paint.Style.FILL);
-            }
-            if (navGlassEnabled()) {
-                postInvalidateDelayed(84L);
-            }
-        }
-
-        private Bitmap captureBlurredBackdrop(int width, int height) {
-            if (blurSource == null || blurSource.getWidth() <= 0 || blurSource.getHeight() <= 0) {
-                return null;
-            }
-            long now = System.currentTimeMillis();
-            if (blurBitmap != null && !blurBitmap.isRecycled() && now - lastBlurAt < 72L) {
-                return blurBitmap;
-            }
-            int sample = 8;
-            int bitmapWidth = Math.max(1, width / sample);
-            int bitmapHeight = Math.max(1, height / sample);
-            if (blurBitmap == null || blurBitmap.isRecycled()
-                    || blurBitmap.getWidth() != bitmapWidth || blurBitmap.getHeight() != bitmapHeight) {
-                if (blurBitmap != null && !blurBitmap.isRecycled()) {
-                    blurBitmap.recycle();
-                }
-                blurBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
-                blurInput = null;
-                blurMiddle = null;
-                blurOutput = null;
-            }
-            blurBitmap.eraseColor(Color.TRANSPARENT);
-            Canvas capture = new Canvas(blurBitmap);
-            int[] sourcePosition = new int[2];
-            int[] ownPosition = new int[2];
-            blurSource.getLocationInWindow(sourcePosition);
-            getLocationInWindow(ownPosition);
-            capture.scale(1f / sample, 1f / sample);
-            capture.translate(-(ownPosition[0] - sourcePosition[0]),
-                    -(ownPosition[1] - sourcePosition[1]));
-            blurSource.draw(capture);
-            blurNavBitmap(blurBitmap, 5);
-            lastBlurAt = now;
-            return blurBitmap;
-        }
-
-        private void blurNavBitmap(Bitmap bitmap, int radius) {
-            int width = bitmap.getWidth();
-            int height = bitmap.getHeight();
-            int pixelCount = width * height;
-            if (pixelCount <= 1) {
-                return;
-            }
-            if (blurInput == null || blurInput.length != pixelCount) {
-                blurInput = new int[pixelCount];
-                blurMiddle = new int[pixelCount];
-                blurOutput = new int[pixelCount];
-            }
-            bitmap.getPixels(blurInput, 0, width, 0, 0, width, height);
-            int window = radius * 2 + 1;
-            for (int y = 0; y < height; y++) {
-                int row = y * width;
-                for (int x = 0; x < width; x++) {
-                    int a = 0, r = 0, g = 0, b = 0;
-                    for (int offset = -radius; offset <= radius; offset++) {
-                        int px = Math.max(0, Math.min(width - 1, x + offset));
-                        int color = blurInput[row + px];
-                        a += Color.alpha(color);
-                        r += Color.red(color);
-                        g += Color.green(color);
-                        b += Color.blue(color);
-                    }
-                    blurMiddle[row + x] = Color.argb(a / window, r / window, g / window, b / window);
-                }
-            }
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    int a = 0, r = 0, g = 0, b = 0;
-                    for (int offset = -radius; offset <= radius; offset++) {
-                        int py = Math.max(0, Math.min(height - 1, y + offset));
-                        int color = blurMiddle[py * width + x];
-                        a += Color.alpha(color);
-                        r += Color.red(color);
-                        g += Color.green(color);
-                        b += Color.blue(color);
-                    }
-                    blurOutput[y * width + x] = Color.argb(a / window, r / window, g / window, b / window);
-                }
-            }
-            bitmap.setPixels(blurOutput, 0, width, 0, 0, width, height);
-        }
-
-        @Override
-        protected void onDetachedFromWindow() {
-            if (blurBitmap != null && !blurBitmap.isRecycled()) {
-                blurBitmap.recycle();
-            }
-            blurBitmap = null;
-            blurInput = null;
-            blurMiddle = null;
-            blurOutput = null;
-            blurSource = null;
-            super.onDetachedFromWindow();
+    private class PaperNavLayout extends FrameLayout {
+        private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);private final RectF rect=new RectF();
+        PaperNavLayout(Context context){super(context);setWillNotDraw(false);setLayerType(View.LAYER_TYPE_SOFTWARE,null);}
+        void refreshPaper(){invalidate();}
+        @Override protected void onDraw(Canvas canvas){
+            super.onDraw(canvas);float inset=dp(6);rect.set(inset,inset,getWidth()-inset,getHeight()-inset);float radius=rect.height()/2f;
+            paint.setStyle(Paint.Style.FILL);paint.setColor(UiTokens.card(nightDecoration()));
+            paint.setShadowLayer(dp(5),0,0,nightDecoration()?Color.argb(70,0,0,0):Color.argb(36,72,60,48));canvas.drawRoundRect(rect,radius,radius,paint);paint.clearShadowLayer();
+            paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(dp(1));paint.setColor(UiTokens.line(nightDecoration()));canvas.drawRoundRect(rect,radius,radius,paint);paint.setStyle(Paint.Style.FILL);
         }
     }
 
@@ -26110,6 +20407,12 @@ public class MainActivity extends Activity {
         path.close();
     }
 
+    private int settingIconTint(int color) {
+        int baseColor=themedTextColor(color);
+        int tint=blendColor(baseColor,Color.WHITE,nightDecoration()?0.18f:0.34f);
+        return adjustAlpha(tint,nightDecoration()?188:202);
+    }
+
     private class SettingIconView extends View {
         private final String type;
         private final int color;
@@ -26121,6 +20424,7 @@ public class MainActivity extends Activity {
             super(context);
             this.type = type == null ? "" : type;
             this.color = color;
+            setTag("settings_row_icon");
             setWillNotDraw(false);
         }
 
@@ -26132,16 +20436,8 @@ public class MainActivity extends Activity {
             float s = Math.min(w, h);
             float cx = w / 2f;
             float cy = h / 2f;
-            int baseColor = themedTextColor(color);
-            int c = blendColor(baseColor, Color.WHITE, nightDecoration() ? 0.18f : 0.34f);
-
             paint.setShader(null);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(adjustAlpha(blendColor(c, Color.WHITE, 0.80f), nightDecoration() ? 46 : 58));
-            rect.set(s * 0.08f, s * 0.08f, w - s * 0.08f, h - s * 0.08f);
-            canvas.drawRoundRect(rect, s * 0.24f, s * 0.24f, paint);
-
-            paint.setColor(adjustAlpha(c, nightDecoration() ? 188 : 202));
+            paint.setColor(settingIconTint(color));
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeCap(Paint.Cap.ROUND);
             paint.setStrokeJoin(Paint.Join.ROUND);
@@ -26487,10 +20783,10 @@ public class MainActivity extends Activity {
         private void drawFont(Canvas canvas, float cx, float cy, float s) {
             paint.setStyle(Paint.Style.FILL);
             paint.setTextAlign(Paint.Align.CENTER);
-            paint.setTypeface(Typeface.DEFAULT_BOLD);
+            paint.setTypeface(AppTypography.typeface(MainActivity.this,true));
             paint.setTextSize(s * 0.38f);
             canvas.drawText("Aa", cx, cy + s * 0.12f, paint);
-            paint.setTypeface(Typeface.DEFAULT);
+            paint.setTypeface(AppTypography.typeface(MainActivity.this,false));
             paint.setStyle(Paint.Style.STROKE);
         }
 
@@ -26714,8 +21010,7 @@ public class MainActivity extends Activity {
             int index = Math.abs((int) ((System.currentTimeMillis() / 3600L) % messages.length));
             String text = messages[index];
             paint.setTextSize(dp(16));
-            Typeface bubbleTypeface = globalFontFollowsBookEnabled()
-                    ? bookDetailTypeface(false) : Typeface.DEFAULT;
+            Typeface bubbleTypeface = AppTypography.typeface(MainActivity.this,false);
             paint.setTypeface(bubbleTypeface);
             text = fitBubbleText(text, w - dp(74));
             float textW = Math.min(w - dp(64), paint.measureText(text));
@@ -26748,132 +21043,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private class AiPulseView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Handler handler = new Handler(Looper.getMainLooper());
-        private float phase = 0f;
-        private final Runnable tick = new Runnable() {
-            @Override
-            public void run() {
-                phase += 0.035f;
-                if (phase > 1f) {
-                    phase -= 1f;
-                }
-                invalidate();
-                handler.postDelayed(this, 28);
-            }
-        };
 
-        AiPulseView(Context context) {
-            super(context);
-        }
-
-        @Override
-        protected void onAttachedToWindow() {
-            super.onAttachedToWindow();
-            handler.post(tick);
-        }
-
-        @Override
-        protected void onDetachedFromWindow() {
-            handler.removeCallbacks(tick);
-            super.onDetachedFromWindow();
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float cx = getWidth() / 2f;
-            float cy = getHeight() / 2f;
-            float base = Math.min(getWidth(), getHeight()) * 0.26f;
-            for (int i = 0; i < 3; i++) {
-                float t = (phase + i / 3f) % 1f;
-                paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(dp(2));
-                paint.setColor(Color.argb((int) (88 * (1f - t)), Color.red(accent), Color.green(accent), Color.blue(accent)));
-                canvas.drawCircle(cx, cy, base + t * dp(42), paint);
-            }
-            paint.setStyle(Paint.Style.FILL);
-            paint.setShader(new LinearGradient(cx - base, cy - base, cx + base, cy + base,
-                    blendColor(accent, Color.WHITE, 0.12f), blendColor(accentSoft, Color.WHITE, 0.34f),
-                    Shader.TileMode.CLAMP));
-            canvas.drawCircle(cx, cy, base, paint);
-            paint.setShader(null);
-            paint.setColor(Color.WHITE);
-            paint.setTextAlign(Paint.Align.CENTER);
-            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            paint.setTextSize(dp(28));
-            canvas.drawText("AI", cx, cy + dp(10), paint);
-            paint.setTextAlign(Paint.Align.LEFT);
-        }
-    }
-
-    private class PhotoFabButton extends TextView {
-        private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF iconRect = new RectF();
-        private final Path iconPath = new Path();
-        private boolean expanded;
-
-        PhotoFabButton(Context context) {
-            super(context);
-            setWillNotDraw(false);
-        }
-
-        void setExpanded(boolean expanded) {
-            this.expanded = expanded;
-            setIncludeFontPadding(false);
-            invalidate();
-        }
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            if (expanded) {
-                super.onDraw(canvas);
-                return;
-            }
-            float w = getWidth();
-            float h = getHeight();
-            float size = Math.min(w, h) * 0.62f;
-            float left = (w - size) / 2f;
-            float top = (h - size) / 2f;
-
-            int iconColor = nightDecoration() ? Color.rgb(232, 236, 242)
-                    : blendColor(accent, Color.rgb(32, 116, 76), 0.22f);
-            iconPaint.setStrokeCap(Paint.Cap.ROUND);
-            iconPaint.setStrokeJoin(Paint.Join.ROUND);
-            iconPaint.setShader(null);
-            iconPaint.setStyle(Paint.Style.FILL);
-            iconRect.set(left, top, left + size, top + size);
-            iconPaint.setColor(adjustAlpha(blendColor(Color.WHITE, accentSoft, 0.16f), nightDecoration() ? 54 : 150));
-            canvas.drawRoundRect(iconRect, dp(7), dp(7), iconPaint);
-
-            iconPaint.setColor(adjustAlpha(iconColor, nightDecoration() ? 230 : 236));
-            iconPaint.setStyle(Paint.Style.STROKE);
-            iconPaint.setStrokeWidth(dp(5.2f));
-            canvas.drawRoundRect(iconRect, dp(7), dp(7), iconPaint);
-
-            iconPaint.setStyle(Paint.Style.FILL);
-            canvas.drawCircle(left + size * 0.73f, top + size * 0.26f, size * 0.13f, iconPaint);
-
-            iconPaint.setStyle(Paint.Style.FILL);
-            iconPath.reset();
-            iconPath.moveTo(left + size * 0.08f, top + size * 0.80f);
-            iconPath.lineTo(left + size * 0.34f, top + size * 0.42f);
-            iconPath.lineTo(left + size * 0.55f, top + size * 0.68f);
-            iconPath.lineTo(left + size * 0.72f, top + size * 0.52f);
-            iconPath.lineTo(left + size * 0.92f, top + size * 0.80f);
-            iconPath.lineTo(left + size * 0.92f, top + size * 0.90f);
-            iconPath.lineTo(left + size * 0.08f, top + size * 0.90f);
-            iconPath.close();
-            canvas.drawPath(iconPath, iconPaint);
-
-            iconPaint.setColor(adjustAlpha(Color.WHITE, nightDecoration() ? 42 : 112));
-            iconPaint.setStyle(Paint.Style.STROKE);
-            iconPaint.setStrokeWidth(dp(1.4f));
-            canvas.drawLine(left + size * 0.18f, top + size * 0.17f,
-                    left + size * 0.52f, top + size * 0.17f, iconPaint);
-        }
-    }
 
     private class TabIconView extends View {
         private final int tabIndex;
@@ -26899,9 +21069,21 @@ public class MainActivity extends Activity {
             iconPaint.setColor(iconColor);
             if (tabIndex == 0) {
                 drawSunIcon(canvas);
+            } else if (tabIndex == 3) {
+                drawPersonIcon(canvas);
             } else {
                 drawBookIcon(canvas);
             }
+        }
+
+        private void drawPersonIcon(Canvas canvas) {
+            float cx = getWidth()/2f, cy = getHeight()/2f;
+            iconPaint.setStyle(Paint.Style.STROKE); iconPaint.setStrokeWidth(dp(1.8f));
+            canvas.drawCircle(cx, cy-dp(5), dp(4), iconPaint);
+            Path shoulders = new Path();
+            shoulders.moveTo(cx-dp(9), cy+dp(9));
+            shoulders.cubicTo(cx-dp(9), cy-dp(1), cx+dp(9), cy-dp(1), cx+dp(9), cy+dp(9));
+            shoulders.close(); canvas.drawPath(shoulders, iconPaint);
         }
 
         private void drawSunIcon(Canvas canvas) {
@@ -26973,282 +21155,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    private class ProfileCardDrawable extends Drawable {
-        private final int base;
-        private final int soft;
-        private final int mode;
-        private final boolean night;
-        private final boolean glassy;
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF rect = new RectF();
-        private final RectF shapeRect = new RectF();
-        private final Path clip = new Path();
-        private final Path shape = new Path();
-
-        ProfileCardDrawable(int base, int soft, int mode, boolean night, boolean glassy) {
-            this.base = base;
-            this.soft = soft;
-            this.mode = mode;
-            this.night = night;
-            this.glassy = glassy;
-        }
-
-        @Override
-        public void draw(Canvas canvas) {
-            rect.set(getBounds());
-            float radius = dp(28);
-            clip.reset();
-            clip.addRoundRect(rect, radius, radius, Path.Direction.CW);
-            int save = canvas.save();
-            canvas.clipPath(clip);
-
-            paint.setShader(new LinearGradient(rect.left, rect.top, rect.right, rect.bottom,
-                    profileCardTop(), profileCardBottom(), Shader.TileMode.CLAMP));
-            canvas.drawRoundRect(rect, radius, radius, paint);
-            paint.setShader(null);
-
-            drawProfileGlass(canvas);
-            if (night) {
-                drawProfileNight(canvas);
-            } else if (mode == 1) {
-                drawProfileLemon(canvas);
-            } else if (mode == 2) {
-                drawProfileCandy(canvas);
-            } else if (mode == 3) {
-                drawProfileTide(canvas);
-            } else {
-                drawProfileLeaf(canvas);
-            }
-
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(1));
-            paint.setColor(night ? Color.argb(108, 224, 230, 238) : Color.argb(92, 255, 255, 255));
-            shapeRect.set(rect.left + dp(1), rect.top + dp(1), rect.right - dp(1), rect.bottom - dp(1));
-            canvas.drawRoundRect(shapeRect, radius, radius, paint);
-            canvas.restoreToCount(save);
-        }
-
-        private int profileCardTop() {
-            if (glassy) {
-                return night ? Color.argb(156, 48, 50, 56) : Color.argb(150, 255, 255, 255);
-            }
-            if (night) {
-                return Color.rgb(48, 50, 56);
-            }
-            if (mode == 1) {
-                return Color.rgb(255, 226, 48);
-            }
-            if (mode == 2) {
-                return Color.rgb(255, 97, 116);
-            }
-            if (mode == 3) {
-                return Color.rgb(69, 196, 236);
-            }
-            return Color.rgb(88, 211, 137);
-        }
-
-        private int profileCardBottom() {
-            if (glassy) {
-                return night ? Color.argb(118, 24, 26, 31) : Color.argb(104, 255, 255, 255);
-            }
-            if (night) {
-                return Color.rgb(24, 26, 31);
-            }
-            if (mode == 1) {
-                return Color.rgb(255, 164, 45);
-            }
-            if (mode == 2) {
-                return Color.rgb(219, 70, 155);
-            }
-            if (mode == 3) {
-                return Color.rgb(58, 128, 232);
-            }
-            return Color.rgb(38, 166, 129);
-        }
-
-        private void drawProfileGlass(Canvas canvas) {
-            paint.setStyle(Paint.Style.FILL);
-            paint.setShader(new LinearGradient(rect.left, rect.top, rect.right, rect.top + rect.height() * 0.48f,
-                    night ? Color.argb(62, 255, 255, 255) : Color.argb(106, 255, 255, 255),
-                    Color.TRANSPARENT, Shader.TileMode.CLAMP));
-            canvas.drawRect(rect, paint);
-            paint.setShader(null);
-
-            drawLiquidBubble(canvas, rect.left + dp(38), rect.top + dp(34), dp(42), Color.argb(night ? 30 : 52, 255, 255, 255));
-            drawLiquidBubble(canvas, rect.right - dp(58), rect.top + dp(34), dp(48), Color.argb(night ? 26 : 46, 255, 255, 255));
-            drawLiquidBubble(canvas, rect.left + dp(104), rect.bottom - dp(30), dp(34), Color.argb(night ? 24 : 42, 255, 255, 255));
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(2));
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setColor(night ? Color.argb(52, 226, 232, 242) : Color.argb(82, 255, 255, 255));
-            drawProfileWave(canvas, rect.centerY() - dp(8), dp(6), dp(92));
-            drawProfileWave(canvas, rect.centerY() + dp(18), dp(5), dp(86));
-
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(night ? Color.argb(102, 18, 20, 24) : Color.argb(178, 255, 255, 255));
-            float pillTop = rect.top + rect.height() * 0.52f;
-            shapeRect.set(rect.left + dp(84), pillTop, rect.right - dp(24), pillTop + dp(30));
-            canvas.drawRoundRect(shapeRect, dp(18), dp(18), paint);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(1));
-            paint.setColor(night ? Color.argb(70, 224, 230, 238) : Color.argb(118, 255, 255, 255));
-            canvas.drawRoundRect(shapeRect, dp(18), dp(18), paint);
-
-            paint.setShader(new LinearGradient(rect.left, rect.top, rect.right, rect.bottom,
-                    Color.argb(night ? 26 : 58, 255, 255, 255), Color.TRANSPARENT, Shader.TileMode.CLAMP));
-            shapeRect.set(rect.left + dp(12), rect.top + dp(10), rect.right - dp(18), rect.top + dp(48));
-            canvas.drawRoundRect(shapeRect, dp(24), dp(24), paint);
-            paint.setShader(null);
-        }
-
-        private void drawLiquidBubble(Canvas canvas, float x, float y, float size, int color) {
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(color);
-            shape.reset();
-            shape.moveTo(x - size * 0.62f, y - size * 0.18f);
-            shape.cubicTo(x - size * 0.34f, y - size * 0.78f, x + size * 0.52f, y - size * 0.72f, x + size * 0.66f, y - size * 0.08f);
-            shape.cubicTo(x + size * 0.84f, y + size * 0.66f, x - size * 0.18f, y + size * 0.78f, x - size * 0.64f, y + size * 0.24f);
-            shape.cubicTo(x - size * 0.78f, y + size * 0.08f, x - size * 0.74f, y - size * 0.04f, x - size * 0.62f, y - size * 0.18f);
-            shape.close();
-            canvas.drawPath(shape, paint);
-        }
-
-        private void drawProfileLeaf(Canvas canvas) {
-            paint.setStyle(Paint.Style.FILL);
-            for (int i = 0; i < 4; i++) {
-                float x = rect.left + dp(28 + i * 58);
-                float y = rect.top + dp(20 + (i % 2) * 56);
-                drawProfileLeafShape(canvas, x, y, dp(15 + i % 2 * 3), Color.argb(74, 255, 255, 255));
-            }
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(2));
-            paint.setColor(Color.argb(64, 255, 255, 255));
-            drawProfileWave(canvas, rect.top + dp(34), dp(9), dp(78));
-            drawProfileWave(canvas, rect.bottom - dp(28), dp(7), dp(68));
-        }
-
-        private void drawProfileLemon(Canvas canvas) {
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(2));
-            paint.setColor(Color.argb(86, 255, 255, 255));
-            for (int i = 0; i < 5; i++) {
-                float x = rect.left + dp(34 + i * 54);
-                float y = rect.top + dp(30 + (i % 2) * 48);
-                canvas.drawCircle(x, y, dp(12 + i % 2 * 5), paint);
-            }
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.argb(58, 255, 255, 255));
-            canvas.drawCircle(rect.right - dp(38), rect.top + dp(34), dp(26), paint);
-            canvas.drawCircle(rect.left + dp(48), rect.bottom - dp(26), dp(22), paint);
-        }
-
-        private void drawProfileCandy(Canvas canvas) {
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(3));
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setColor(Color.argb(70, 255, 255, 255));
-            for (int y = (int) rect.top + dp(26); y < rect.bottom + dp(30); y += dp(34)) {
-                shape.reset();
-                shape.moveTo(rect.left - dp(16), y);
-                int amp = dp(11);
-                for (int x = (int) rect.left - dp(16); x <= rect.right + dp(48); x += dp(74)) {
-                    shape.rQuadTo(dp(37), -amp, dp(74), 0);
-                    amp = -amp;
-                }
-                canvas.drawPath(shape, paint);
-            }
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.argb(52, 255, 244, 232));
-            shapeRect.set(rect.right - dp(70), rect.bottom - dp(52), rect.right - dp(18), rect.bottom - dp(20));
-            canvas.drawRoundRect(shapeRect, dp(16), dp(16), paint);
-        }
-
-        private void drawProfileTide(Canvas canvas) {
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(2));
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            for (int i = 0; i < 4; i++) {
-                paint.setColor(Color.argb(52 + i * 8, 255, 255, 255));
-                drawProfileWave(canvas, rect.top + dp(24 + i * 24), dp(8 + i % 2 * 3), dp(82));
-            }
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.argb(48, 255, 255, 255));
-            canvas.drawCircle(rect.left + dp(36), rect.bottom - dp(36), dp(24), paint);
-            canvas.drawCircle(rect.right - dp(44), rect.top + dp(34), dp(20), paint);
-        }
-
-        private void drawProfileNight(Canvas canvas) {
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setStrokeWidth(dp(2));
-            paint.setColor(Color.argb(46, 220, 226, 235));
-            drawProfileWave(canvas, rect.top + dp(25), dp(7), dp(78));
-            drawProfileWave(canvas, rect.bottom - dp(22), dp(7), dp(76));
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(Color.argb(72, 230, 235, 242));
-            for (int i = 0; i < 6; i++) {
-                drawProfileStar(canvas, rect.left + dp(34 + i * 47), rect.top + dp(20 + (i % 3) * 32), dp(4));
-            }
-            paint.setColor(Color.argb(38, 230, 235, 242));
-            shapeRect.set(rect.right - dp(64), rect.bottom - dp(58), rect.right - dp(28), rect.bottom - dp(18));
-            canvas.drawOval(shapeRect, paint);
-        }
-
-        private void drawProfileWave(Canvas canvas, float y, int amp, int span) {
-            shape.reset();
-            shape.moveTo(rect.left - dp(24), y);
-            int currentAmp = amp;
-            for (int x = (int) rect.left - dp(24); x <= rect.right + dp(60); x += span) {
-                shape.rQuadTo(span / 2f, currentAmp, span, 0);
-                currentAmp = -currentAmp;
-            }
-            canvas.drawPath(shape, paint);
-        }
-
-        private void drawProfileLeafShape(Canvas canvas, float x, float y, float size, int color) {
-            shape.reset();
-            shape.moveTo(x, y - size);
-            shape.cubicTo(x + size, y - size * 0.4f, x + size * 0.9f, y + size * 0.5f, x, y + size);
-            shape.cubicTo(x - size * 0.9f, y + size * 0.5f, x - size, y - size * 0.4f, x, y - size);
-            paint.setColor(color);
-            canvas.drawPath(shape, paint);
-        }
-
-        private void drawProfileStar(Canvas canvas, float x, float y, float size) {
-            shape.reset();
-            shape.moveTo(x, y - size);
-            shape.lineTo(x + size * 0.28f, y - size * 0.28f);
-            shape.lineTo(x + size, y);
-            shape.lineTo(x + size * 0.28f, y + size * 0.28f);
-            shape.lineTo(x, y + size);
-            shape.lineTo(x - size * 0.28f, y + size * 0.28f);
-            shape.lineTo(x - size, y);
-            shape.lineTo(x - size * 0.28f, y - size * 0.28f);
-            shape.close();
-            canvas.drawPath(shape, paint);
-        }
-
-        @Override
-        public void setAlpha(int alpha) {
-            paint.setAlpha(alpha);
-        }
-
-        @Override
-        public void setColorFilter(android.graphics.ColorFilter colorFilter) {
-            paint.setColorFilter(colorFilter);
-        }
-
-        @Override
-        public int getOpacity() {
-            return PixelFormat.TRANSLUCENT;
-        }
-    }
 
     private class NotebookPageDrawable extends Drawable {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final RectF rect = new RectF();
         private final Path clip = new Path();
         private final String previewStyle;
+        private int drawableAlpha = 255;
 
         private NotebookPageDrawable() {
             this.previewStyle = null;
@@ -27258,97 +21171,30 @@ public class MainActivity extends Activity {
             this.previewStyle = previewStyle;
         }
 
+        @Override public void getOutline(android.graphics.Outline outline){
+            Rect bounds=getBounds();
+            if(bounds.isEmpty()){outline.setEmpty();return;}
+            outline.setRoundRect(bounds,Math.min(dp(UiTokens.NOTEBOOK_RADIUS_DP),Math.min(bounds.width(),bounds.height())*.5f));
+            outline.setAlpha(drawableAlpha/255f);
+        }
+
         @Override
         public void draw(Canvas canvas) {
             rect.set(getBounds());
-            float radius = dp(24);
+            // Decoration colors leave a translucent alpha in Paint. Reset before painting paper.
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.WHITE);
+            float radius = dp(UiTokens.NOTEBOOK_RADIUS_DP);
             clip.reset();
             clip.addRoundRect(rect, radius, radius, Path.Direction.CW);
-            int save = canvas.save();
+            int save = drawableAlpha == 255 ? canvas.save() : canvas.saveLayerAlpha(rect, drawableAlpha);
             canvas.clipPath(clip);
 
             String style = previewStyle == null ? notebookPageStyle() : previewStyle;
-            int paperTop = Color.rgb(255, 253, 246);
-            int paperBottom = Color.rgb(252, 246, 232);
-            int stripColor = Color.rgb(246, 239, 222);
-            int lineColor = Color.rgb(229, 219, 198);
-            int dotColor = Color.rgb(255, 255, 252);
-            int accentDot = Color.argb(24, 196, 154, 92);
-            if ("fresh".equals(style)) {
-                paperTop = Color.rgb(245, 255, 250);
-                paperBottom = Color.rgb(230, 248, 255);
-                stripColor = Color.rgb(216, 243, 232);
-                lineColor = Color.rgb(197, 226, 218);
-                accentDot = Color.argb(38, 72, 182, 150);
-            } else if ("pink".equals(style)) {
-                paperTop = Color.rgb(255, 248, 252);
-                paperBottom = Color.rgb(255, 235, 242);
-                stripColor = Color.rgb(253, 224, 235);
-                lineColor = Color.rgb(238, 204, 217);
-                accentDot = Color.argb(38, 222, 116, 156);
-            } else if ("grid".equals(style)) {
-                paperTop = Color.rgb(255, 253, 248);
-                paperBottom = Color.rgb(248, 250, 255);
-                stripColor = Color.rgb(236, 239, 248);
-                lineColor = Color.rgb(216, 224, 238);
-                accentDot = Color.argb(34, 102, 132, 190);
-            } else if ("plain".equals(style)) {
-                paperTop = Color.rgb(255, 255, 255);
-                paperBottom = Color.rgb(249, 250, 252);
-                stripColor = Color.rgb(240, 242, 245);
-                lineColor = Color.rgb(225, 228, 232);
-                accentDot = Color.argb(22, 90, 104, 118);
-            } else if ("recipe".equals(style)) {
-                paperTop = Color.rgb(255, 249, 236);
-                paperBottom = Color.rgb(255, 242, 218);
-                stripColor = Color.rgb(255, 226, 183);
-                lineColor = Color.rgb(232, 205, 170);
-                accentDot = Color.argb(44, 255, 145, 82);
-            } else if ("dotted".equals(style)) {
-                paperTop = Color.rgb(252, 253, 255);
-                paperBottom = Color.rgb(241, 247, 255);
-                stripColor = Color.rgb(225, 238, 255);
-                lineColor = Color.rgb(205, 218, 236);
-                accentDot = Color.argb(42, 96, 154, 221);
-            } else if ("memo".equals(style)) {
-                paperTop = Color.rgb(255, 254, 225);
-                paperBottom = Color.rgb(255, 248, 194);
-                stripColor = Color.rgb(255, 235, 141);
-                lineColor = Color.rgb(223, 205, 130);
-                accentDot = Color.argb(36, 232, 176, 30);
-            } else if ("letter".equals(style)) {
-                paperTop = Color.rgb(255, 251, 247);
-                paperBottom = Color.rgb(246, 247, 255);
-                stripColor = Color.rgb(244, 232, 220);
-                lineColor = Color.rgb(204, 218, 244);
-                accentDot = Color.argb(38, 92, 130, 214);
-            } else if ("fruit".equals(style)) {
-                paperTop = Color.rgb(255, 252, 237);
-                paperBottom = Color.rgb(238, 255, 238);
-                stripColor = Color.rgb(255, 225, 190);
-                lineColor = Color.rgb(215, 232, 183);
-                accentDot = Color.argb(48, 255, 105, 86);
-            } else if ("sunset".equals(style)) {
-                paperTop = Color.rgb(255, 244, 232);
-                paperBottom = Color.rgb(248, 231, 255);
-                stripColor = Color.rgb(255, 202, 173);
-                lineColor = Color.rgb(230, 192, 206);
-                accentDot = Color.argb(42, 255, 116, 108);
-            } else if ("blueprint".equals(style)) {
-                paperTop = Color.rgb(238, 248, 255);
-                paperBottom = Color.rgb(220, 237, 255);
-                stripColor = Color.rgb(188, 218, 248);
-                lineColor = Color.rgb(144, 190, 232);
-                accentDot = Color.argb(38, 50, 130, 210);
-            }
-            if (nightDecoration()) {
-                paperTop = Color.rgb(44, 45, 49);
-                paperBottom = Color.rgb(35, 36, 40);
-                stripColor = Color.rgb(58, 59, 64);
-                lineColor = Color.rgb(72, 74, 82);
-                dotColor = Color.rgb(30, 31, 35);
-                accentDot = Color.argb(24, 255, 255, 255);
-            }
+            int[] colors = notebookPaperPalette(style);
+            int paperTop = colors[0], paperBottom = colors[1], stripColor = colors[2];
+            int lineColor = colors[3], dotColor = colors[4], accentDot = colors[5];
             paint.setShader(new LinearGradient(rect.left, rect.top, rect.left, rect.bottom,
                     paperTop, paperBottom, Shader.TileMode.CLAMP));
             canvas.drawRoundRect(rect, radius, radius, paint);
@@ -27452,7 +21298,8 @@ public class MainActivity extends Activity {
 
         @Override
         public void setAlpha(int alpha) {
-            paint.setAlpha(alpha);
+            drawableAlpha = Math.max(0, Math.min(255, alpha));
+            invalidateSelf();
         }
 
         @Override
@@ -27474,6 +21321,7 @@ public class MainActivity extends Activity {
         private final RectF rect = new RectF();
         private final Path clip = new Path();
         private final Path shape = new Path();
+        private int drawableAlpha = 255;
 
         BookCoverDrawable(String date, int[] palette, String style) {
             this.date = date;
@@ -27481,13 +21329,30 @@ public class MainActivity extends Activity {
             this.style = style == null ? "food" : style;
         }
 
-        @Override
-        public void draw(Canvas canvas) {
+        @Override public void getOutline(android.graphics.Outline outline){
+            Rect bounds=getBounds();
+            if(bounds.isEmpty()){outline.setEmpty();return;}
+            outline.setRoundRect(bounds,Math.min(dp(UiTokens.BOOK_COVER_RADIUS_DP),Math.min(bounds.width(),bounds.height())*.5f));
+            outline.setAlpha(drawableAlpha/255f);
+        }
+
+        @Override public void draw(Canvas canvas){drawCover(canvas,true);}
+        /** Full artwork only; opening owns its single animated corner mask. */
+        void drawFlat(Canvas canvas){drawCover(canvas,false);}
+        private void drawCover(Canvas canvas,boolean rounded) {
             rect.set(getBounds());
-            clip.reset();
-            clip.addRoundRect(rect, dp(18), dp(18), Path.Direction.CW);
-            int save = canvas.save();
-            canvas.clipPath(clip);
+            // Decorations end with translucent colors. A later snapshot must draw the same cover.
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(Color.WHITE);
+            paint.setStrokeCap(Paint.Cap.BUTT);
+            int save = drawableAlpha == 255 ? canvas.save() : canvas.saveLayerAlpha(rect, drawableAlpha);
+            if(rounded){
+                clip.reset();clip.addRoundRect(rect,dp(UiTokens.BOOK_COVER_RADIUS_DP),dp(UiTokens.BOOK_COVER_RADIUS_DP),Path.Direction.CW);
+                canvas.clipPath(clip);
+            }else{
+                paint.setColor(palette[0]|0xff000000);canvas.drawRect(rect,paint);
+            }
 
             if ("strawberry".equals(style)) {
                 drawStrawberryCover(canvas);
@@ -28623,7 +22488,8 @@ public class MainActivity extends Activity {
 
         @Override
         public void setAlpha(int alpha) {
-            paint.setAlpha(alpha);
+            drawableAlpha = Math.max(0, Math.min(255, alpha));
+            invalidateSelf();
         }
 
         @Override
@@ -28634,198 +22500,6 @@ public class MainActivity extends Activity {
         @Override
         public int getOpacity() {
             return PixelFormat.TRANSLUCENT;
-        }
-    }
-
-    private class WavyBackground extends Drawable {
-        private final int top;
-        private final int bottom;
-        private final int wave;
-        private final int mode;
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint wavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint detailPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-        WavyBackground(int top, int bottom, int wave, int mode) {
-            this.top = top;
-            this.bottom = bottom;
-            this.wave = wave;
-            this.mode = mode;
-            wavePaint.setStyle(Paint.Style.STROKE);
-            wavePaint.setStrokeCap(Paint.Cap.ROUND);
-            wavePaint.setStrokeWidth(dp(mode == 1 ? 2 : 3));
-            wavePaint.setColor(adjustAlpha(wave, mode == 2 ? 68 : 52));
-            detailPaint.setStyle(Paint.Style.FILL);
-            detailPaint.setColor(adjustAlpha(wave, 34));
-        }
-
-        @Override
-        public void draw(Canvas canvas) {
-            RectF b = new RectF(getBounds());
-            paint.setShader(new LinearGradient(0, 0, 0, b.height(), top, bottom, Shader.TileMode.CLAMP));
-            canvas.drawRect(b, paint);
-            paint.setShader(null);
-
-            if (mode == 4) {
-                drawNightStarTexture(canvas, b);
-            } else if (mode == 1) {
-                drawBubbleTexture(canvas, b);
-            } else if (mode == 2) {
-                drawCandyArcTexture(canvas, b);
-            } else if (mode == 3) {
-                drawTideTexture(canvas, b);
-            } else {
-                drawLeafWaveTexture(canvas, b);
-            }
-        }
-
-        private void drawLeafWaveTexture(Canvas canvas, RectF b) {
-            wavePaint.setStyle(Paint.Style.STROKE);
-            wavePaint.setStrokeWidth(dp(3));
-            wavePaint.setColor(adjustAlpha(wave, 62));
-            int gap = dp(50);
-            for (int y = -gap; y < b.height() + gap; y += gap) {
-                Path p = new Path();
-                p.moveTo(-dp(24), y);
-                int amp = dp(12);
-                for (int x = -dp(24); x <= b.width() + dp(48); x += dp(64)) {
-                    p.rQuadTo(dp(32), amp, dp(64), 0);
-                    amp = -amp;
-                }
-                canvas.drawPath(p, wavePaint);
-            }
-            detailPaint.setStyle(Paint.Style.FILL);
-            detailPaint.setColor(adjustAlpha(wave, 48));
-            for (int y = dp(18); y < b.height(); y += dp(92)) {
-                for (int x = dp(34); x < b.width(); x += dp(126)) {
-                    canvas.save();
-                    canvas.rotate(-28, x, y);
-                    canvas.drawOval(new RectF(x - dp(14), y - dp(5), x + dp(14), y + dp(5)), detailPaint);
-                    canvas.restore();
-                    canvas.save();
-                    canvas.rotate(32, x + dp(20), y + dp(10));
-                    canvas.drawOval(new RectF(x + dp(8), y + dp(5), x + dp(30), y + dp(14)), detailPaint);
-                    canvas.restore();
-                    canvas.drawCircle(x + dp(48), y + dp(22), dp(3), detailPaint);
-                }
-            }
-        }
-
-        private void drawBubbleTexture(Canvas canvas, RectF b) {
-            wavePaint.setStyle(Paint.Style.STROKE);
-            wavePaint.setStrokeWidth(dp(2));
-            wavePaint.setColor(adjustAlpha(wave, 74));
-            detailPaint.setStyle(Paint.Style.FILL);
-            detailPaint.setColor(adjustAlpha(wave, 42));
-            for (int y = dp(28); y < b.height() + dp(80); y += dp(104)) {
-                for (int x = dp(22); x < b.width() + dp(80); x += dp(132)) {
-                    int r = dp(14);
-                    canvas.drawCircle(x, y, r, wavePaint);
-                    canvas.drawCircle(x - dp(5), y - dp(4), dp(2), detailPaint);
-                    canvas.drawCircle(x + dp(5), y + dp(2), dp(2), detailPaint);
-                    canvas.drawCircle(x + dp(1), y + dp(7), dp(2), detailPaint);
-
-                    RectF cup = new RectF(x + dp(34), y + dp(2), x + dp(58), y + dp(22));
-                    canvas.drawRoundRect(cup, dp(6), dp(6), wavePaint);
-                    canvas.drawCircle(x + dp(46), y, dp(12), detailPaint);
-                    canvas.drawCircle(x + dp(39), y + dp(2), dp(5), detailPaint);
-                    canvas.drawCircle(x + dp(54), y + dp(2), dp(5), detailPaint);
-                }
-            }
-        }
-
-        private void drawCandyArcTexture(Canvas canvas, RectF b) {
-            wavePaint.setStyle(Paint.Style.STROKE);
-            wavePaint.setStrokeWidth(dp(3));
-            wavePaint.setColor(adjustAlpha(wave, 66));
-            int gap = dp(48);
-            for (int y = -gap; y < b.height() + gap; y += gap) {
-                Path p = new Path();
-                p.moveTo(-dp(42), y + dp(14));
-                int amp = dp(14);
-                for (int x = -dp(42); x <= b.width() + dp(80); x += dp(82)) {
-                    p.rQuadTo(dp(41), -amp, dp(82), 0);
-                    amp = -amp;
-                }
-                canvas.drawPath(p, wavePaint);
-            }
-            detailPaint.setStyle(Paint.Style.FILL);
-            detailPaint.setColor(adjustAlpha(wave, 30));
-            for (int y = dp(54); y < b.height(); y += dp(132)) {
-                for (int x = dp(28); x < b.width(); x += dp(172)) {
-                    RectF candy = new RectF(x, y, x + dp(38), y + dp(10));
-                    canvas.drawRoundRect(candy, dp(8), dp(8), detailPaint);
-                }
-            }
-        }
-
-        private void drawTideTexture(Canvas canvas, RectF b) {
-            int gap = dp(42);
-            for (int y = -gap; y < b.height() + gap; y += gap) {
-                Path p = new Path();
-                p.moveTo(-dp(36), y);
-                int amp = dp(12);
-                for (int x = -dp(36); x <= b.width() + dp(72); x += dp(88)) {
-                    p.rQuadTo(dp(44), amp, dp(88), 0);
-                    amp = -amp;
-                }
-                wavePaint.setStyle(Paint.Style.STROKE);
-                wavePaint.setStrokeWidth(dp(y % (gap * 2) == 0 ? 4 : 2));
-                wavePaint.setColor(adjustAlpha(wave, y % (gap * 2) == 0 ? 48 : 30));
-                canvas.drawPath(p, wavePaint);
-            }
-            detailPaint.setStyle(Paint.Style.STROKE);
-            detailPaint.setStrokeWidth(dp(1));
-            detailPaint.setColor(adjustAlpha(wave, 28));
-            for (int x = dp(44); x < b.width(); x += dp(140)) {
-                canvas.drawCircle(x, dp(90), dp(30), detailPaint);
-                canvas.drawCircle(x + dp(46), b.height() - dp(110), dp(22), detailPaint);
-            }
-        }
-
-        private void drawNightStarTexture(Canvas canvas, RectF b) {
-            detailPaint.setStyle(Paint.Style.FILL);
-            for (int y = dp(54); y < b.height(); y += dp(142)) {
-                for (int x = dp(48); x < b.width(); x += dp(168)) {
-                    detailPaint.setColor(Color.argb(46, 214, 220, 224));
-                    drawStar(canvas, x, y, dp(4));
-                    detailPaint.setColor(Color.argb(30, 174, 182, 188));
-                    canvas.drawCircle(x + dp(70), y + dp(38), dp(3), detailPaint);
-                }
-            }
-        }
-
-        private void drawStar(Canvas canvas, float cx, float cy, float r) {
-            Path star = new Path();
-            star.moveTo(cx, cy - r);
-            star.lineTo(cx + r * 0.32f, cy - r * 0.32f);
-            star.lineTo(cx + r, cy);
-            star.lineTo(cx + r * 0.32f, cy + r * 0.32f);
-            star.lineTo(cx, cy + r);
-            star.lineTo(cx - r * 0.32f, cy + r * 0.32f);
-            star.lineTo(cx - r, cy);
-            star.lineTo(cx - r * 0.32f, cy - r * 0.32f);
-            star.close();
-            canvas.drawPath(star, detailPaint);
-        }
-
-        @Override
-        public void setAlpha(int alpha) {
-            paint.setAlpha(alpha);
-            wavePaint.setAlpha(alpha);
-            detailPaint.setAlpha(alpha);
-        }
-
-        @Override
-        public void setColorFilter(android.graphics.ColorFilter colorFilter) {
-            paint.setColorFilter(colorFilter);
-            wavePaint.setColorFilter(colorFilter);
-            detailPaint.setColorFilter(colorFilter);
-        }
-
-        @Override
-        public int getOpacity() {
-            return PixelFormat.OPAQUE;
         }
     }
 
@@ -28849,6 +22523,10 @@ public class MainActivity extends Activity {
         int stackCount;
         List<String> stackFiles;
         boolean expanded;
+        boolean journalMedia;
+        boolean sticker;
+        String sourceFile="", foodId="", dishName="";
+        int displayRotation;
 
         StickerEntry(String date, String mealKey, String mealTitle, String fileName) {
             this(date, mealKey, mealTitle, fileName, 1);
@@ -28971,10 +22649,16 @@ public class MainActivity extends Activity {
     private class NotebookMedia {
         String fileName;
         boolean sticker;
+        int displayRotation;
 
         NotebookMedia(String fileName, boolean sticker) {
+            this(fileName, sticker, 0);
+        }
+
+        NotebookMedia(String fileName, boolean sticker, int displayRotation) {
             this.fileName = fileName;
             this.sticker = sticker;
+            this.displayRotation = displayRotation;
         }
     }
 
@@ -28987,6 +22671,8 @@ public class MainActivity extends Activity {
         View closeButton;
         View rotateButton;
         View itemView;
+        String foodId;
+        View mediaContent;
         List<String> stackNames;
         List<View> stackChildViews;
         boolean[] stackExpandedState;
@@ -29090,46 +22776,27 @@ public class MainActivity extends Activity {
         }
     }
 
-    private class EmojiAdapter extends BaseAdapter {
-        @Override
-        public int getCount() {
-            return EMOJIS.length;
-        }
-
-        @Override
-        public Object getItem(int position) {
-            return EMOJIS[position];
-        }
-
-        @Override
-        public long getItemId(int position) {
-            return position;
-        }
-
-        @Override
-        public View getView(int position, View convertView, ViewGroup parent) {
-            TextView text = label(EMOJIS[position], 28, Color.rgb(25, 25, 25), false);
-            text.setGravity(Gravity.CENTER);
-            text.setPadding(0, dp(8), 0, dp(8));
-            return text;
-        }
-    }
 
     private class ApiProbeResult {
         boolean valid;
-        boolean visionSupported;
         String endpoint = "";
         String selectedModel = "";
         JSONArray models = new JSONArray();
+        JSONObject imageInputs = new JSONObject();
+        JSONObject displayNames = new JSONObject();
     }
 
     private class ApiEndpointMatch {
         final String endpoint;
         final JSONArray models;
+        final JSONObject imageInputs;
+        final JSONObject displayNames;
 
-        ApiEndpointMatch(String endpoint, JSONArray models) {
+        ApiEndpointMatch(String endpoint, JSONArray models, JSONObject imageInputs, JSONObject displayNames) {
             this.endpoint = endpoint == null ? "" : endpoint;
             this.models = models == null ? new JSONArray() : models;
+            this.imageInputs = imageInputs == null ? new JSONObject() : imageInputs;
+            this.displayNames = displayNames == null ? new JSONObject() : displayNames;
         }
     }
 
@@ -29166,15 +22833,6 @@ public class MainActivity extends Activity {
         void onLongPress(float viewX, float viewY);
     }
 
-    private interface AiStickerHandler {
-        void onSticker(Bitmap sticker, String error);
-    }
-
-    private static native boolean nativeSamSticker(Bitmap input, Bitmap output, float pointX, float pointY,
-                                                   int candidateIndex,
-                                                   String embedModelPath, String segmentModelPath);
 }
-
-
 
 

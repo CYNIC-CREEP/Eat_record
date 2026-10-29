@@ -1,0 +1,13 @@
+EdgeTAM (single-image encoder and box-prompt mask decoder)
+Copyright (c) Meta Platforms, Inc. and affiliates.
+Licensed under the Apache License, Version 2.0; full license: MNN-Apache-2.0.txt.
+Source: https://github.com/facebookresearch/EdgeTAM
+Commit: 7711e012a30a2402c4eaab637bdb00a521302c91
+Checkpoint: https://huggingface.co/facebook/EdgeTAM
+Revision: 14d7ecc48c656b94e5184519f698cd5386c5a2bf
+
+Application modifications: export only single-image encoder and mask decoder,
+replace boolean-index prompt embedding with equivalent fixed box embedding,
+convert to MNN FP16, derive box prompts from IS-Net foreground, reject uncertain
+or foreground-losing masks, and preserve the validated baseline on failure.
+No video tracking, old SAM click workflow, server call, or CUDA extension is used.

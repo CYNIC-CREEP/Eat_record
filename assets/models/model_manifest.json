@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "runtime": "MNN 3.6.0",
+  "runtime_commit": "cc20f672af9e177e2fa338c332dc097de2fc9264",
+  "license": "Apache-2.0 (IS-Net / U2Net code), MIT (rembg distribution), Apache-2.0 (MNN)",
+  "full": {
+    "name": "IS-Net general-use mobile",
+    "file": "isnet-general-use-512-fp16.mnn",
+    "input_size": 512,
+    "precision": "fp16-storage",
+    "sha256": "de469dba668c0b9999f0c1670d5cfc8e4f824381c65c7771bcd35e1afc4f58a8",
+    "source_url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx",
+    "source_sha256": "60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a",
+    "source_transform": "dis-fixed-512-primary-v1",
+    "transformed_sha256": "62b05881621549d598d1a276472ecb93de0cf82c058621686f6fdac1d4b2acf9",
+    "output_name": "output_image",
+    "normalization_mean": [0.5, 0.5, 0.5],
+    "normalization_std": [1.0, 1.0, 1.0],
+    "license_file": "licenses/ISNet-NOTICE.txt"
+  },
+  "refiner": {
+    "name": "EdgeTAM whole-meal box refinement",
+    "source_repository": "https://github.com/facebookresearch/EdgeTAM",
+    "source_commit": "7711e012a30a2402c4eaab637bdb00a521302c91",
+    "checkpoint_url": "https://huggingface.co/facebook/EdgeTAM/resolve/14d7ecc48c656b94e5184519f698cd5386c5a2bf/edgetam.pt",
+    "checkpoint_sha256": "ed2d4850b8792c239689b043c47046ec239b6e808a3d9b6ae676c803fd8780df",
+    "checkpoint_bytes": 56116523,
+    "input_size": 1024,
+    "precision": "fp16-storage",
+    "license_file": "licenses/EdgeTAM-NOTICE.txt",
+    "encoder": {
+      "file": "edgetam-encoder-fp16.mnn",
+      "sha256": "290a8a010afc5d390ecef36a0a3c994d452055afa10eb3cad52cfc69898814d4",
+      "onnx_sha256": "707bbf4c0874caa5e22d4837208ea423755d3fc4fb12c3ffdb97db4471c7e758"
+    },
+    "decoder": {
+      "file": "edgetam-decoder-fp16.mnn",
+      "sha256": "22052a459101b9770552e9fc8daa92177a8af067d082aa3fc3088f8aaa13f80a",
+      "onnx_sha256": "e85af23a420c22c5025e34c5f3be8e86738c10b8224563596c979a600c5a920f"
+    }
+  },
+  "small": {
+    "name": "U2NetP fallback",
+    "file": "u2netp-fp16.mnn",
+    "input_size": 320,
+    "precision": "fp16-storage",
+    "sha256": "5dd9aba3e51627468e5f1f6e40ccc80fdba495bcf84e6fbe6d48cbe225c4be54",
+    "source_url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+    "source_sha256": "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8",
+    "output_name": "1959",
+    "normalization_mean": [0.485, 0.456, 0.406],
+    "normalization_std": [0.229, 0.224, 0.225]
+  }
+}

@@ -1,0 +1,4 @@
+# Keep packaged third-party notices and help assets byte-for-byte intact.
+assets/licenses/*.txt -text -whitespace
+assets/help/*.md -text
+assets/models/*.json -text

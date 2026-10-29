@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="eat_record_private.xml" />
+    <!-- Downloaded public weights are reproducible, not user diary content. -->
+    <exclude domain="file" path="offline_food/" />
+</full-backup-content>
