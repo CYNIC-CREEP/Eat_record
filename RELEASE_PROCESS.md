@@ -157,6 +157,7 @@ git archive --format=zip --prefix=EatRecord-<versionName>/ --output=dist/EatReco
 - 当前流程：明确本版说明和server/update.json，保持dist/update.json字节一致；先上传到不参与版本扫描的临时目录，回下载核对APK/源码及必要文档，再启用正式版本目录。普通包可同时提供正式名和同字节-debug兼容文件名，后者用于目录扫描回退，不能使用QA包。
 - 最后切换共享教程与update.json：新文件先上传并校验，旧文件改名保留，再切换新文件；失败时恢复旧文件。只替换本版必要文档，不删除既有版本、字体或部署无关云服务。
 - 通过应用只读账号验证相对路径的清单与安装包；检查versionCode/versionName、notes、下载路径和实际字节。更新清单可保留旧绝对路径，由AppDownloadClient映射到只读目录，并提供已验证的GitHub附件作为回退。
+- 只读账号的fs/list使用与客户端一致的refresh=false，强制刷新仅由管理员执行。校验缓存必须区分暂存／正式路径和管理员／只读访问，避免正式下载验证被已有同名缓存跳过。
 - 下载限速时可以使用服务支持的HTTP Range分段完整回下载；必须检查各段范围/长度，按顺序重组后计算完整SHA256。不能用仅首部、文件名、上传成功响应或服务端取整大小替代完整文件验证。接口参考：https://openlistteam.github.io/docs/guide/api/fs.html 。
 - 上传后重新下载APK对比SHA256，核对版本/notes/链接及本地清单diff。不要凭脚本旧提示推断旧HTTP静态路由仍有效。
 - `scripts/upload-lanzou.ps1/.mjs`为另一自动上传路径，依赖Node/浏览器会话；当前登录与可用性 **待确认**。不为检查状态擅自运行。

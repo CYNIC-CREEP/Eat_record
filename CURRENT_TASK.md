@@ -1,30 +1,27 @@
 # 当前任务
 
-更新：2026-11-03（Asia/Shanghai），0.6.1/code193已通过用户人工复查，正在按明确授权发布GitHub／OpenList。
+更新：2026-11-03（Asia/Shanghai），0.6.1/code193已人工验收并完成GitHub、OpenList与应用更新发布。
 
-## 版本与授权
+## 当前状态
 
-- 用户明确要求本轮直接使用正式版0.6.1，不走Beta.9；Manifest与ReleaseNotes为0.6.1/code193。main/HEAD仍2b8aae9，既有脏修改／未跟踪文件完整保留。
-- 已授权本地修改、构建、覆盖安装魅族21；本轮不运行模拟器或自动功能测试。功能由用户人工复查，不能把旧Beta测试结果当作193功能通过。
-- 用户明确回复“没问题了，上传吧”，授权本版提交／标签／push及GitHub／OpenList发布。server/update.json与dist/update.json已准备0.6.1/code193；远端切换待完整附件校验。
+- 用户明确回复“没问题了，上传吧”，本版授权已执行完毕，不自动延续到下一版本。
+- 发布提交8a0d15ded2190f7b6510cbbd4c824d48eca078b7，注释标签v0.6.1指向该提交；main和标签已原子推送。后续收尾仅文档，不移动标签／替换源码包。
+- GitHub正式Release已发布且为latest，非draft／prerelease；OpenList正式目录0.6.1已启用，应用只读清单为0.6.1/code193，server/update.json与dist/update.json一致。
 
-## 本轮完成
+## 已完成
 
-- 删除今日餐纸热量下方整行说明提示，保留热量点击入口与食物详情。
-- 记录本热量输入默认同步最新识别值，已手填餐次优先手填；清空保存恢复对应餐次识别。弹窗监听日记更新，未编辑字段实时更新，已编辑草稿保持。只改消费／收藏／直接保存不把AI值冻结为手填。
-- 新手填采用manualCaloriesByMeal，动态汇总手填餐次＋其余最新识别餐次，首页／周历／周报／记录本共用FoodUi.displayCalories。旧整日manualCaloriesTotal兼容保留，直到明确修改热量；仅消费／收藏不改变旧总量。
-- 保存锁内重读最新日记并只合并编辑字段；收藏仅写favorite，避免整份旧表单覆盖同期营养／媒体。已删日记／变化餐次不被旧表单复活。
-- 收藏实心星标改用鲜明主题色，黄色主题为金黄色，其他主题保持对应色相、提升饱和度与不透明度。
-- 版本、公告、README、本地教程／server教程、交接文档与RELEASE_NOTES_0.6.1.md同步。前八轮内容见既有V061_BETA*_REPORT.md。
+- 发布Beta.1–8及最终修订：默认三餐／可选夜宵、纵向营养师及底栏／按钮过渡、正圆日夜切换、修整撤销／重做／轮廓预览、周历淡色水位及内联目标、API配置删除确认、首页提示移除、记录本各餐识别／手填热量实时同步及鲜明收藏色。
+- 使用手机已验收的同一APK，不重新编译；源码ZIP从发布提交git archive生成，排除签名、管理凭据、缓存和用户数据。41个累计文件已明确审查提交，无reset/clean或丢弃前轮工作。
+- GitHub草稿及正式公开下载、OpenList暂存两份APK／源码／文档、正式应用只读下载均按实际字节校验。根教程／清单旧版改名备份保留，不删除旧版本／字体或无关服务。
 
-## 交付证据与未测范围
+## 最终产物与证据
 
-- NoUpload普通构建成功，日志build/v061-final-build.log；git diff --check通过（仅既有换行提示）。验包与v2/v3原证书签名核对完成：4模型、双ARM8库／6固定摘要、依赖闭包、字体／许可、QA隔离和包体预算通过。
-- dist/EatRecord-0.6.1.apk与-debug.apk为同字节普通包，121191537 bytes；SHA256 e308ab640f7a8ac718ab66526bfe1da7bee01c2bc66d2080c1c22bb9246750c7；min26/target37，无debuggable／QA。
-- 魅族21/461QYGFL22429：安装前在Launcher，未锁屏、无输入框；从普通192同证书覆盖193，adb安装Success、MainActivity启动Status ok。未清数据／运行QA／写测试记录／改Key／人工触发营养请求；临时XML已删除。
-- 用户明确免本轮模拟器、JVM及设备自动功能回归；仅完成构建、包体／签名核对和ADB安装启动。本版功能以用户本轮人工复查为验收，未补跑自动功能回归。
-- 详细修改与交付记录见V061_DELIVERY_REPORT.md。
+- dist/EatRecord-0.6.1.apk（与-debug.apk同字节），121191537 bytes，SHA256 e308ab640f7a8ac718ab66526bfe1da7bee01c2bc66d2080c1c22bb9246750c7。
+- dist/EatRecord-0.6.1-source.zip，51733432 bytes，SHA256 57d343e92168b6915f2468fb54d7ddbf78a91478b76bea48694495bdb14c8d55。
+- min26/target37、4模型／双ARM8库、依赖／许可／字体、QA隔离、包体预算与原证书v2/v3核对通过。用户免本轮模拟器／自动功能测试，已人工复查；发布不冒充新增功能回归。
+- 应用清单1101 bytes、7条本版说明，SHA256 de35f1a74b3ff18e2280c8700af5c782ed7d2dbb56384d17bc6dc68473cb97de；实际APK与GitHub回退URL均为0.6.1。
+- 详细发布提交／标签、附件、路径和摘要见V061_PUBLISH_REPORT.md；本地证据在忽略的build/publish061。功能交付见V061_DELIVERY_REPORT.md，历史Beta.1–8报告保留。
 
-## 下一步
+## 下一步与范围
 
-按RELEASE_PROCESS.md审查累计源码／文档并提交、标记v0.6.1，源码包从发布提交git archive生成；GitHub先草稿附件校验后正式发布，OpenList暂存完整回下载后启用目录并切换清单。沿用已人工验收APK，不重编译。最终证据另作收尾记录，不移动发布标签。
+本次发布完成，等待用户后续任务。未修改旧0.5.26匿名HTTP更新接口，限制见V06_PUBLISH_REPORT.md；未新增付费API、系统备份传输或其他品牌设备验收。
