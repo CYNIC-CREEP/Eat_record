@@ -8,6 +8,8 @@ import java.util.ArrayList;
 
 /** Opaque child-page changes; root navigation belongs to RootPagePager. */
 final class PageCrossfade {
+    interface ProgressListener { void onStart(); void onProgress(float movement); void onEnd(); }
+    private ProgressListener progressListener;
     private final ViewGroup host;
     private Slide image;
     private ValueAnimator animator;
@@ -23,7 +25,8 @@ final class PageCrossfade {
     void setPaperColor(int color){paperColor=color;}
     void setPaperBackground(Drawable background){paperBackground=background;}
     boolean retains(View view){return image!=null&&image.outgoing.contains(view);}
-    void run(Runnable render,float direction,boolean gentle){
+    void run(Runnable render,float direction,boolean gentle){run(render,direction,gentle,null);}
+    void run(Runnable render,float direction,boolean gentle,ProgressListener progress){
         boolean animate=ValueAnimator.areAnimatorsEnabled()&&host.isAttachedToWindow()
                 &&host.getWidth()>0&&host.getHeight()>0;
         boolean laidOut=image!=null;
@@ -45,7 +48,9 @@ final class PageCrossfade {
         if(!interrupting&&animate&&laidOut&&host.getChildCount()>1){
             interrupted=capturePresentation();if(interrupted==null)animate=false;
         }
-        clear();host.animate().cancel();host.setAlpha(1);host.setTranslationX(0);host.setTranslationY(0);host.setScaleX(1);host.setScaleY(1);
+        if(progress!=null)progress.onStart();
+        clear();progressListener=progress;if(progressListener!=null)progressListener.onProgress(0);
+        host.animate().cancel();host.setAlpha(1);host.setTranslationX(0);host.setTranslationY(0);host.setScaleX(1);host.setScaleY(1);
         if(animate&&laidOut){
             image=new Slide(interrupted,direction>=0,paperColor,paperBackground);
             if(interrupted==null&&host.getChildCount()==1){
@@ -69,7 +74,7 @@ final class PageCrossfade {
         }
         try{render.run();}catch(RuntimeException e){clear();throw e;}
         host.setAlpha(1);host.setTranslationX(0);host.setTranslationY(0);
-        if(image==null)return;
+        if(image==null){if(progressListener!=null)progressListener.onProgress(1);finishProgress();return;}
         prepareIncoming();
     }
     private void prepareIncoming(){
@@ -93,10 +98,13 @@ final class PageCrossfade {
             if(replaced){clear();return true;}
             current.prepareLayers(incoming);
             position(current.progress);
-            animator=ValueAnimator.ofFloat(0,1);animator.setDuration(current.durationMs);animator.setInterpolator(new android.view.animation.LinearInterpolator());
-            animator.addUpdateListener(a->{if(image==current)position((Float)a.getAnimatedValue());});
-            animator.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){if(image==current)clear();}});animator.start();return true;
+            startAnimator(current);return true;
         }};host.getViewTreeObserver().addOnPreDrawListener(pending);host.invalidate();
+    }
+    private void startAnimator(final Slide current){
+        animator=ValueAnimator.ofFloat(0,1);animator.setDuration(current.durationMs);animator.setInterpolator(new android.view.animation.LinearInterpolator());
+        animator.addUpdateListener(a->{if(image==current)position((Float)a.getAnimatedValue());});
+        animator.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){if(image==current)clear();}});animator.start();
     }
     private Bitmap capturePresentation(){
         Bitmap snapshot=null;
@@ -131,6 +139,7 @@ final class PageCrossfade {
         float direction=image.forward?1:-1;
         float travel=image.travel;
         float movement=image.positionEase.getInterpolation(progress);
+        if(progressListener!=null)progressListener.onProgress(movement);
         for(int i=0;i<image.outgoing.size();i++){
             View child=image.outgoing.get(i);child.setTranslationX(image.origins.get(i)-direction*travel*movement);
             // Native disappearing children draw above incoming roots. Move the
@@ -152,7 +161,9 @@ final class PageCrossfade {
         // owned an earlier list. The currently displayed page must always settle.
         for(int i=0;i<host.getChildCount();i++){View child=host.getChildAt(i);child.setTranslationX(0);child.setAlpha(1);}
         if(image!=null){Slide previous=image;image=null;previous.release();}
+        finishProgress();
     }
+    private void finishProgress(){ProgressListener previous=progressListener;progressListener=null;if(previous!=null)previous.onEnd();}
     private void removePending(){
         if(pending!=null){if(host.getViewTreeObserver().isAlive())host.getViewTreeObserver().removeOnPreDrawListener(pending);pending=null;}
     }

@@ -46,6 +46,8 @@ final class RootPagePager extends FrameLayout {
     boolean ownsView(View view){
         if(frozen||isInteracting())return false;
         View node=view;View owner=selectedPage();
+        if(view==owner)return true;
+        if(owner instanceof AdvisorPager){if(((AdvisorPager)owner).interacting())return false;owner=((AdvisorPager)owner).selectedPage();}
         while(node!=null&&node!=this){if(node==owner)return true;ViewParent parent=node.getParent();node=parent instanceof View?(View)parent:null;}
         return false;
     }
@@ -85,7 +87,7 @@ final class RootPagePager extends FrameLayout {
         updateOwnership();if(listener!=null)listener.onProgress(value);invalidate();
     }
     private void updateOwnership(){
-        boolean active=!frozen&&!isInteracting()&&motion.target()==0;
+        boolean active=!frozen&&!isInteracting()&&motion.target()==0&&(!(pages[0] instanceof AdvisorPager)||((AdvisorPager)pages[0]).atToday());
         if(ownershipKnown&&active==homeOwned)return;ownershipKnown=true;homeOwned=active;
         View day=pages[0].findViewWithTag("today_day_pager"),calendar=pages[0].findViewWithTag("home_calendar");
         if(day instanceof TodayDayPager)((TodayDayPager)day).setRootActive(active);

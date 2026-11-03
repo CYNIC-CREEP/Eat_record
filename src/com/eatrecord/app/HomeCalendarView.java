@@ -7,6 +7,8 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -22,6 +24,9 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.util.Calendar;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Collections;
 
 /** Home-only week/month calendar. The selected day and browsing anchor are independent. */
 public final class HomeCalendarView extends LinearLayout {
@@ -44,6 +49,8 @@ public final class HomeCalendarView extends LinearLayout {
     private final TextView monthLabel;
     private final HeaderIcon previous, next, chevron;
     private TodayWeekStrip week;
+    private int calorieGoal;
+    private Map<String,Integer> calorieDays=Collections.emptyMap();
     private final GestureSpring revealSpring;
     private VelocityTracker velocityTracker;
     private boolean expanded, notifiedExpanded;
@@ -182,6 +189,7 @@ public final class HomeCalendarView extends LinearLayout {
     public void setPalette(int accent, int accentSoft) {
         this.accent = accent;
         this.accentSoft = accentSoft;
+        if(week!=null)week.setPalette(accent,accentSoft);
         rebuildMonth();
         previous.invalidate();
         next.invalidate();
@@ -192,6 +200,12 @@ public final class HomeCalendarView extends LinearLayout {
     public Calendar monthAnchor() { return (Calendar) month.clone(); }
     public boolean isExpanded() { return expanded; }
     public TodayWeekStrip weekStrip() { return week; }
+    /** A read-only projection; rebuilding a week must retain the same daily totals. */
+    public void setCalorieProgress(int goal,Map<String,Integer> byDate){
+        calorieGoal=Math.max(0,goal);
+        calorieDays=byDate==null?Collections.emptyMap():Collections.unmodifiableMap(new HashMap<>(byDate));
+        if(week!=null)week.setCalorieProgress(calorieGoal,calorieDays);
+    }
     public boolean canCollapse() { return reveal > 0f || expanded; }
     public void setDatePickedDuringExpansion(boolean picked) { datePickedDuringExpansion = picked; }
     public boolean wasDatePickedDuringExpansion() { return datePickedDuringExpansion; }
@@ -294,6 +308,8 @@ public final class HomeCalendarView extends LinearLayout {
                 if (listener != null&&HomeCalendarView.this.ownsRoot()) listener.onWeek((Calendar) HomeCalendarView.this.anchor.clone());
             }
         });
+        week.setPalette(accent,accentSoft);
+        week.setCalorieProgress(calorieGoal,calorieDays);
         week.setRootActive(rootActive);
         body.addView(week, 0, new FrameLayout.LayoutParams(-1, -2));
         applyReveal(reveal);
@@ -337,7 +353,7 @@ public final class HomeCalendarView extends LinearLayout {
                 cell.setFocusable(!future);
                 cell.setEnabled(!future);
                 cell.setSelected(active);
-                cell.setAlpha(future ? .27f : outMonth ? .43f : 1f);
+                cell.setAlpha(outMonth ? .43f : 1f);
                 TextView number = PaperComponents.text(getContext(),
                         String.valueOf(date.get(Calendar.DAY_OF_MONTH)), 14, UiTokens.ink(night), false);
                 number.getPaint().setFakeBoldText(active);
@@ -359,7 +375,12 @@ public final class HomeCalendarView extends LinearLayout {
                     selectedBackground.setColor(android.graphics.Color.TRANSPARENT);
                     selectedBackground.setCornerRadius(dp(17));
                     selectedBackground.setStroke(dp(1), accentSoft);
-                    cell.setBackground(selectedBackground);
+                    // The parent owns the selected outline. A second child stroke
+                    // would paint over its inner half at the first-row clip edge.
+                    StateListDrawable todayOutline=new StateListDrawable();
+                    todayOutline.addState(new int[]{android.R.attr.state_selected},new ColorDrawable(android.graphics.Color.TRANSPARENT));
+                    todayOutline.addState(new int[]{},selectedBackground);
+                    cell.setBackground(todayOutline);
                 }
                 cell.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
                 number.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -523,6 +544,7 @@ public final class HomeCalendarView extends LinearLayout {
             header.requestLayout();
         }
         if (week == null || monthPage == null) return;
+        week.setWaterActive(reveal<=0f&&!expanded);
         week.setVisibility(reveal >= 1f ? INVISIBLE : VISIBLE);
         monthPage.setVisibility(reveal <= 0f ? INVISIBLE : VISIBLE);
         week.setAlpha(1f - reveal);
@@ -687,6 +709,7 @@ public final class HomeCalendarView extends LinearLayout {
         boolean dragging, cancelled;
         final Paint markerPaint=new Paint(Paint.ANTI_ALIAS_FLAG);
         final RectF markerFrom=new RectF(),markerTo=new RectF(),markerBounds=new RectF();
+        final RectF markerDrawBounds=new RectF();
         String linkedTargetMonth;
 
         MonthPager(Context context) {
@@ -789,8 +812,13 @@ public final class HomeCalendarView extends LinearLayout {
         }
         private void drawMarker(Canvas canvas,RectF rect,float opacity){
             if(opacity<=0||rect.width()<=0||rect.height()<=0||rect.right<=0||rect.left>=getWidth())return;
-            markerPaint.setStyle(Paint.Style.FILL);markerPaint.setColor(accentSoft);markerPaint.setAlpha(Math.round(255*opacity));canvas.drawRoundRect(rect,dp(17),dp(17),markerPaint);
-            markerPaint.setStyle(Paint.Style.STROKE);markerPaint.setStrokeWidth(dp(1));markerPaint.setColor(accent);markerPaint.setAlpha(Math.round(255*opacity));canvas.drawRoundRect(rect,dp(17),dp(17),markerPaint);
+            float stroke=Math.max(1,dp(1)),inset=Math.max(dp(1),stroke*.5f+1f);
+            markerDrawBounds.set(rect);markerDrawBounds.inset(inset,inset);
+            if(markerDrawBounds.width()<=0||markerDrawBounds.height()<=0)return;
+            // Keep the entire antialiased stroke inside first/last row and column
+            // bounds; the shared date-transition geometry remains unchanged.
+            markerPaint.setStyle(Paint.Style.FILL);markerPaint.setColor(accentSoft);markerPaint.setAlpha(Math.round((night?70:52)*opacity));canvas.drawRoundRect(markerDrawBounds,dp(17),dp(17),markerPaint);
+            markerPaint.setStyle(Paint.Style.STROKE);markerPaint.setStrokeWidth(stroke);markerPaint.setColor(accent);markerPaint.setAlpha(Math.round(220*opacity));canvas.drawRoundRect(markerDrawBounds,dp(17),dp(17),markerPaint);
             markerPaint.setStyle(Paint.Style.FILL);markerPaint.setAlpha(255);
         }
 

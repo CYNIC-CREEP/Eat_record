@@ -16,6 +16,8 @@ public final class FoodUi {
     public interface Host {
         JSONObject days(); JSONObject profile(); boolean night();
         void saveProfile(); void saveDays(); void reload(); void refresh(); void api();
+        /** Merge only the daily target into the latest settings and report durable success. */
+        boolean saveDailyGoal(int value);
         default void recognition(){api();}
         default void recognitionEnabled(boolean enabled){try{profile().put("foodAutoAnalyze",enabled).put("foodPhotoConsent",enabled);saveProfile();refresh();}catch(JSONException ignored){}}
         void preview(String date,String meal,String file);
@@ -162,24 +164,39 @@ public final class FoodUi {
     }
     private static double linearColor(int channel){double value=channel/255.0;return value<=.04045?value/12.92:Math.pow((value+.055)/1.055,2.4);}
     public AlertDialog dayNutrition(String date){
-        ScrollView scroll=new ScrollView(a);scroll.setVerticalScrollBarEnabled(false);scroll.addView(summary(date));
-        return builder().setTitle("当天营养与热量目标").setView(scroll).setPositiveButton("完成",null).show();
+        SummaryPanel panel=new SummaryPanel(date);
+        SummaryScroll scroll=new SummaryScroll();scroll.setTag("day_nutrition_scroll");scroll.setVerticalScrollBarEnabled(false);scroll.addView(panel);panel.scroll=scroll;
+        AlertDialog dialog=builder().setTitle("当天营养与热量目标").create();dialog.setView(scroll,0,0,0,0);
+        TextView done=text("完成",15,false);done.setTag("day_nutrition_done");done.setMinHeight(dp(48));done.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);done.setOnClickListener(v->dialog.dismiss());
+        panel.addView(done,new LinearLayout.LayoutParams(-1,-2));
+        dialog.setOnDismissListener(d->panel.close());dialog.show();PaperComponents.styleDialog(dialog,host.night());return dialog;
     }
-    public View summary(final String date){
+    public View summary(final String date){return new SummaryPanel(date);}
+    /** One editor and one dialog owner; no draft target is written before explicit Save. */
+    private final class SummaryPanel extends LinearLayout {
+        final String date;
+        final TextView energy,goalEntry;
+        final LinearLayout editor;
+        final EditText goalInput;
+        SummaryScroll scroll;
+        boolean editorOpen,closed;
+        int editGeneration;
+        SummaryPanel(String date){
+        super(a);this.date=date;
         JSONObject day=host.days().optJSONObject(date), n=NutritionStore.totals(day);
         // The dialog is already a paper surface; a second outlined card adds no hierarchy.
-        LinearLayout box=new LinearLayout(a);box.setOrientation(LinearLayout.VERTICAL);
-        box.setTag("day_nutrition_summary");box.setPadding(dp(24),dp(8),dp(24),dp(8));
+        LinearLayout box=this;box.setOrientation(LinearLayout.VERTICAL);
+        box.setTag("day_nutrition_summary");box.setPadding(dp(24),dp(8),dp(24),dp(4));setFocusableInTouchMode(true);
         box.addView(text("今天，好好吃饭",13,false));
         int calories=displayCalories(day), target=host.profile().optInt("dailyCalorieGoal");
-        TextView energy=text(calories+(target>0 ? " / "+target : "")+" kcal",30,true);
+        energy=text(calories+(target>0 ? " / "+target : "")+" kcal",30,true);energy.setTag("day_nutrition_energy");
         energy.setPadding(0,dp(8),0,dp(8));box.addView(energy);
         boolean manual=day!=null && day.optBoolean("manualCaloriesOverride");
         String label=manual?"手动热量优先 · 其他营养素为 AI 估算":n.optInt("count")>0?"AI 估算 · 点食物可修改份量与营养":day!=null && day.optInt("calories")>0?"旧版 AI 热量 · 暂无营养素数据":"从一张餐图开始，留下今天的美味";
         box.addView(text(label,12,false));
         if(manual && n.optInt("count")>0){
             TextView use=text("改用食物识别热量  ›",13,true);use.setMinHeight(dp(48));
-            use.setOnClickListener(v->{try{day.remove("manualCaloriesOverride");day.remove("manualCaloriesTotal");host.saveDays();host.refresh();}catch(Exception ignored){}});box.addView(use);
+            use.setOnClickListener(v->{try{day.remove("manualCaloriesOverride");day.remove("manualCaloriesTotal");day.remove("manualCaloriesByMeal");for(String key:NutritionStore.MEALS){JSONObject meal=day.optJSONObject(key);if(meal!=null)meal.remove("manualCalories");}host.saveDays();host.refresh();}catch(Exception ignored){}});box.addView(use);
         }
         LinearLayout macros=new LinearLayout(a);macros.setPadding(0,dp(14),0,dp(8));
         String[] keys={"carbsG","proteinG","fatG"}, names={"碳水","蛋白质","脂肪"};
@@ -190,21 +207,87 @@ public final class FoodUi {
             value.setPadding(0,dp(6),0,dp(4));column.addView(value);
             macros.addView(column,new LinearLayout.LayoutParams(0,-2,1));
         }box.addView(macros);
-        TextView goal=text(target>0?"调整每日目标  ›":"设置每日热量目标  ›",13,false);
-        goal.setTag("day_nutrition_goal");goal.setMinHeight(dp(48));goal.setGravity(Gravity.CENTER_VERTICAL);
-        goal.setOnClickListener(v->goal());box.addView(goal);
-        return box;
+        goalEntry=text(target>0?"调整每日目标  ›":"设置每日热量目标  ›",13,false);
+        goalEntry.setTag("day_nutrition_goal");goalEntry.setMinHeight(dp(48));goalEntry.setGravity(Gravity.CENTER_VERTICAL);
+        goalEntry.setOnClickListener(v->setEditorOpen(!editorOpen));box.addView(goalEntry);
+        editor=new LinearLayout(a);editor.setOrientation(LinearLayout.VERTICAL);editor.setTag("daily_calorie_goal_body");editor.setPadding(0,dp(2),0,0);editor.setVisibility(View.GONE);
+        TextView hint=text("填写你自己的目标，留空可关闭。",12,false);hint.setTextColor(UiTokens.secondary(host.night()));editor.addView(hint);
+        goalInput=goalInput();editor.addView(goalInput,new LinearLayout.LayoutParams(-1,-2));
+        goalInput.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        goalInput.setOnEditorActionListener((view,action,event)->{if(action==android.view.inputmethod.EditorInfo.IME_ACTION_DONE){saveGoal();return true;}return false;});
+        LinearLayout actions=new LinearLayout(a);actions.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);
+        TextView cancel=text("取消",14,false);cancel.setTag("daily_calorie_goal_cancel");cancel.setGravity(Gravity.CENTER);cancel.setMinHeight(dp(48));cancel.setOnClickListener(v->setEditorOpen(false));
+        TextView save=PaperComponents.button(a,"保存",host.night(),v->saveGoal());save.setTag("daily_calorie_goal_save");
+        LinearLayout.LayoutParams cancelLp=new LinearLayout.LayoutParams(0,-2,1);cancelLp.rightMargin=dp(8);actions.addView(cancel,cancelLp);actions.addView(save,new LinearLayout.LayoutParams(0,-2,1));
+        LinearLayout.LayoutParams actionsLp=new LinearLayout.LayoutParams(-1,-2);actionsLp.topMargin=dp(6);editor.addView(actions,actionsLp);box.addView(editor,new LinearLayout.LayoutParams(-1,-2));
+        }
+        void setEditorOpen(boolean open){
+            if(closed||editorOpen==open)return;
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()&&isLaidOut()){
+                android.transition.ChangeBounds change=new android.transition.ChangeBounds();change.setDuration(220);change.setInterpolator(UiTokens.motionEaseOut());android.transition.TransitionManager.beginDelayedTransition(this,change);
+            }
+            editorOpen=open;int generation=++editGeneration;
+            if(open){
+                int target=host.profile().optInt("dailyCalorieGoal");goalInput.setText(target>0?Integer.toString(target):"");goalInput.setError(null);editor.setVisibility(View.VISIBLE);goalEntry.setText("收起目标设置  ⌃");goalInput.requestFocus();goalInput.setSelection(goalInput.length());
+                goalInput.post(()->{
+                    if(closed||!editorOpen||generation!=editGeneration||!isAttachedToWindow())return;
+                    // Reveal the field/actions without moving keyboard focus to the footer.
+                    goalInput.requestRectangleOnScreen(new Rect(0,0,goalInput.getWidth(),goalInput.getHeight()+dp(62)),true);
+                    android.view.inputmethod.InputMethodManager ime=(android.view.inputmethod.InputMethodManager)a.getSystemService(Context.INPUT_METHOD_SERVICE);if(ime!=null)ime.showSoftInput(goalInput,android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                });
+            }else{
+                hideInput();editor.setVisibility(View.GONE);goalInput.setError(null);goalInput.setText("");refreshGoalDisplay();
+            }
+        }
+        void saveGoal(){
+            if(closed||!editorOpen||!isAttachedToWindow()||a.isFinishing()||a.isDestroyed())return;
+            final int value;
+            try{String entered=goalInput.getText().toString().trim();value=entered.isEmpty()?0:Integer.parseInt(entered);}
+            catch(NumberFormatException invalid){goalInput.setError("目标无效，请填写300–10000 kcal，或留空");return;}
+            if(value!=0&&(value<300||value>10000)){goalInput.setError("请填写300–10000 kcal，或留空");return;}
+            if(!host.saveDailyGoal(value)){goalInput.setError("目标保存失败，请重试");return;}
+            setEditorOpen(false);
+        }
+        void refreshGoalDisplay(){
+            int target=host.profile().optInt("dailyCalorieGoal"),calories=displayCalories(host.days().optJSONObject(date));
+            energy.setText(calories+(target>0?" / "+target:"")+" kcal");goalEntry.setText(target>0?"调整每日目标  ›":"设置每日热量目标  ›");
+        }
+        void hideInput(){
+            boolean ownsKeyboard=goalInput.hasFocus()&&goalInput.hasWindowFocus();android.os.IBinder token=goalInput.getWindowToken();goalInput.clearFocus();requestFocus();
+            if(ownsKeyboard&&token!=null){android.view.inputmethod.InputMethodManager ime=(android.view.inputmethod.InputMethodManager)a.getSystemService(Context.INPUT_METHOD_SERVICE);if(ime!=null)ime.hideSoftInputFromWindow(token,0);}
+        }
+        void close(){if(closed)return;closed=true;editorOpen=false;editGeneration++;android.transition.TransitionManager.endTransitions(this);hideInput();goalInput.setOnEditorActionListener(null);goalInput.setText("");}
+        @Override protected void onDetachedFromWindow(){close();super.onDetachedFromWindow();}
+    }
+    /** Content shrinks to its actual height, but stays scrollable above a real IME. */
+    private final class SummaryScroll extends ScrollView {
+        SummaryScroll(){super(a);setFillViewport(false);setOverScrollMode(View.OVER_SCROLL_NEVER);}
+        @Override protected void onMeasure(int widthSpec,int heightSpec){
+            // AlertDialog has already removed its title and the IME from this
+            // bound. Subtracting another fixed allowance can strand actions
+            // below an unnecessarily tiny viewport on short, large-font screens.
+            int limit=MeasureSpec.getSize(heightSpec);
+            if(MeasureSpec.getMode(heightSpec)==MeasureSpec.UNSPECIFIED){
+                Rect visible=new Rect();a.getWindow().getDecorView().getWindowVisibleDisplayFrame(visible);limit=visible.height()>0?visible.height():getResources().getDisplayMetrics().heightPixels;
+            }
+            super.onMeasure(widthSpec,MeasureSpec.makeMeasureSpec(limit,MeasureSpec.AT_MOST));
+        }
     }
     public static int displayCalories(JSONObject day){
         if(day==null)return 0;
         if(day.optBoolean("manualCaloriesOverride")){
+            // New meal edits replace only that meal; untouched meals remain live AI values.
+            // Legacy whole-day overrides retain their original total until explicitly edited.
+            if(day.optBoolean("manualCaloriesByMeal")){
+                double total=0;for(String key:NutritionStore.MEALS){double value=NutritionStore.displayMealCalories(day,key);if(Double.isFinite(value))total+=value;}return (int)Math.round(total);
+            }
             if(day.optInt("manualCaloriesTotal")>0)return day.optInt("manualCaloriesTotal");
             int total=0;for(String k:NutritionStore.MEALS){JSONObject m=day.optJSONObject(k);if(m!=null&&!m.optBoolean("skipped"))total+=Math.max(0,m.optInt("manualCalories"));}return total;
         }
         JSONObject totals=NutritionStore.totals(day);
         return totals.optInt("count")>0?(int)Math.round(totals.optDouble("caloriesKcal")):Math.max(0,day.optInt("calories"));
     }
-    private AlertDialog goal(){
+    private EditText goalInput(){
         // Keep the native focus underline, without the filled capsule used by standalone forms.
         EditText input=new EditText(a);input.setTag("daily_calorie_goal_input");input.setMinHeight(dp(48));
         input.setTextSize(AppTypography.sp(a,16));input.setTypeface(AppTypography.typeface(a,false));
@@ -213,16 +296,7 @@ public final class FoodUi {
         input.setPadding(0,dp(10),0,dp(10));input.setSingleLine(true);
         input.setInputType(InputType.TYPE_CLASS_NUMBER);input.setHint("不填则隐藏目标");input.setContentDescription("每日热量目标，千卡，留空关闭");
         input.setMinHeight(dp(48)); // setSingleLine/setInputType can reset TextView's pixel minimum to one line.
-        LinearLayout body=new LinearLayout(a);body.setOrientation(LinearLayout.VERTICAL);body.setTag("daily_calorie_goal_body");
-        body.setPadding(dp(24),dp(4),dp(24),dp(8));body.addView(input,new LinearLayout.LayoutParams(-1,-2));
-        if(host.profile().optInt("dailyCalorieGoal")>0)input.setText(""+host.profile().optInt("dailyCalorieGoal"));
-        return builder().setTitle("每日热量目标").setMessage("填写你自己的目标，留空可关闭。")
-            .setView(body).setNegativeButton("取消",null).setPositiveButton("保存",(d,w)->{
-                try{int n=input.getText().length()==0?0:Integer.parseInt(input.getText().toString());
-                    if(n!=0&&(n<300||n>10000)){message("请填写300–10000 kcal，或留空");return;}
-                    host.profile().put("dailyCalorieGoal",n);host.saveProfile();host.refresh();
-                }catch(Exception e){message("目标无效");}
-            }).show();
+        return input;
     }
     public void addMealItems(LinearLayout parent,final String date,final String meal,JSONObject value){
         JSONArray items=value.optJSONArray("foodItems");if(items==null)return;

@@ -31,6 +31,13 @@ public final class FoodStickerRenderer {
     /** Existing low-level white-edge contract for old callers/tests. */
     public static Bitmap create(Bitmap cutout,int borderPx){return create(cutout,borderPx,"paper",false);}
     public static Bitmap create(Bitmap cutout,int borderPx,String style,boolean night){
+        return create(cutout,borderPx,style,night,false);
+    }
+    /** Preview-only edge with a transparent subject; never becomes the editable mask. */
+    static Bitmap createOutline(Bitmap mask,int borderPx,String style,boolean night){
+        return create(mask,borderPx,style,night,true);
+    }
+    private static Bitmap create(Bitmap cutout,int borderPx,String style,boolean night,boolean outlineOnly){
         if(cutout==null||cutout.isRecycled())return null;
         if("none".equals(style)){Bitmap copy=cutout.copy(Bitmap.Config.ARGB_8888,false);if(copy==null)throw new OutOfMemoryError();return copy;}
         int radius=Math.max(1,Math.min(48,borderPx));
@@ -69,7 +76,9 @@ public final class FoodStickerRenderer {
             canvas.drawPath(contour(distance,w,h,Math.round(edge*3)),ink);
             if("double".equals(style)){ink.setStrokeWidth(Math.max(1,stroke*.65f));canvas.drawPath(contour(distance,w,h,radius*3),ink);}
         }
-        canvas.drawBitmap(cutout,padding,padding,new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG));
+        Paint subject=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
+        if(outlineOnly)subject.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
+        canvas.drawBitmap(cutout,padding,padding,subject);
         return result;
     }
     /** Trace the expanded alpha boundary; dashes follow the subject, not a rectangle or ellipse. */

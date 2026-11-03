@@ -69,6 +69,10 @@ if ($ManifestText -notmatch 'android:versionName="([^"]+)"') {
     throw "android:versionName not found in $ManifestPath"
 }
 $VersionName = $Matches[1]
+if (-not $NoUpload -and $VersionName -notmatch '^\d+\.\d+\.\d+$') {
+    throw 'Beta/prerelease builds are local only. Re-run with -NoUpload; only stable versions may enter upload paths.'
+}
+
 
 $ReleaseNotesPath = Join-Path $ProjectRoot 'src\com\eatrecord\app\ReleaseNotes.java'
 if (-not (Test-Path $ReleaseNotesPath)) { throw 'Local release notes source is required' }

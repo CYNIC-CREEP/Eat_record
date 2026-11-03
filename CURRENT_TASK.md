@@ -1,18 +1,30 @@
-# Current Task
+# 当前任务
 
-更新：2026-10-29（Asia/Shanghai）。
+更新：2026-11-03（Asia/Shanghai），0.6.1/code193已通过用户人工复查，正在按明确授权发布GitHub／OpenList。
 
-## 0.6.0 正式版已发布
+## 版本与授权
 
-- 用户最新明确要求上传OpenList、GitHub并推送更新，已取代上一轮暂不上传要求，授权本版源码提交、v0.6.0标签、main推送、正式Release与应用更新清单。Manifest、ReleaseNotes、README、内置教程为 `0.6.0 / versionCode 184`。
-- 已将本版源码提交93bcf58推送main，并创建/推送v0.6.0标签；GitHub正式Release为 https://github.com/CYNIC-CREEP/Eat_record/releases/tag/v0.6.0 ，不是草稿或预发布。附件为正式APK和该提交的源码ZIP，公开APK回下载SHA一致。
-- OpenList的0.6.0版本目录、正式APK及同字节兼容-debug文件名、源码、说明与教程均已上传/回下载校验。先验证临时版本目录再启用，最后切换update.json；应用只读账号读取清单/安装包成功。保留原版本、字体及旧公共文档备份，不运行旧脚本全目录压缩/无关删除。
-- 安装包：`dist/EatRecord-0.6.0.apk`，121162865 bytes（115.55 MiB）；SHA256：`1753a9754d06b5e29b850f0f8b1080a05ea01e3051ebd91d032509e76e9b0eed`。与普通 `-debug.apk` 字节相同，实际无debuggable/QA/instrumentation，沿用原证书，支持覆盖升级。
-- 本轮修改：餐次短文字在输入区上下居中、仍左对齐，上下padding对称；长文字可滚动，保存/返回仍重读最新记录后仅合并文字。修复原图加载中切后台取消请求后，未提交目标未复位导致下次滑动跳图；按当前viewer owner清理，旧会话不能改新会话。
-- 保留beta.35共享纸面顶栏、原位日夜过渡及滚动监听清理，以及已有连续页面/日期/记录本、媒体异步显示、凭据隔离和备份事务保护。未迁移架构、删功能或改变数据格式。
-- 验证：22组JVM共3096项及独立预览选择14项通过；独立emulator-5586上 `release-v060 all`、`revision-v33 all`、`revision-v28 all`、`revision-v32 books`、`revision-v24 dates`、`revision-v35 all`通过。QA与普通构建602个生产class逐字节一致。
-- 普通/QA均NoUpload编译成功；普通包验签、版本、4个抠图模型、字体/许可、双ARM共8库及依赖闭包、退役识别移除、无QA与系统备份排除规则核对通过。应用验收见 [V06_RELEASE_REPORT.md](V06_RELEASE_REPORT.md)，发布证据见 [V06_PUBLISH_REPORT.md](V06_PUBLISH_REPORT.md)，元数据在 `build/publish060/`。
-- 已将同一普通正式包覆盖安装到用户授权手机461QYGFL22429（魅族21，Android16），只读检查餐次文字/键盘、图片详情与原图返回、连续日期和主页面、记录本开合/连续翻页、日夜多页顶栏、字体框等。未在日常手机使用QA、清数据、删除真实Key、付费识别或破坏性恢复；测试夜间偏好已恢复原值。具体覆盖和限制见正式报告，不能据此宣称所有设备零卡顿。
-- 未实测：真实付费API/营养准确率、实际拍照后保存/识别、系统备份传输、日常手机破坏性恢复及其他品牌长时间帧率。故障与凭据测试仅独立设备/合成数据。发布不扩大上述应用验收范围。
-- 当前原生Java动态View/Canvas+JNI/MNN、自定义PowerShell。多轮工作区源码/资源/报告按明确文件清单审查后纳入本版，原签名、本机凭据、缓存不入库；禁止reset/clean，不以build备份替代src。server/update.json、dist/update.json与OpenList清单同为0.6.0/code184；本轮发布收尾文档在后续文档提交，产品源码与v0.6.0一致。
-- 新发现的旧版兼容边界：0.5.26源码中的HTTP匿名get/list更新接口均返回应用层500，未改账号权限或服务器路由。旧版可从GitHub手动覆盖；当前只读账号更新链路已验证。若要恢复该旧接口，后续单独审查服务兼容，不能直接扩大匿名目录权限。
+- 用户明确要求本轮直接使用正式版0.6.1，不走Beta.9；Manifest与ReleaseNotes为0.6.1/code193。main/HEAD仍2b8aae9，既有脏修改／未跟踪文件完整保留。
+- 已授权本地修改、构建、覆盖安装魅族21；本轮不运行模拟器或自动功能测试。功能由用户人工复查，不能把旧Beta测试结果当作193功能通过。
+- 用户明确回复“没问题了，上传吧”，授权本版提交／标签／push及GitHub／OpenList发布。server/update.json与dist/update.json已准备0.6.1/code193；远端切换待完整附件校验。
+
+## 本轮完成
+
+- 删除今日餐纸热量下方整行说明提示，保留热量点击入口与食物详情。
+- 记录本热量输入默认同步最新识别值，已手填餐次优先手填；清空保存恢复对应餐次识别。弹窗监听日记更新，未编辑字段实时更新，已编辑草稿保持。只改消费／收藏／直接保存不把AI值冻结为手填。
+- 新手填采用manualCaloriesByMeal，动态汇总手填餐次＋其余最新识别餐次，首页／周历／周报／记录本共用FoodUi.displayCalories。旧整日manualCaloriesTotal兼容保留，直到明确修改热量；仅消费／收藏不改变旧总量。
+- 保存锁内重读最新日记并只合并编辑字段；收藏仅写favorite，避免整份旧表单覆盖同期营养／媒体。已删日记／变化餐次不被旧表单复活。
+- 收藏实心星标改用鲜明主题色，黄色主题为金黄色，其他主题保持对应色相、提升饱和度与不透明度。
+- 版本、公告、README、本地教程／server教程、交接文档与RELEASE_NOTES_0.6.1.md同步。前八轮内容见既有V061_BETA*_REPORT.md。
+
+## 交付证据与未测范围
+
+- NoUpload普通构建成功，日志build/v061-final-build.log；git diff --check通过（仅既有换行提示）。验包与v2/v3原证书签名核对完成：4模型、双ARM8库／6固定摘要、依赖闭包、字体／许可、QA隔离和包体预算通过。
+- dist/EatRecord-0.6.1.apk与-debug.apk为同字节普通包，121191537 bytes；SHA256 e308ab640f7a8ac718ab66526bfe1da7bee01c2bc66d2080c1c22bb9246750c7；min26/target37，无debuggable／QA。
+- 魅族21/461QYGFL22429：安装前在Launcher，未锁屏、无输入框；从普通192同证书覆盖193，adb安装Success、MainActivity启动Status ok。未清数据／运行QA／写测试记录／改Key／人工触发营养请求；临时XML已删除。
+- 用户明确免本轮模拟器、JVM及设备自动功能回归；仅完成构建、包体／签名核对和ADB安装启动。本版功能以用户本轮人工复查为验收，未补跑自动功能回归。
+- 详细修改与交付记录见V061_DELIVERY_REPORT.md。
+
+## 下一步
+
+按RELEASE_PROCESS.md审查累计源码／文档并提交、标记v0.6.1，源码包从发布提交git archive生成；GitHub先草稿附件校验后正式发布，OpenList暂存完整回下载后启用目录并切换清单。沿用已人工验收APK，不重编译。最终证据另作收尾记录，不移动发布标签。

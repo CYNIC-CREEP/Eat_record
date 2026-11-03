@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Only stable releases may be published; Beta/prerelease upload is disabled.' }
 
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Uploader = Join-Path $ProjectRoot "scripts\upload-lanzou.mjs"

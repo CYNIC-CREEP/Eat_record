@@ -18,11 +18,9 @@ git diff --check
 
 版本在 `AndroidManifest.xml`：versionCode递增、versionName匹配 `src/com/eatrecord/app/ReleaseNotes.java` 最新条目。未发布Beta与线上正式版清单不同是正常现象，不为“对齐”自动改/上传server/update.json。
 
-用户2026-10-24要求持续使用0.6.0-beta.N，每轮交付Beta序号加一，直到其明确满意并批准正式版；当前版本与versionCode以CURRENT_TASK.md和Manifest为准。交付普通本地APK不授权正式发布或远端上传。
+0.6.1起每轮修改递增一个beta.N及versionCode，同轮修正/验证不再递增；未经用户明确批准始终交付Beta。更新渠道只推正式版，Beta只本地交付，不替换server/update.json或上传。build.ps1在未带-NoUpload时拒绝预发布版本，OpenList/蓝奏入口也在打包/认证/浏览器操作前拒绝非x.y.z正式版本；这些拦截不代表旧发布流程其余副作用已修复。本地转正式版本号与远端发布分别授权：用户可明确要求先使用正式版本号安装复查，仍须等待人工验收及发布指令后才上传。2026-11-03用户明确要求0.6.1/code193先安装魅族21人工复查，本轮不运行模拟器或自动功能测试，不因此把未测试项目标为通过。0.6.0的发布授权不延续到0.6.1。
 
-2026-10-29用户已批准本地0.6.0正式版/code184打包交付，并明确暂不上传GitHub、OpenList。构建仍带NoUpload，沿用现有签名；普通构建产物验证后复制为EatRecord-0.6.0.apk，复制前后摘要须一致。此授权不包含commit/tag/push或远端清单修改。
-
-2026-10-29后续用户明确要求上传OpenList和GitHub并推送更新，已取代上一段暂不上传的限制，包含本版源码提交、v0.6.0标签、main推送、正式Release附件和应用更新清单。复用已手机验收且摘要固定的普通包，发布前重新验包，不用重编译替换已验收字节。源码ZIP从审查后的Git提交生成；本机凭据目录与缓存不进入Git或源码ZIP。OpenList先上传并校验版本文件，最后替换更新清单；不运行旧脚本中的无关字体删除。
+构建始终带NoUpload。已验收普通APK可在产品源码未变化、版本/签名/内容及SHA256重新核对后原样发布，避免重编译替换已验收字节；源码或资源变化则重新构建并验证。普通包复制为正式附件名时前后摘要须相同，后缀不改变调试标志或签名。
 
 ## 2. 环境与签名
 
@@ -87,6 +85,14 @@ QA会改写日记/设置，不在用户日常手机运行，不发布。Android 
 
 定向入口（完整前提/结果见相应报告及tests/android/UpgradeSmoke.java）：
 
+- `-e scenario revision-v061b8`：历史日期文字淡化与水位／容器透明度独立，真实七日热量投影、六个非空日及一个空日的实际HWUI像素，单目标／关闭动画，回归自然年月稳定、未来禁选与重建／手势。仅独立QA设备／合成数据；不能仅凭很小的非零软件像素判定历史水位可读。
+- `-e scenario revision-v061b7`：显示月淡化与未来禁选分离、跨月周历更新、weekday微差与略增波幅／单目标／减少动画；营养概览单窗口内联目标、显式保存／取消／清零／校验、最新设置合并和原位显示，短窗大字与实际IME。仅独立QA设备，手机仅普通包展开／取消，不保存测试目标。旧直接反射goal()的新建弹窗QA属于历史契约，不能为它恢复双重弹窗。
+- `-e scenario revision-v061b6`：收起周历的每日水位、手工热量优先、无目标／0／半满／达标／超额、同日点击与切日短暂晃动及生命周期／展开／关闭动画清理；合成API配置删除确认取消／应用、关联字段及授权世代清理、重开空白、旧owner隔离，旧餐食／云账号不变。仅独立QA设备，绝不在日常手机删除真实配置。
+- `-e scenario revision-v061b5`：合成PNG上的实际擦除／恢复、逐步撤销／重做、分支及32步压缩、重置、双指／取消、轮廓开关与拖动预览、圆角与间距、保存alpha不含预览边框、关闭回收和迟到结果。只用于独立模拟器，另在短窗口／大字环境复跑并恢复设置，不在日常手机运行。
+- `-e scenario revision-v061b4`：营养师作为根页0的真实子页，点击同步启动同一RootPager、保留实例/世代/三页，无PageCrossfade/重建/重挂；实际出场、改选/暂停及离屏后复位、日期owner；15/30dp小幅上滑按钮连续/取消恢复。记录handler和首个非零硬件提交帧时间，不设模拟器SLA。含v061b3与既有回归，定向phase=navigation-settings。
+- `-e scenario revision-v061b3`：实际停在营养师后分别点击迹/我，核对出场仍为营养师、横向页/底栏同进度、中断续接/owner清理；餐次管理新页入口、开关、返回/滚动和配置保留，另回归既有v061b2。仅独立QA/合成数据。
+- `-e scenario revision-v061b2`：隐藏/半屏营养师强制global-layout不产生假IME，真实键盘开关、营养师开启时底栏点击逐帧连续、1440ms双向主题与前250ms图标唯一owner/末态交接；仍仅独立QA、禁网络。
+- `-e scenario revision-v061`：默认三餐/夜宵显式开关及旧记录保留、今日点击不进营养师、纵向取消/上滑/下滑/隐藏owner及关闭开关、正反主题半程圆内/外/柔边像素与HWUI帧和快照释放。仅独立QA，HTTP(S)禁用；旧v35中直接点击个性化夜间开关的流程已被取代。
 - `-e scenario release-v060 -e phase all|editor|media`：餐次实际Layout／空hint墨迹垂直居中且保持左对齐、窄窗大字、多行溢出滚动、直接编辑／真实Back／Done与最新媒体营养合并、空日记不写；阻塞原图切换、暂停恢复后下一张连续、旧会话重置回调不影响新owner。仅独立设备／合成夹具，日常手机只普通包和已有数据。
 - `-e scenario revision-v35 -e phase all|headers`：真实日夜循环、迹／个性化／其他／记录本／安全五页，正常／弹窗关闭／中断返回的背景与对比度；透明标题区与实际整页纸面合成、夜间正文滚动不进入标题区、明暗切换保留页／scroll／日期／日历和快照清理，all附空餐纸及短窗口字体回归。真机必须另用普通包反复切模式与跨页截图，不能把旧固定底色oracle或仅软件draw当通过。
 - `-e scenario revision-v34 -e phase all|ui|media|privacy|restore`：空餐纸单行居中且不触发添加、星标入口、五主题夜间顶栏软件／HWUI像素、内容自适应字体框与窄屏大字、疏密保存留页；阻塞独立图片worker验证异步首开／失败原子性／最新目标／关闭取消、缩略图共享；实际导出脱敏、旧设置导入权限边界、真实restore提交与无效ZIP、Android偏好提交不确定结果回滚、启动式恢复与重试页面。仅独立QA设备，合成凭据，不能用于日常手机。JVM脚本另含分存失败恢复与64MiB heap流式／文件事务故障检查。最终普通包须核对SafeBackupAgent、两个系统备份版本及device-transfer的私有preferences排除规则，不宣称实际系统备份传输已验证。
@@ -111,7 +117,7 @@ QA会改写日记/设置，不在用户日常手机运行，不发布。Android 
 仅用户批准发布后继续：
 
 1. 审查全部变更/未跟踪资源，确认该版本源码、模型/字体许可、说明和测试可追溯；排除缓存、浏览器会话、凭据、QA数据及签名文件。
-2. 重建普通包并核对摘要/证书/ABI/版本；切勿仅重命名QA包。
+2. 使用符合第1节要求的普通包并核对摘要/证书/ABI/版本；需要重建时带NoUpload，切勿重命名QA包冒充正式包。
 3. 确定生产证书、渠道、标签/提交目标、管理端点/权限、更新清单说明。当前OpenList脚本可能复用旧notes，必须人工核对。
 4. 清单、附件、提交/标签、远端下载哈希一致后才报告发布完成；本机Beta尚未发布时不要求覆盖线上正式清单。
 
@@ -135,12 +141,23 @@ gh release create v<versionName> <普通APK附件路径> --target <已确认提�
 
 这是已有渠道的操作模板，不是已发布证据；若版本/附件已存在先检查，不擅自clobber。
 
+源码ZIP由审查后的发布提交生成，不压缩整个工作目录：
+
+```text
+git archive --format=zip --prefix=EatRecord-<versionName>/ --output=dist/EatRecord-<versionName>-source.zip <已确认发布提交>
+```
+
+提交前审查明确文件清单；压缩后再检查签名、本机凭据、浏览器会话、缓存、用户数据及QA产物均未包含。先上传草稿附件并核对大小/摘要，再发布为正式Release，回下载APK计算SHA256；核对标签实际指向发布提交。收尾文档可以另作后续提交，不移动已发布标签。Git推送连接失败时先查远端是否已接收，再重试；如需代理，仅对本次命令使用本机已配置的代理，不记录认证信息或永久改网络设置。
+
 ## 7. OpenList与其他上传（须另行授权）
 
 - 脚本：`scripts/publish-openlist.ps1`；支持BaseUrl、RemoteRoot、ArtifactSuffix、SkipBuild及从OPENLIST_USERNAME/OPENLIST_PASSWORD环境变量读取管理员凭据。只记录变量名，不写真实值或带凭据命令。
 - 旧脚本默认管理端点仍为HTTP，不直接采用。2026-10-29已确认管理HTTPS入口为 `https://pan.freefeng.icu`，管理挂载根 `/lanzou/Myapp/eat record`，用户提供的本机管理凭据可用；应用只读账号base_path为 `/lanzou/Myapp`，其请求路径是 `/eat record`。登录域名相同不代表两类账号路径相同，不在文档/Git写入真实凭据。
-- 确认参数及副作用后可使用模板 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish-openlist.ps1 -SkipBuild -BaseUrl <已确认管理入口> -RemoteRoot <已确认挂载目录>`。脚本默认上传-debug后缀包，与GitHub附件命名不同。
-- 会打源码ZIP并上传APK/源码/服务文件/教程/字体/清单；可能先删除同名远端文件及退休字体，并改写dist/update.json、server/update.json。不是无副作用的检查工具，执行前审查源码包排除项及删除目标。
+- 该脚本仍保留全工作目录压缩、复用旧notes、删除同名文件/退休字体及上传额外服务文件等旧行为，尚未实现下述安全流程，不能直接作为当前发布入口。0.6.0的辅助程序位于被Git忽略的build/publish060，仅作本机实现与证据，新检出环境不能假定它存在。
+- 当前流程：明确本版说明和server/update.json，保持dist/update.json字节一致；先上传到不参与版本扫描的临时目录，回下载核对APK/源码及必要文档，再启用正式版本目录。普通包可同时提供正式名和同字节-debug兼容文件名，后者用于目录扫描回退，不能使用QA包。
+- 最后切换共享教程与update.json：新文件先上传并校验，旧文件改名保留，再切换新文件；失败时恢复旧文件。只替换本版必要文档，不删除既有版本、字体或部署无关云服务。
+- 通过应用只读账号验证相对路径的清单与安装包；检查versionCode/versionName、notes、下载路径和实际字节。更新清单可保留旧绝对路径，由AppDownloadClient映射到只读目录，并提供已验证的GitHub附件作为回退。
+- 下载限速时可以使用服务支持的HTTP Range分段完整回下载；必须检查各段范围/长度，按顺序重组后计算完整SHA256。不能用仅首部、文件名、上传成功响应或服务端取整大小替代完整文件验证。接口参考：https://openlistteam.github.io/docs/guide/api/fs.html 。
 - 上传后重新下载APK对比SHA256，核对版本/notes/链接及本地清单diff。不要凭脚本旧提示推断旧HTTP静态路由仍有效。
 - `scripts/upload-lanzou.ps1/.mjs`为另一自动上传路径，依赖Node/浏览器会话；当前登录与可用性 **待确认**。不为检查状态擅自运行。
 

@@ -30,7 +30,7 @@ beta.34起，新导出与云同步均剥离API配置、云会话和上传授权�
 
 ## 版本
 
-当前正式版为`0.6.0`，versionCode184；GitHub、OpenList和应用更新清单已同步发布。下载与说明见[0.6.0 Release](https://github.com/CYNIC-CREEP/Eat_record/releases/tag/v0.6.0)及[本版更新说明](RELEASE_NOTES_0.6.0.md)。发布证据与旧版更新接口限制见[V06_PUBLISH_REPORT.md](V06_PUBLISH_REPORT.md)。
+当前正式版本为`0.6.1`（versionCode193），已由用户在魅族21人工复查通过。默认三餐、可选夜宵，今日上滑进入已开启的营养师，我页月亮／太阳切换日夜并圆形扩散；记录本各餐热量同步识别值并优先使用手填值。下载与说明见[0.6.1 Release](https://github.com/CYNIC-CREEP/Eat_record/releases/tag/v0.6.1)及[0.6.1 更新说明](RELEASE_NOTES_0.6.1.md)。发布进度以CURRENT_TASK.md为准；历史发布证据与旧版更新接口限制见[V06_PUBLISH_REPORT.md](V06_PUBLISH_REPORT.md)。
 
 0.6.0在既有功能上调整餐次文字上下居中并保留左右对齐，修复图片加载中切后台、恢复后可能跳图的边界问题。正式包审查与设备验收见V06_RELEASE_REPORT.md；沿用既有签名覆盖升级。
 

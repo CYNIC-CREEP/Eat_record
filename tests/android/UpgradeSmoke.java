@@ -3129,7 +3129,7 @@ public final class UpgradeSmoke extends Instrumentation {
     private void rootFrameV28(MainActivity screen,RootPagePager expected,View[] pages,StringBuilder trace,long stamp)throws Exception {
         if(field(screen,"rootPager")!=expected)throw new Exception("Root switching replaced the retained pager");
         ViewGroup content=(ViewGroup)field(screen,"content");
-        if(content.getChildCount()!=1||content.getChildAt(0)!=expected||expected.getChildCount()!=3)throw new Exception("Root hierarchy lost its three retained sheets");
+        if(content.getChildCount()!=1||!(content.getChildAt(0)==expected||expected.getParent()==content.getChildAt(0)&&content.getChildAt(0) instanceof AdvisorPager)||expected.getChildCount()!=3)throw new Exception("Root hierarchy lost its three retained sheets");
         PageCrossfade crossfade=(PageCrossfade)field(screen,"pageCrossfade");
         if(crossfade!=null&&crossfade.active())throw new Exception("Root gesture/click used the bitmap crossfade path");
         float position=expected.position();if(!Float.isFinite(position)||position<0||position>2)throw new Exception("Invalid absolute root position: "+position);
@@ -3170,7 +3170,8 @@ public final class UpgradeSmoke extends Instrumentation {
         if(field(screen,"peerTracker")!=null||((Number)field(screen,"peerPointer")).intValue()!=-1||Boolean.TRUE.equals(field(screen,"peerTracking"))||Boolean.TRUE.equals(field(screen,"peerDragging"))||Boolean.TRUE.equals(field(screen,"peerSwallow"))||Boolean.TRUE.equals(field(screen,"navPeerActive")))throw new Exception("Root settlement retained an input/indicator owner");
         for(int i=0;i<3;i++)if(pager.ownsView(pages[i])!=(i==index))throw new Exception("Retained root "+i+" has the wrong input/date owner at rest "+index);
         View day=pager.page(0).findViewWithTag("today_day_pager"),calendar=pager.page(0).findViewWithTag("home_calendar");
-        if(day==null||calendar==null||Boolean.TRUE.equals(ownField(day,"rootActive"))!=(index==0)||Boolean.TRUE.equals(ownField(calendar,"rootActive"))!=(index==0))throw new Exception("Hidden Today components were not explicitly suspended");
+        boolean todayOwns=index==0&&(!(pager.page(0) instanceof AdvisorPager)||((AdvisorPager)pager.page(0)).atToday());
+        if(day==null||calendar==null||Boolean.TRUE.equals(ownField(day,"rootActive"))!=todayOwns||Boolean.TRUE.equals(ownField(calendar,"rootActive"))!=todayOwns)throw new Exception("Hidden Today components were not explicitly suspended");
         View indicator=(View)field(screen,"navIndicator"),host=(View)field(screen,"navHost");
         if(indicator.getVisibility()!=View.VISIBLE||indicator.getHeight()<=0||Math.abs(indicator.getScaleX()-1)>.001f||indicator.getLeft()+indicator.getTranslationX()<host.getPaddingLeft()-1||indicator.getLeft()+indicator.getTranslationX()+indicator.getWidth()>host.getWidth()-host.getPaddingRight()+1)throw new Exception("Settled bottom selection is hidden, scaled or outside its bar");
     }
@@ -4396,6 +4397,376 @@ public final class UpgradeSmoke extends Instrumentation {
         try{uiAssert(()->{invokeAnyV20(ownField(nextImage,"swipeHandler"),"onSwipe",new Class[]{int.class},1);if(oldReset!=null)oldReset.run();if(field(screen,"resetPhotoViewerTarget")!=nextReset)throw new Exception("Old viewer reset removed its replacement owner");});}finally{gate.countDown();}flushViewerV34(screen);settleV15();
         uiAssert(()->{if(!("2/"+photos.size()).equals(((android.widget.TextView)replacement.findViewWithTag("photo_viewer_counter")).getText().toString()))throw new Exception("Old viewer reset changed a new pending target");invoke(screen,"closePhotoViewer",new Class[]{});});settleV15();if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("Viewer pause changed diary data");
     }
+    private void swipeAdvisorV061(MainActivity screen,boolean up,boolean cancel)throws Exception {
+        View area=(View)field(screen,"content");int[] p=new int[2];uiAssert(()->area.getLocationOnScreen(p));
+        float x=p[0]+PaperComponents.dp(screen,3),start=p[1]+area.getHeight()*(up?.70f:.22f),end=p[1]+area.getHeight()*(up?.18f:.72f);
+        long down=android.os.SystemClock.uptimeMillis();pointerV15(down,MotionEvent.ACTION_DOWN,x,start);
+        movesV15(down,x,start,x,end,12);pointerV15(down,cancel?MotionEvent.ACTION_CANCEL:MotionEvent.ACTION_UP,x,end);settleV15();
+    }
+    private void chatGeometryV062(MainActivity screen)throws Exception {
+        uiAssert(()->{
+            android.widget.EditText input=(android.widget.EditText)field(screen,"aiQuestionInput");View bar=(View)input.getParent(),host=(View)bar.getParent();
+            int base=PaperComponents.dp(screen,(Integer)invoke(screen,"photoFabBottomMargin",new Class[]{}));
+            float original=host.getTranslationY();int visibility=host.getVisibility();
+            try{for(float y:new float[]{host.getHeight(),host.getHeight()*.5f,0}){
+                host.setVisibility(View.VISIBLE);host.setTranslationY(y);host.getViewTreeObserver().dispatchOnGlobalLayout();
+                int margin=((FrameLayout.LayoutParams)bar.getLayoutParams()).bottomMargin;
+                if(Math.abs(margin-base)>PaperComponents.dp(screen,1))throw new Exception("Translated advisor produced false IME lift: "+y+" margin="+margin+", base="+base);
+                android.widget.ScrollView scroll=(android.widget.ScrollView)field(screen,"aiAnalysisScrollView");
+                if(Math.abs(scroll.getPaddingBottom()-(base+bar.getHeight()+PaperComponents.dp(screen,10)))>PaperComponents.dp(screen,2))throw new Exception("False IME padding latched on first layout");
+            }}finally{host.setTranslationY(original);host.setVisibility(visibility);}
+        });
+    }
+    private void awaitImeV062(MainActivity screen,boolean shown)throws Exception {
+        if(android.os.Build.VERSION.SDK_INT<30)return;
+        boolean[] actual={false};long deadline=android.os.SystemClock.uptimeMillis()+3500;
+        do{uiAssert(()->{android.view.WindowInsets insets=screen.getWindow().getDecorView().getRootWindowInsets();actual[0]=insets!=null&&insets.isVisible(android.view.WindowInsets.Type.ime());});if(actual[0]==shown)return;Thread.sleep(40);}while(android.os.SystemClock.uptimeMillis()<deadline);
+        throw new Exception("Real IME did not become "+(shown?"visible":"hidden"));
+    }
+    private void chatImeV062(MainActivity screen)throws Exception {
+        uiAssert(()->{android.widget.EditText input=(android.widget.EditText)field(screen,"aiQuestionInput");input.requestFocus();((android.view.inputmethod.InputMethodManager)screen.getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(input,android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);});settleV15();awaitImeV062(screen,true);
+        uiAssert(()->{View input=(View)field(screen,"aiQuestionInput"),bar=(View)input.getParent(),host=(View)bar.getParent();android.graphics.Rect visible=new android.graphics.Rect();host.getWindowVisibleDisplayFrame(visible);int[] loc=new int[2];bar.getLocationOnScreen(loc);
+            if(loc[1]<PaperComponents.dp(screen,96)||loc[1]+bar.getHeight()>visible.bottom+PaperComponents.dp(screen,4))throw new Exception("Chat bar escaped usable window with real IME: y="+loc[1]+", barH="+bar.getHeight()+", visible="+visible+", hostH="+host.getHeight()+", hostY="+host.getTranslationY()+", margin="+((FrameLayout.LayoutParams)bar.getLayoutParams()).bottomMargin);
+            ((android.view.inputmethod.InputMethodManager)screen.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(input.getWindowToken(),0);input.clearFocus();});settleV15();awaitImeV062(screen,false);chatGeometryV062(screen);
+    }
+    private void enabledNavV062(MainActivity screen)throws Exception {
+        final RootPagePager pager=(RootPagePager)field(screen,"rootPager");View[] pages={pager.page(0),pager.page(1),pager.page(2)};
+        boolean animated=android.animation.ValueAnimator.areAnimatorsEnabled();
+        RootFramesV28 frames=new RootFramesV28(screen,pager,pages);if(animated)uiAssert(()->Choreographer.getInstance().postFrameCallback(frames));
+        try{for(int tab:new int[]{1,3,0,3,1,0}){
+            uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},tab)).performClick());Thread.sleep(100);
+            if(animated)uiAssert(()->{rootFrameV28(screen,pager,pages,null,0);if(!pager.isInteracting())throw new Exception("Enabled-advisor nav skipped intermediate moving frames");});settleV15();
+            uiAssert(()->rootRestV28(screen,pager,pages,tab==3?2:tab));
+        }if(android.animation.ValueAnimator.areAnimatorsEnabled()&&frames.movingFrames<6)throw new Exception("Enabled-advisor nav never displayed a moving selection");if(frames.failure!=null)throw new Exception("Enabled-advisor nav frame failure",frames.failure);
+        }finally{uiAssert(()->{frames.running=false;Choreographer.getInstance().removeFrameCallback(frames);});}
+    }
+    private android.animation.ValueAnimator pageClockV063(MainActivity screen)throws Exception {
+        final android.animation.ValueAnimator[] clock={null};long deadline=android.os.SystemClock.uptimeMillis()+1800;
+        do{uiAssert(()->{PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");if(flow!=null)clock[0]=(android.animation.ValueAnimator)ownField(flow,"animator");});if(clock[0]!=null)return clock[0];Thread.sleep(12);}while(android.os.SystemClock.uptimeMillis()<deadline);
+        throw new Exception("Advisor exit never started a horizontal page animation");
+    }
+    private void advisorExitV063(MainActivity screen,String name)throws Exception {
+        RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+        if(pager.page(0) instanceof AdvisorPager){advisorRootExitV064(screen,name);return;}
+        advisorLegacyExitV063(screen,name);
+    }
+    /** Legacy/restore destinations keep the retained-scene crossfade oracle. */
+    private void advisorLegacyExitV063(MainActivity screen,String name)throws Exception {
+        for(int target:new int[]{1,3}){
+            rootTabV33(screen,0);swipeAdvisorV061(screen,true,false);
+            AdvisorPager outgoing=(AdvisorPager)field(screen,"advisorPager");final float[] start={0,0};
+            uiAssert(()->{if(!Boolean.TRUE.equals(field(screen,"inAiAnalysisPage")))throw new Exception("Exit test did not start on advisor");View indicator=(View)field(screen,"navIndicator");start[0]=indicator.getTranslationX();start[1]=indicator.getWidth()*indicator.getScaleX();((View)invoke(screen,"findNavItem",new Class[]{int.class},target)).performClick();});
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+                android.animation.ValueAnimator clock=pageClockV063(screen);
+                uiAssert(()->{clock.pause();clock.setCurrentPlayTime(180);
+                    PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");Object slide=ownField(flow,"image");float progress=(float)ownField(slide,"progress");float movement=((android.animation.TimeInterpolator)ownField(slide,"positionEase")).getInterpolation(progress);
+                    if(!flow.retains(outgoing)||!"advisor_page".equals(outgoing.selectedPage().getTag())||outgoing.atToday())throw new Exception("Advisor was replaced by Today before horizontal exit");
+                    if(Math.abs(outgoing.getTranslationX()+((View)field(screen,"content")).getWidth()*movement)>3)throw new Exception("Outgoing advisor is not following horizontal clock");
+                    View incoming=((ViewGroup)field(screen,"content")).getChildAt(0);if(incoming.getTranslationX()<=0||incoming.getTranslationX()>=incoming.getWidth())throw new Exception("Destination lacks an intermediate slide");
+                    View indicator=(View)field(screen,"navIndicator");float x=(Float)invoke(screen,"navItemX",new Class[]{int.class},target),width=(Float)invoke(screen,"navItemWidth",new Class[]{int.class},target);
+                    if(Math.abs(indicator.getTranslationX()-(start[0]+(x-start[0])*movement))>2||Math.abs(indicator.getWidth()*indicator.getScaleX()-(start[1]+(width-start[1])*movement))>2)throw new Exception("Advisor exit pill jumped ahead of page");
+                    if(!Boolean.TRUE.equals(field(screen,"navPageTransition")))throw new Exception("Advisor exit lost nav progress ownership");
+                    Bitmap frame=renderViewV26((View)field(screen,"content"));try{saveFrameV24(frame,name+"-advisor-exit-"+target);}finally{frame.recycle();}
+                    clock.end();
+                });
+            }
+            settleV15();uiAssert(()->{rootAtRestV26(screen,target);if(Boolean.TRUE.equals(field(screen,"navPageTransition")))throw new Exception("Advisor exit retained transition owner");});
+        }
+        if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+            rootTabV33(screen,0);swipeAdvisorV061(screen,true,false);uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},1)).performClick());
+            android.animation.ValueAnimator clock=pageClockV063(screen);final float[] before={0};
+            uiAssert(()->{clock.pause();clock.setCurrentPlayTime(100);before[0]=((View)field(screen,"navIndicator")).getTranslationX();((View)invoke(screen,"findNavItem",new Class[]{int.class},3)).performClick();if(Math.abs(((View)field(screen,"navIndicator")).getTranslationX()-before[0])>2)throw new Exception("Interrupted advisor exit snapped pill to prior target");});
+            android.animation.ValueAnimator replacement=pageClockV063(screen);uiAssert(()->replacement.end());settleV15();uiAssert(()->rootAtRestV26(screen,3));
+            rootTabV33(screen,0);swipeAdvisorV061(screen,true,false);uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},3)).performClick());
+            android.animation.ValueAnimator pending=pageClockV063(screen);
+            uiAssert(()->{pending.pause();pending.setCurrentPlayTime(100);((View)invoke(screen,"findNavItem",new Class[]{int.class},1)).performClick();invoke(screen,"onPause",new Class[]{});invoke(screen,"onStop",new Class[]{});if(Boolean.TRUE.equals(field(screen,"navPageTransition")))throw new Exception("Canceled deferred nav retained its progress owner");invoke(screen,"onResume",new Class[]{});});settleV15();
+            RootPagePager ordinary=(RootPagePager)field(screen,"rootPager");uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},1)).performClick());settleV15();uiAssert(()->{if(field(screen,"rootPager")!=ordinary||Boolean.TRUE.equals(field(screen,"navPageTransition")))throw new Exception("Ordinary click inherited canceled advisor transition");rootAtRestV26(screen,1);});
+        }
+    }
+    private void advisorRootExitV064(MainActivity screen,String name)throws Exception {
+        boolean animated=android.animation.ValueAnimator.areAnimatorsEnabled();
+        for(int target:new int[]{1,3}){
+            rootTabV33(screen,0);swipeAdvisorV061(screen,true,false);
+            RootPagePager pager=(RootPagePager)field(screen,"rootPager");View[] pages={pager.page(0),pager.page(1),pager.page(2)};AdvisorPager outgoing=(AdvisorPager)pages[0];
+            RootFramesV28 frames=new RootFramesV28(screen,pager,pages);if(animated)uiAssert(()->Choreographer.getInstance().postFrameCallback(frames));
+            try{
+                uiAssert(()->{
+                    if(!outgoing.atAdvisor()||!Boolean.TRUE.equals(field(screen,"inAiAnalysisPage")))throw new Exception("Root exit did not start on the actual advisor");
+                    ((View)invoke(screen,"findNavItem",new Class[]{int.class},target)).performClick();
+                    PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");if(flow!=null&&flow.active()||Boolean.TRUE.equals(field(screen,"navPageTransition")))throw new Exception("Ordinary advisor exit started a separate page clock");
+                    if(field(screen,"rootPager")!=pager)throw new Exception("Root exit rebuilt its page owner");
+                });
+                if(animated){
+                    Thread.sleep(90);uiAssert(()->{
+                        rootFrameV28(screen,pager,pages,null,0);
+                        if(!pager.isInteracting()||!outgoing.atAdvisor()||!"advisor_page".equals(outgoing.selectedPage().getTag()))throw new Exception("Root advisor exit reset Today before leaving the screen");
+                        if(outgoing.getTranslationX()>=0||outgoing.getTranslationX()<=-pager.getWidth()*(target==3?2:1))throw new Exception("Advisor lacks an intermediate horizontal root position");
+                        Bitmap image=renderViewV26((View)field(screen,"content"));try{saveFrameV24(image,name+"-advisor-root-exit-"+target);}finally{image.recycle();}
+                    });
+                }
+                settleV15();uiAssert(()->{
+                    rootRestV28(screen,pager,pages,target==3?2:target);
+                    if(!outgoing.atToday())throw new Exception("Offscreen Today did not reset only after root settlement");
+                });
+                if(animated&&frames.movingFrames==0)throw new Exception("Advisor exit displayed no moving root/indicator frame");
+                if(frames.failure!=null)throw new Exception("Advisor root exit frame oracle failed",frames.failure);
+            }finally{uiAssert(()->{frames.running=false;Choreographer.getInstance().removeFrameCallback(frames);});}
+        }
+        if(animated){
+            rootTabV33(screen,0);swipeAdvisorV061(screen,true,false);RootPagePager pager=(RootPagePager)field(screen,"rootPager");View[] pages={pager.page(0),pager.page(1),pager.page(2)};
+            uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},1)).performClick());Thread.sleep(60);
+            uiAssert(()->{float before=((View)field(screen,"navIndicator")).getTranslationX();((View)invoke(screen,"findNavItem",new Class[]{int.class},3)).performClick();
+                if(Math.abs(((View)field(screen,"navIndicator")).getTranslationX()-before)>2)throw new Exception("Retargeted advisor root exit snapped selection");
+                rootFrameV28(screen,pager,pages,null,0);});settleV15();uiAssert(()->rootRestV28(screen,pager,pages,2));
+            rootTabV33(screen,0);swipeAdvisorV061(screen,true,false);RootPagePager paused=(RootPagePager)field(screen,"rootPager");
+            uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},3)).performClick());Thread.sleep(60);
+            uiAssert(()->{((View)invoke(screen,"findNavItem",new Class[]{int.class},1)).performClick();invoke(screen,"onPause",new Class[]{});invoke(screen,"onStop",new Class[]{});
+                if(Boolean.TRUE.equals(field(screen,"navPageTransition")))throw new Exception("Root exit pause left a crossfade indicator owner");invoke(screen,"onResume",new Class[]{});});settleV15();
+            uiAssert(()->{if(field(screen,"rootPager")!=paused)throw new Exception("Root exit pause replaced retained sheets");rootAtRestV26(screen,1);});
+        }
+    }
+
+    /** A timestamp for an actually drawn moving frame, committed by HWUI where available. */
+    private final class NavStartupV064 implements ViewTreeObserver.OnDrawListener {
+        final MainActivity screen;final RootPagePager pager;final AdvisorPager outgoing;final View root,indicator;
+        final float startX;final long[] time=new long[2];
+        volatile long firstFrameNanos;volatile Throwable failure;boolean queued;
+        NavStartupV064(MainActivity screen,RootPagePager pager,AdvisorPager outgoing)throws Exception {
+            this.screen=screen;this.pager=pager;this.outgoing=outgoing;root=(View)field(screen,"root");indicator=(View)field(screen,"navIndicator");startX=indicator.getTranslationX();
+        }
+        public void onDraw(){
+            if(queued||time[0]==0)return;
+            try{
+                boolean moved=outgoing==null?pager.position()>.0001f:Math.abs(outgoing.getTranslationX())>.5f;
+                if(!moved||Math.abs(indicator.getTranslationX()-startX)<=.5f)return;
+                if(outgoing!=null&&outgoing.getParent()==pager&&pager.isInteracting()&&!outgoing.atAdvisor())throw new Exception("Advisor reset before its first drawn horizontal root frame");
+                queued=true;Runnable committed=()->firstFrameNanos=System.nanoTime();
+                if(android.os.Build.VERSION.SDK_INT>=29&&root.isHardwareAccelerated())root.getViewTreeObserver().registerFrameCommitCallback(committed);
+                else committed.run();
+            }catch(Throwable error){failure=error;}
+        }
+        void register(){root.getViewTreeObserver().addOnDrawListener(this);}
+        void remove(){if(root.getViewTreeObserver().isAlive())root.getViewTreeObserver().removeOnDrawListener(this);}
+        String result(String route)throws Exception {
+            long deadline=android.os.SystemClock.uptimeMillis()+3500;
+            while(firstFrameNanos==0&&failure==null&&android.os.SystemClock.uptimeMillis()<deadline)Thread.sleep(12);
+            if(failure!=null)throw new Exception("Startup moving-frame observer failed",failure);
+            if(firstFrameNanos==0)throw new Exception("No nonzero moving frame was drawn: "+route);
+            return route+": click_handler_ms="+String.format(java.util.Locale.US,"%.3f",time[1]/1_000_000d)
+                    +", first_nonzero_"+(android.os.Build.VERSION.SDK_INT>=29&&root.isHardwareAccelerated()?"committed_frame":"draw")+"_ms="
+                    +String.format(java.util.Locale.US,"%.3f",(firstFrameNanos-time[0])/1_000_000d)+"\n";
+        }
+    }
+    private void tinyAdvisorPullV064(MainActivity screen)throws Exception {
+        rootTabV33(screen,0);View area=(View)field(screen,"content");int[] loc=new int[2];final float[] initial=new float[2],previous=new float[2];
+        uiAssert(()->{area.getLocationOnScreen(loc);View fab=(View)field(screen,"fab"),pen=(View)field(screen,"manualFoodButton");initial[0]=previous[0]=fab.getTranslationY();initial[1]=previous[1]=pen.getTranslationY();});
+        float x=loc[0]+PaperComponents.dp(screen,3),start=loc[1]+area.getHeight()*.68f;
+        long down=android.os.SystemClock.uptimeMillis();pointerV15(down,MotionEvent.ACTION_DOWN,x,start);
+        try{
+            for(int distance:new int[]{15,30}){
+                movesV15(down,x,start-PaperComponents.dp(screen,distance==15?0:15),x,start-PaperComponents.dp(screen,distance),1);
+                uiAssert(()->{
+                    AdvisorPager pager=(AdvisorPager)field(screen,"advisorPager");float position=(float)ownField(pager,"position");
+                    if(position<=0||position>=PaperComponents.dp(screen,40)||pager.atToday())throw new Exception("Tiny pull did not exercise resisted vertical movement");
+                    View[] controls={(View)field(screen,"fab"),(View)field(screen,"manualFoodButton")};
+                    for(int i=0;i<controls.length;i++){
+                        View control=controls[i];float y=control.getTranslationY();
+                        if(control.getVisibility()!=View.VISIBLE||control.getAlpha()<=.9f)throw new Exception("Tiny pull abruptly hid control "+i+": visibility="+control.getVisibility()+", alpha="+control.getAlpha());
+                        if(y>=previous[i]-.5f||initial[i]-y>PaperComponents.dp(screen,35))throw new Exception("Tiny pull control is not moving continuously with Today: "+i+", y="+y+", previous="+previous[i]);
+                        previous[i]=y;
+                    }
+                });
+            }
+        }finally{pointerV15(down,MotionEvent.ACTION_CANCEL,x,start-PaperComponents.dp(screen,30));}
+        settleV15();uiAssert(()->{
+            if(!((AdvisorPager)field(screen,"advisorPager")).atToday())throw new Exception("Canceled tiny pull entered advisor");
+            View[] controls={(View)field(screen,"fab"),(View)field(screen,"manualFoodButton")};for(int i=0;i<controls.length;i++)
+                if(controls[i].getVisibility()!=View.VISIBLE||controls[i].getAlpha()<=.9f||Math.abs(controls[i].getTranslationY()-initial[i])>1)throw new Exception("Tiny pull cancel did not restore control "+i);
+        });
+    }
+    private String advisorStartupV064(MainActivity screen)throws Exception {
+        boolean animated=android.animation.ValueAnimator.areAnimatorsEnabled();StringBuilder timings=new StringBuilder();
+        tinyAdvisorPullV064(screen);
+        rootTabV33(screen,0);
+        if(animated){
+            RootPagePager ordinary=(RootPagePager)field(screen,"rootPager");NavStartupV064 sample=new NavStartupV064(screen,ordinary,null);
+            uiAssert(()->{sample.register();sample.time[0]=System.nanoTime();((View)invoke(screen,"findNavItem",new Class[]{int.class},1)).performClick();sample.time[1]=System.nanoTime()-sample.time[0];});
+            try{timings.append(sample.result("ordinary Today->Trace"));}finally{uiAssert(sample::remove);}settleV15();
+        }
+        for(int target:new int[]{1,3}){
+            rootTabV33(screen,0);swipeAdvisorV061(screen,true,false);
+            final RootPagePager retained=(RootPagePager)field(screen,"rootPager");final View[] pages={retained.page(0),retained.page(1),retained.page(2)};
+            final long generation=((Number)field(screen,"rootPagerGeneration")).longValue();final AdvisorPager outgoing=(AdvisorPager)field(screen,"advisorPager");
+            final NavStartupV064 sample=new NavStartupV064(screen,retained,outgoing);
+            uiAssert(()->{
+                if(!outgoing.atAdvisor()||pages[0]!=outgoing||retained.getParent()!=field(screen,"content"))throw new Exception("Startup fixture lacks the advisor inside direct root page zero");
+                if(animated)sample.register();sample.time[0]=System.nanoTime();((View)invoke(screen,"findNavItem",new Class[]{int.class},target)).performClick();sample.time[1]=System.nanoTime()-sample.time[0];
+                if(field(screen,"pendingNavClick")!=null)throw new Exception("Settled advisor nav still waits for preDraw/post");
+                if(field(screen,"rootPager")!=retained||((Number)field(screen,"rootPagerGeneration")).longValue()!=generation)throw new Exception("Advisor exit rebuilt the retained root pager");
+                for(int i=0;i<3;i++)if(retained.page(i)!=pages[i])throw new Exception("Advisor exit rebuilt root page "+i);
+                PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");
+                if(flow!=null&&flow.active()||Boolean.TRUE.equals(field(screen,"navPageTransition")))throw new Exception("Advisor exit did not use ordinary retained-root navigation");
+                if(animated&&(!retained.isInteracting()||!outgoing.atAdvisor()))throw new Exception("Advisor root navigation did not start synchronously with its actual source intact");
+            });
+            if(animated){
+                try{timings.append(sample.result("advisor->"+(target==1?"Trace":"Me")));}
+                finally{uiAssert(sample::remove);}
+            }
+            settleV15();uiAssert(()->{
+                rootRestV28(screen,retained,pages,target==3?2:target);
+                if(!outgoing.atToday())throw new Exception("Hidden advisor was not reset after leaving its root");
+                if(retained.page(0).findViewWithTag("advisor_page")==null)throw new Exception("Root discarded the prepared advisor view on exit");
+            });
+        }
+        if(!animated)timings.append("System animations disabled: startup timing sampler skipped; retained-root and tiny-pull checks passed.\n");
+        android.util.Log.i("EatRecordQA",timings.toString());return timings.toString();
+    }
+
+    private void mealManagementV063(MainActivity screen)throws Exception {
+        rootTabV33(screen,3);uiAssert(()->invoke(screen,"openPreferencesPage",new Class[]{}));settleV15();final int[] parentScroll={0};
+        uiAssert(()->{View root=(View)field(screen,"content");if(root.findViewWithTag("night_snack_toggle")!=null)throw new Exception("Other settings still directly exposes snack toggle");View entry=root.findViewWithTag("meal_management_entry");if(entry==null)throw new Exception("Global has no Meal Management entry");android.widget.ScrollView scroll=(android.widget.ScrollView)invoke(screen,"currentPageScroll",new Class[]{});scroll.scrollTo(0,PaperComponents.dp(screen,70));parentScroll[0]=scroll.getScrollY();entry.performClick();});settleV15();
+        uiAssert(()->{View root=(View)field(screen,"content");if(root.findViewWithTag("meal_management_page")==null||root.findViewWithTag("night_snack_toggle")==null||!Boolean.TRUE.equals(field(screen,"inMealManagementPage"))||Boolean.TRUE.equals(invoke(screen,"isPreferencesRootVisible",new Class[]{})))throw new Exception("Meal Management routing/owner invalid");
+            invoke(screen,"onConfigurationChanged",new Class[]{android.content.res.Configuration.class},new android.content.res.Configuration(screen.getResources().getConfiguration()));
+            if(((View)field(screen,"content")).findViewWithTag("meal_management_page")==null)throw new Exception("Configuration lost meal subpage");
+        });settleV15();sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);settleV15();
+        uiAssert(()->{if(!Boolean.TRUE.equals(invoke(screen,"isPreferencesRootVisible",new Class[]{}))||Boolean.TRUE.equals(field(screen,"inMealManagementPage")))throw new Exception("Back did not return to Other settings");if(Math.abs((Integer)invoke(screen,"currentContentScrollY",new Class[]{} )-parentScroll[0])>2)throw new Exception("Meal subpage lost parent scroll");((View)field(screen,"content")).findViewWithTag("meal_management_entry").performClick();});settleV15();
+        uiAssert(()->{clickContentDescriptionV33(screen,"返回其他设置");});settleV15();
+        uiAssert(()->{if(Boolean.TRUE.equals(field(screen,"inMealManagementPage")))throw new Exception("Header back retained meal state");});rootTabV33(screen,0);
+    }
+    private void iconFramesV062(MainActivity screen,ThemeRevealView overlay,android.animation.ValueAnimator clock,boolean night)throws Exception {
+        android.animation.ValueAnimator iconClock=(android.animation.ValueAnimator)ownField(overlay,"iconAnimator");if(iconClock==null)throw new Exception("No continuous icon animator");iconClock.pause();clock.pause();
+        ThemeModeIcon icon=(ThemeModeIcon)ownField(overlay,"icon");View live=(View)field(screen,"themeModeButton");
+        if(live.getAlpha()!=0||live.getRotation()!=0||live.getScaleX()!=1||live.getScaleY()!=1)throw new Exception("New theme exposed or reset its real icon");
+        float previous=night?0:1;
+        for(int time:new int[]{0,16,32,64,96,144,200,250,300}){
+            iconClock.setCurrentPlayTime(Math.min(time,250));clock.setCurrentPlayTime(time);
+            if(ownField(overlay,"icon")!=icon)throw new Exception("Theme icon owner changed mid morph");
+            float sun=(float)ownField(icon,"sun");if((night&&sun<previous-.001f)||(!night&&sun>previous+.001f))throw new Exception("Icon morph reversed or jumped");previous=sun;
+            Bitmap glyph=renderViewV26(icon);try{int ink=0;for(int y=0;y<glyph.getHeight();y++)for(int x=0;x<glyph.getWidth();x++)if(Color.alpha(glyph.getPixel(x,y))>64)ink++;if(ink<40)throw new Exception("Icon disappeared during morph at "+time);}finally{glyph.recycle();}
+        }
+        iconClock.end();
+        clock.setCurrentPlayTime(ThemeRevealView.DURATION_MILLIS-1);
+        // Paint once to align the icon's ink shader with the final scene radius.
+        Bitmap scene=renderViewV26(overlay);scene.recycle();
+        Bitmap a=renderViewV26(icon);float alpha=live.getAlpha();live.setAlpha(1);Bitmap b=renderViewV26(live);live.setAlpha(alpha);
+        try{
+            if(a.getWidth()!=b.getWidth()||a.getHeight()!=b.getHeight())throw new Exception("Icon handover changed bounds");
+            for(int y=0;y<a.getHeight();y++)for(int x=0;x<a.getWidth();x++){
+                int aa=a.getPixel(x,y),bb=b.getPixel(x,y);
+                // Gradient and solid-color rasterization can differ by one AA level.
+                for(int shift:new int[]{0,8,16,24})if(Math.abs(((aa>>>shift)&255)-((bb>>>shift)&255))>2){
+                    saveFrameV24(a,"handover-overlay");saveFrameV24(b,"handover-live");
+                    throw new Exception("Icon handover differs at "+x+","+y+": "+Integer.toHexString(aa)+" vs "+Integer.toHexString(bb)+"; sun="+ownField(icon,"sun")+" live="+ownField(live,"sun"));
+                }
+            }
+        }finally{a.recycle();b.recycle();}
+    }
+    private void invalidateSoftwareProbeTreeV062(View view){
+        view.invalidate();
+        if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++)invalidateSoftwareProbeTreeV062(group.getChildAt(i));}
+    }
+    private void checkThemeRevealV061(MainActivity screen,boolean night,String name)throws Exception {
+        final ThemeRevealView[] overlay={null};final android.animation.ValueAnimator[] clock={null};
+        uiAssert(()->{View button=screen.getWindow().getDecorView().findViewWithTag("theme_mode_toggle");if(button==null)throw new Exception("Missing Me theme button");button.performClick();});
+        long deadline=android.os.SystemClock.uptimeMillis()+1000;
+        do{uiAssert(()->{overlay[0]=(ThemeRevealView)field(screen,"circularThemeReveal");if(overlay[0]!=null){clock[0]=(android.animation.ValueAnimator)ownField(overlay[0],"animator");if(clock[0]!=null){clock[0].pause();android.animation.ValueAnimator glyph=(android.animation.ValueAnimator)ownField(overlay[0],"iconAnimator");if(glyph!=null)glyph.pause();}}});if(clock[0]!=null)break;Thread.sleep(16);}while(android.os.SystemClock.uptimeMillis()<deadline);
+        if(clock[0]==null)throw new Exception("Theme reveal failed to start");
+        uiAssert(()->{
+            iconFramesV062(screen,overlay[0],clock[0],night);
+            clock[0].pause();clock[0].setCurrentPlayTime(720);
+            if(clock[0].getDuration()!=1440||Math.abs((float)ownField(overlay[0],"feather")-PaperComponents.dp(screen,20))>1)throw new Exception("Theme parameters drifted");
+            if(!Boolean.valueOf(night).equals(invoke(screen,"nightDecoration",new Class[]{})))throw new Exception("New theme is not active beneath snapshot");
+            View root=(View)field(screen,"root");Bitmap old=(Bitmap)ownField(overlay[0],"snapshot");
+            overlay[0].setVisibility(View.INVISIBLE);Bitmap fresh=renderViewV26(root);overlay[0].setVisibility(View.VISIBLE);Bitmap mixed=renderViewV26(root);
+            try{
+                float cx=(float)ownField(overlay[0],"cx"),cy=(float)ownField(overlay[0],"cy"),radius=(float)ownField(overlay[0],"radius"),feather=(float)ownField(overlay[0],"feather");
+                int inner=0,outer=0,edge=0;
+                for(int y=8;y<mixed.getHeight()-8;y+=6)for(int x=8;x<mixed.getWidth()-8;x+=6){
+                    if(Math.abs(x-cx)<PaperComponents.dp(screen,25)&&Math.abs(y-cy)<PaperComponents.dp(screen,25))continue;
+                    float distance=(float)Math.hypot(x-cx,y-cy),weight=Math.max(0,Math.min(1,(radius-distance)/feather));
+                    int a=old.getPixel(x,y),b=fresh.getPixel(x,y),actual=mixed.getPixel(x,y);
+                    if(Math.abs(Color.red(a)-Color.red(b))+Math.abs(Color.green(a)-Color.green(b))+Math.abs(Color.blue(a)-Color.blue(b))<60)continue;
+                    if(distance<radius-feather-3)inner++;else if(distance>radius+3)outer++;else if(weight>.15f&&weight<.85f)edge++;else continue;
+                    for(int channel=0;channel<3;channel++){int shift=channel*8;float expected=((a>>shift)&255)*(1-weight)+((b>>shift)&255)*weight;if(Math.abs(((actual>>shift)&255)-expected)>7)throw new Exception("Circle old/new/feather pixel mismatch at "+x+","+y);}
+                }
+                if(inner<100||outer<100||edge<10)throw new Exception("Theme oracle lacked both real themes and feather samples: "+inner+"/"+outer+"/"+edge);
+                saveFrameV24(mixed,name+(night?"-night":"-day")+"-half");
+            }finally{fresh.recycle();mixed.recycle();}
+            // Software View.draw() consumes dirty flags while inspecting pixels.
+            // Request a fresh hardware display list after the paused-clock oracle.
+            overlay[0].postInvalidateOnAnimation();
+        });
+        java.util.concurrent.CountDownLatch committed=new java.util.concurrent.CountDownLatch(1);
+        uiAssert(()->{
+            View decor=screen.getWindow().getDecorView();
+            if(!decor.isHardwareAccelerated())throw new Exception("Theme HWUI oracle requires hardware acceleration");
+            if(android.os.Build.VERSION.SDK_INT>=29)decor.getViewTreeObserver().registerFrameCommitCallback(committed::countDown);
+            // An attached software draw can consume the entire root's dirty flags,
+            // leaving its old RenderNode children intact after a theme rebuild.
+            invalidateSoftwareProbeTreeV062(decor);
+        });
+        if(android.os.Build.VERSION.SDK_INT>=29&&!committed.await(3,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("No fresh theme hardware frame committed");
+        waitForIdleSync();
+        Bitmap presented=getUiAutomation().takeScreenshot();if(presented==null)throw new Exception("Missing HWUI theme screenshot");
+        try{uiAssert(()->{
+            View root=(View)field(screen,"root");int[] location=new int[2];root.getLocationOnScreen(location);Bitmap expected=renderViewV26(root);
+            try{int checked=0;for(int y=24;y<expected.getHeight()-24;y+=24)for(int x=24;x<expected.getWidth()-24;x+=24){
+                int a=expected.getPixel(x,y),b=presented.getPixel(x+location[0],y+location[1]);
+                if(Math.abs(Color.red(a)-Color.red(b))+Math.abs(Color.green(a)-Color.green(b))+Math.abs(Color.blue(a)-Color.blue(b))>45)checked++;
+            }if(checked>expected.getWidth()*expected.getHeight()/576/12){saveFrameV24(presented,"hwui-failure");saveFrameV24(expected,"cpu-failure");throw new Exception("HWUI differs from the actual circular composition: "+checked);}
+            }finally{expected.recycle();}
+        });}finally{presented.recycle();}
+        screenshotNowV15(name+(night?"-night":"-day")+"-hwui");
+        uiAssert(()->clock[0].end());settleV15();
+        uiAssert(()->{if(field(screen,"circularThemeReveal")!=null||overlay[0].getParent()!=null||ownField(overlay[0],"snapshot")!=null)throw new Exception("Theme reveal leaked owner or bitmap");View button=screen.getWindow().getDecorView().findViewWithTag("theme_mode_toggle");if(button.getAlpha()!=1||!String.valueOf(button.getContentDescription()).equals(night?"切换日间模式":"切换夜间模式"))throw new Exception("Theme icon/accessibility did not switch");});
+    }
+    private void revisionV061(Context c,android.content.SharedPreferences prefs)throws Exception {
+        String name=args.getString("name","v061b1"),today=HomeCalendarDates.key(Calendar.getInstance());
+        FoodAnalysisJobService.cancelAll(c);java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        JSONObject fixture=mediaFixtureV26(c,today);fixture.getJSONObject(today).put("snack",new JSONObject().put("text","历史夜宵"));String before=fixture.toString();
+        JSONObject profile=new JSONObject().put("decoration","yellow").put("nightMode",false).put("bookFont","xiaolai").put("font",100).put("layoutLevel",50)
+            .put("foodRecognitionOnboardingSeen",true).put("seenAnnouncementVersion",c.getPackageManager().getPackageInfo(c.getPackageName(),0).versionName)
+            .put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false).put("autoCloudSync",false).put("aiAnalysisEnabled",true).put("aiAutoAnalysis",false);
+        if(!PrivateProfileStore.write(c,profile)||!prefs.edit().putString(NutritionStore.PROFILE,ProfilePrivacy.publicProfile(profile).toString()).putString(NutritionStore.DAYS,before).commit())throw new Exception("Cannot seed isolated v061 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));gestureScreenV20=screen;settleV15();uiAssert(()->mainFocusV21(screen));
+        boolean beta4="revision-v061b4".equals(args.getString("scenario"));String startupTiming="";
+        if(("revision-v061b3".equals(args.getString("scenario"))||beta4)&&"navigation-settings".equals(args.getString("phase"))){
+            if(beta4)startupTiming=advisorStartupV064(screen);
+            advisorExitV063(screen,name);mealManagementV063(screen);
+            if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}"))||requests.get()!=0)throw new Exception("Targeted regression changed diary or used network");
+            Bundle done=new Bundle();done.putString("stream",(beta4?"PASS v061b4 navigation-settings: immediate retained-root advisor exits, unchanged page identities/shared clock, tiny-pull controls; ":"PASS v061b3 navigation-settings: ")+"actual advisor-to-Trace/Me shared page/pill progress, interruption/canceled owner; Meal Management entry, config, header/system Back and parent scroll; diary unchanged, HTTP(S)=0.\n"+startupTiming);finish(Activity.RESULT_OK,done);return;
+        }
+        if("theme".equals(args.getString("phase"))){
+            rootTabV33(screen,3);checkThemeRevealV061(screen,true,name);checkThemeRevealV061(screen,false,name);
+            Bundle done=new Bundle();done.putString("stream","PASS v061b2 focused theme\n");finish(Activity.RESULT_OK,done);return;
+        }
+        uiAssert(()->{if(Boolean.TRUE.equals(invoke(screen,"nightSnackEnabled",new Class[]{})))throw new Exception("Snack defaults on");if(((String[])invoke(screen,"entryMealKeys",new Class[]{})).length!=3)throw new Exception("Default entry is not three meals");invoke(screen,"chooseMealForText",new Class[]{});});settleV15();if(node("夜宵")!=null)throw new Exception("Default text picker exposes snack");sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);settleV15();
+        uiAssert(()->invoke(screen,"chooseMealForPhoto",new Class[]{}));settleV15();if(node("夜宵")!=null)throw new Exception("Default photo picker exposes snack");sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);settleV15();
+        uiAssert(()->{((View)invoke(screen,"findNavItem",new Class[]{int.class},0)).performClick();if(Boolean.TRUE.equals(field(screen,"inAiAnalysisPage")))throw new Exception("Today click still enters advisor");});
+        chatGeometryV062(screen);
+        swipeAdvisorV061(screen,true,true);uiAssert(()->{if(!((AdvisorPager)field(screen,"advisorPager")).atToday())throw new Exception("Canceled up swipe entered advisor");});
+        swipeAdvisorV061(screen,true,false);uiAssert(()->{if(!Boolean.TRUE.equals(field(screen,"inAiAnalysisPage")))throw new Exception("Up swipe did not enter advisor");RootPagePager owner=(RootPagePager)field(screen,"rootPager");if(owner.page(0) instanceof AdvisorPager){View day=owner.page(0).findViewWithTag("today_day_pager"),calendar=owner.page(0).findViewWithTag("home_calendar");if(day==null||calendar==null||Boolean.TRUE.equals(ownField(day,"rootActive"))||Boolean.TRUE.equals(ownField(calendar,"rootActive")))throw new Exception("Hidden Today still owns date input inside advisor root");}else if(!owner.isFrozen())throw new Exception("Hidden Today still owns input");});
+        chatGeometryV062(screen);chatImeV062(screen);
+        swipeAdvisorV061(screen,false,false);uiAssert(()->{if(Boolean.TRUE.equals(field(screen,"inAiAnalysisPage"))||!((AdvisorPager)field(screen,"advisorPager")).atToday())throw new Exception("Down swipe did not return Today");});
+        enabledNavV062(screen);
+        if(beta4)startupTiming=advisorStartupV064(screen);
+        if("revision-v061b3".equals(args.getString("scenario"))||beta4){advisorExitV063(screen,name);mealManagementV063(screen);}
+        rootTabV33(screen,3);
+        if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+            checkThemeRevealV061(screen,true,name);checkThemeRevealV061(screen,false,name);
+            uiAssert(()->{screen.getWindow().getDecorView().findViewWithTag("theme_mode_toggle").performClick();invoke(screen,"onStop",new Class[]{});if(field(screen,"circularThemeReveal")!=null)throw new Exception("Stop retained the theme snapshot");invoke(screen,"onResume",new Class[]{});});settleV15();
+        }else{
+            uiAssert(()->{screen.getWindow().getDecorView().findViewWithTag("theme_mode_toggle").performClick();if(field(screen,"circularThemeReveal")!=null||!Boolean.TRUE.equals(invoke(screen,"nightDecoration",new Class[]{})))throw new Exception("Reduced motion did not switch directly");});settleV15();
+        }
+        uiAssert(()->invoke(screen,"openPreferencesPage",new Class[]{}));settleV15();
+        uiAssert(()->{View entry=((View)field(screen,"content")).findViewWithTag("meal_management_entry");if(entry==null)throw new Exception("Missing Meal Management entry");entry.performClick();});settleV15();
+        uiAssert(()->{View toggle=screen.getWindow().getDecorView().findViewWithTag("night_snack_toggle");if(toggle==null)throw new Exception("Missing snack setting");toggle.performClick();});settleV15();
+        uiAssert(()->{if(((String[])invoke(screen,"entryMealKeys",new Class[]{})).length!=4)throw new Exception("Snack setting does not unlock entries");View toggle=screen.getWindow().getDecorView().findViewWithTag("night_snack_toggle");toggle.performClick();});settleV15();
+        rootTabV33(screen,0);uiAssert(()->{invoke(screen,"setProfileBoolean",new Class[]{String.class,boolean.class},"aiAnalysisEnabled",false);invoke(screen,"renderCurrent",new Class[]{});if(field(screen,"advisorPager")!=null)throw new Exception("Disabled advisor remains swipeable");});
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("v061 interactions changed diary");if(requests.get()!=0)throw new Exception("v061 QA attempted HTTP(S)");
+        Bundle result=new Bundle();result.putString("stream",(beta4?"PASS v061b4: immediate retained-root advisor exits, unchanged page identities/shared clock, tiny-pull controls; ":"PASS v061b3: ")+"advisor-to-Trace/Me page+pill shared-clock and interruption, Meal Management route/back/config; first hidden/partial advisor layout and real IME, enabled-advisor nav moving frames, continuous icon frames/cleanup, 1440ms circle; default three-meal pickers, snack setting and old diary preservation; Today click, canceled/committed up and down gestures, hidden ownership and disable; both theme circle/feather pixel oracles, HWUI frames and bitmap cleanup. Synthetic isolated QA, HTTP(S)=0.\n"+startupTiming);finish(Activity.RESULT_OK,result);
+    }
+
     private void releaseV060(Context c,android.content.SharedPreferences prefs)throws Exception {
         String phase=args.getString("phase","all"),name=args.getString("name","release060");if(!Arrays.asList("all","editor","media").contains(phase))throw new Exception("Unknown release-v060 phase: "+phase);
         FoodAnalysisJobService.cancelAll(c);FoodDraftStore.discard(c,FoodDraftStore.pendingSources(c));java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();String today=HomeCalendarDates.key(Calendar.getInstance());JSONObject fixture=mediaFixtureV26(c,today);fixture.getJSONObject(today).put("lunch",new JSONObject().put("text","老乡鸡"));String before=fixture.toString();
@@ -4742,6 +5113,466 @@ public final class UpgradeSmoke extends Instrumentation {
         if(requests.get()!=0)throw new Exception("UI revisions attempted HTTP(S)");
         Bundle result=new Bundle();result.putString("stream","PASS beta.23: actual week/month date click animation and same pager/calendar, rapid reverse/far date retarget/future guard, short root flicks/reversal/cancel/carousel edge handoff, seven shared page routes and interrupted return cleanup, original-dialog inline typing/newest field merge/dismiss save/clear/no blank diary. Window pointer events="+localPointerFallbacksV20+", HTTP(S)="+requests.get()+".\n");finish(Activity.RESULT_OK,result);
     }
+    private View cutoutTagV065(String tag)throws Exception {
+        final View[] found={null};uiAssert(()->{for(View root:android.view.inspector.WindowInspector.getGlobalWindowViews()){View match=root.findViewWithTag(tag);if(match!=null&&match.isShown())found[0]=match;}});
+        if(found[0]==null)throw new Exception("Missing cutout editor view: "+tag);return found[0];
+    }
+    private int[] cutoutMaskV065(CutoutEditor editor)throws Exception {
+        final int[][] pixels={null};uiAssert(()->{Bitmap mask=(Bitmap)ownField(editor,"mask");pixels[0]=new int[mask.getWidth()*mask.getHeight()];mask.getPixels(pixels[0],0,mask.getWidth(),0,0,mask.getWidth(),mask.getHeight());});return pixels[0];
+    }
+    private void sameCutoutMaskV065(CutoutEditor editor,int[] expected,String phase)throws Exception {
+        if(!Arrays.equals(expected,cutoutMaskV065(editor)))throw new Exception("Cutout mask changed unexpectedly: "+phase);
+    }
+    private void cutoutButtonsV065(boolean undo,boolean redo)throws Exception {
+        View back=cutoutTagV065("cutout_editor_undo"),forward=cutoutTagV065("cutout_editor_redo");
+        uiAssert(()->{if(back.isEnabled()!=undo||forward.isEnabled()!=redo)throw new Exception("Wrong cutout history enabled state, expected "+undo+"/"+redo+" actual "+back.isEnabled()+"/"+forward.isEnabled());});
+    }
+    private void cutoutActionV065(String tag)throws Exception {
+        View action=cutoutTagV065(tag);uiAssert(()->{if(!action.isEnabled()||!action.performClick())throw new Exception("Cutout action not clickable: "+tag);});waitForIdleSync();
+    }
+    private void cutoutStrokeV065(CutoutEditor editor,float x,float y,float endX,float endY,int ending)throws Exception {
+        uiAssert(()->{CutoutViewport viewport=(CutoutViewport)ownField(editor,"viewport");float a=viewport.left()+x*viewport.scale(),b=viewport.top()+y*viewport.scale(),ex=viewport.left()+endX*viewport.scale(),ey=viewport.top()+endY*viewport.scale();
+            cutoutEventV20(editor,MotionEvent.ACTION_DOWN,a,b);cutoutEventV20(editor,MotionEvent.ACTION_MOVE,ex,ey);cutoutEventV20(editor,ending,ex,ey);});
+    }
+    private void cutoutOutlineV065(CutoutEditor editor)throws Exception {
+        int[] mask=cutoutMaskV065(editor);final Bitmap[] hidden={null};
+        cutoutActionV065("cutout_editor_outline");uiAssert(()->{if(Boolean.TRUE.equals(ownField(editor,"outlineVisible")))throw new Exception("Eye did not hide outline");hidden[0]=renderViewV26(editor);});
+        sameCutoutMaskV065(editor,mask,"hide outline");cutoutActionV065("cutout_editor_outline");
+        long deadline=android.os.SystemClock.elapsedRealtime()+5000;int[] changes={0};
+        try{do{uiAssert(()->{if(!Boolean.TRUE.equals(ownField(editor,"outlineVisible")))throw new Exception("Eye did not show outline");Bitmap shown=renderViewV26(editor);try{int changed=0;for(int y=1;y<shown.getHeight()-1;y+=2)for(int x=1;x<shown.getWidth()-1;x+=2)if(shown.getPixel(x,y)!=hidden[0].getPixel(x,y))changed++;changes[0]=changed;}finally{shown.recycle();}});if(changes[0]>30)break;Thread.sleep(40);}while(android.os.SystemClock.elapsedRealtime()<deadline);
+            if(changes[0]<=30)throw new Exception("Enabled outline made no visible subject-following preview difference");
+        }finally{hidden[0].recycle();}
+        sameCutoutMaskV065(editor,mask,"outline preview");
+    }
+    private int[] cutoutTextInkV065(android.widget.TextView view)throws Exception {
+        android.text.Layout layout=view.getLayout();if(layout==null||layout.getLineCount()==0)throw new Exception("No actual text layout for cutout gap probe");
+        String text=view.getText().toString();Rect glyphs=new Rect();int top=Integer.MAX_VALUE,bottom=Integer.MIN_VALUE,origin=screenRect(view).top+view.getBaseline()-view.getScrollY();
+        for(int line=0;line<layout.getLineCount();line++){int start=layout.getLineStart(line),end=layout.getLineEnd(line);while(end>start&&Character.isWhitespace(text.charAt(end-1)))end--;if(end<=start)continue;view.getPaint().getTextBounds(text,start,end,glyphs);int baseline=origin+layout.getLineBaseline(line)-layout.getLineBaseline(0);top=Math.min(top,baseline+glyphs.top);bottom=Math.max(bottom,baseline+glyphs.bottom);}
+        if(top==Integer.MAX_VALUE)throw new Exception("Empty text ink for cutout gap probe");return new int[]{top,bottom};
+    }
+    private void cutoutLayoutV065(CutoutEditor editor,Context c)throws Exception {
+        View tools=cutoutTagV065("cutout_editor_tools"),hint=cutoutTagV065("cutout_editor_hint"),actions=cutoutTagV065("cutout_editor_actions"),mode=cutoutTagV065("cutout_editor_mode"),undo=cutoutTagV065("cutout_editor_undo"),redo=cutoutTagV065("cutout_editor_redo"),eye=cutoutTagV065("cutout_editor_outline");
+        uiAssert(()->{
+            if(mode instanceof android.widget.ToggleButton)throw new Exception("Old underlined platform ToggleButton remains in editor");
+            if(mode.getWidth()<undo.getWidth()*1.5f||undo.getWidth()<PaperComponents.dp(c,44)||redo.getWidth()<PaperComponents.dp(c,44)||eye.getWidth()<PaperComponents.dp(c,44)||tools.getHeight()<PaperComponents.dp(c,44))throw new Exception("Cutout tools lost wide mode or accessible icon targets");
+            Rect t=screenRect(tools),a=screenRect(actions);int[] hintInk=cutoutTextInkV065((android.widget.TextView)hint);int footerInkTop=Integer.MAX_VALUE;List<View> footer=new ArrayList<>();collectViews(actions,footer);for(View view:footer)if(view instanceof android.widget.TextView)footerInkTop=Math.min(footerInkTop,cutoutTextInkV065((android.widget.TextView)view)[0]);if(footerInkTop==Integer.MAX_VALUE)throw new Exception("No footer action text ink");int above=t.top-hintInk[1],below=footerInkTop-t.bottom,tolerance=Math.max(2,PaperComponents.dp(c,2));
+            if(Math.abs(above-below)>tolerance||above<PaperComponents.dp(c,10)||below<PaperComponents.dp(c,10))throw new Exception("Cutout toolbar text-ink gaps differ: above="+above+", below="+below+", tolerance="+tolerance);
+            Bitmap rounded=renderViewV26(editor);try{int w=rounded.getWidth(),height=rounded.getHeight(),inset=Math.max(1,PaperComponents.dp(c,3));for(int[] corner:new int[][]{{inset,inset},{w-1-inset,inset},{inset,height-1-inset},{w-1-inset,height-1-inset}})if(Color.alpha(rounded.getPixel(corner[0],corner[1]))>8)throw new Exception("Cutout preview corner is not clipped: "+Arrays.toString(corner));if(Color.alpha(rounded.getPixel(w/2,inset))<250||Color.alpha(rounded.getPixel(inset,height/2))<250)throw new Exception("Rounded preview also clipped straight edge interiors");}finally{rounded.recycle();}
+            Rect canvas=screenRect(editor),eyeRect=screenRect(eye);if(canvas.top<=eyeRect.top||canvas.width()<=0||canvas.height()<PaperComponents.dp(c,48)||a.bottom>editor.getRootView().getHeight()+screenRect(editor.getRootView()).top)throw new Exception("Cutout title/preview/actions overflow window");
+        });
+    }
+    private void waitCutoutOutlineV065(CutoutEditor editor,boolean active)throws Exception {
+        long deadline=android.os.SystemClock.elapsedRealtime()+6000;final boolean[] ready={false};
+        do{uiAssert(()->{if(Boolean.TRUE.equals(ownField(editor,"strokeActive"))!=active)throw new Exception("Brush preview changed active state while awaiting outline");ready[0]=ownField(editor,"outline")!=null&&(long)ownField(editor,"outlineRevision")== (long)ownField(editor,"maskRevision")&&(long)ownField(editor,"outlineAppliedEpoch")== (long)ownField(editor,"outlineEpoch");});if(ready[0])return;Thread.sleep(35);}while(android.os.SystemClock.elapsedRealtime()<deadline);
+        throw new Exception("No current "+(active?"in-progress":"settled")+" cutout outline");
+    }
+    private void cutoutLivePreviewV065(CutoutEditor editor)throws Exception {
+        waitCutoutOutlineV065(editor,false);int[] mask=cutoutMaskV065(editor);final int[][] previousOutline={null},source={null};final long[] epoch={0};
+        uiAssert(()->{previousOutline[0]=bitmapPixelsV065((Bitmap)ownField(editor,"outline"));source[0]=bitmapPixelsV065((Bitmap)ownField(editor,"source"));epoch[0]=(long)ownField(editor,"outlineEpoch");CutoutViewport viewport=(CutoutViewport)ownField(editor,"viewport");float x=viewport.left()+60*viewport.scale(),y=viewport.top()+90*viewport.scale();cutoutEventV20(editor,MotionEvent.ACTION_DOWN,x,y);cutoutEventV20(editor,MotionEvent.ACTION_MOVE,viewport.left()+112*viewport.scale(),y);});
+        waitCutoutOutlineV065(editor,true);sameCutoutMaskV065(editor,mask,"live preview must not commit mask before UP");cutoutButtonsV065(false,false);
+        uiAssert(()->{
+            if((long)ownField(editor,"outlineEpoch")<=epoch[0]||Arrays.equals(previousOutline[0],bitmapPixelsV065((Bitmap)ownField(editor,"outline"))))throw new Exception("Active stroke outline did not update from opening silhouette");
+            if(!Arrays.equals(source[0],bitmapPixelsV065((Bitmap)ownField(editor,"source"))))throw new Exception("Live preview modified source image");
+            // Actual eye clicks cancel a held gesture. Probe only its drawing switch
+            // here so this oracle can inspect one still-uncommitted brush preview.
+            java.lang.reflect.Field visible=CutoutEditor.class.getDeclaredField("outlineVisible");visible.setAccessible(true);Bitmap shown=renderViewV26(editor),hidden=null;
+            try{visible.setBoolean(editor,false);hidden=renderViewV26(editor);int changed=0;for(int y=1;y<shown.getHeight()-1;y+=2)for(int x=1;x<shown.getWidth()-1;x+=2)if(shown.getPixel(x,y)!=hidden.getPixel(x,y))changed++;if(changed<30)throw new Exception("In-progress stroke lost visible outline");}
+            finally{visible.setBoolean(editor,true);shown.recycle();if(hidden!=null)hidden.recycle();}
+            CutoutViewport viewport=(CutoutViewport)ownField(editor,"viewport");cutoutEventV20(editor,MotionEvent.ACTION_CANCEL,viewport.left()+112*viewport.scale(),viewport.top()+90*viewport.scale());
+        });
+        waitCutoutOutlineV065(editor,false);sameCutoutMaskV065(editor,mask,"cancel live outline preview");cutoutButtonsV065(false,false);
+        uiAssert(()->{if(!Arrays.equals(previousOutline[0],bitmapPixelsV065((Bitmap)ownField(editor,"outline"))))throw new Exception("Cancelled stroke retained its temporary silhouette");});
+    }
+    private void cutoutCloseWorkerV065(MainActivity screen)throws Exception {
+        final java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1),released=new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.ThreadPoolExecutor worker=new java.util.concurrent.ThreadPoolExecutor(1,1,0,java.util.concurrent.TimeUnit.MILLISECONDS,new java.util.concurrent.LinkedBlockingQueue<Runnable>());
+        final CutoutEditor[] editor={null};final Bitmap[] snapshot={null},source={null},mask={null},initial={null};
+        try{
+            uiAssert(()->{source[0]=Bitmap.createBitmap(512,512,Bitmap.Config.ARGB_8888);source[0].eraseColor(Color.rgb(142,85,43));Bitmap alpha=source[0].copy(Bitmap.Config.ARGB_8888,false);java.lang.reflect.Constructor<CutoutEditor> constructor=CutoutEditor.class.getDeclaredConstructor(Context.class,Bitmap.class,Bitmap.class);constructor.setAccessible(true);editor[0]=constructor.newInstance(screen,source[0],alpha);alpha.recycle();
+                // Replace only this unattached QA editor's idle executor, preserving
+                // the same single-worker FIFO contract while exposing its queue.
+                ((java.util.concurrent.ExecutorService)ownField(editor[0],"outlineWorker")).shutdown();java.lang.reflect.Field field=CutoutEditor.class.getDeclaredField("outlineWorker");field.setAccessible(true);field.set(editor[0],worker);mask[0]=(Bitmap)ownField(editor[0],"mask");initial[0]=(Bitmap)ownField(editor[0],"initial");});
+            worker.execute(()->{entered.countDown();try{released.await(5,java.util.concurrent.TimeUnit.SECONDS);}catch(InterruptedException error){Thread.currentThread().interrupt();}});if(!entered.await(3,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("Outline worker blocker did not start");
+            uiAssert(()->{editor[0].layout(0,0,600,600);if(!Boolean.TRUE.equals(ownField(editor[0],"outlineBusy")))throw new Exception("Close test did not queue an outline snapshot");Runnable queued=worker.getQueue().peek();if(queued==null)throw new Exception("No queued outline worker");for(java.lang.reflect.Field field:queued.getClass().getDeclaredFields()){field.setAccessible(true);Object value=field.get(queued);if(value instanceof Bitmap)snapshot[0]=(Bitmap)value;}if(snapshot[0]==null||snapshot[0].isRecycled())throw new Exception("No owned live snapshot before editor close");invokeAnyV20(editor[0],"release",new Class[]{});if(!Boolean.TRUE.equals(ownField(editor[0],"disposed"))||ownField(editor[0],"outline")!=null||!source[0].isRecycled()||!mask[0].isRecycled()||!initial[0].isRecycled())throw new Exception("Close did not release editor-owned images");});
+            released.countDown();if(!worker.awaitTermination(6,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("Released outline worker did not terminate");waitForIdleSync();
+            uiAssert(()->{if(!snapshot[0].isRecycled()||ownField(editor[0],"outline")!=null||Boolean.TRUE.equals(ownField(editor[0],"outlineBusy")))throw new Exception("Late outline callback retained snapshot or delivered into closed editor");});
+        }finally{released.countDown();worker.shutdownNow();if(editor[0]!=null)uiAssert(()->invokeAnyV20(editor[0],"release",new Class[]{}));}
+    }
+    private void cutoutEditorV065(MainActivity screen,Context c,boolean night,String name)throws Exception {
+        String token=UUID.randomUUID().toString();File original=new File(c.getFilesDir(),"qa_v065_source_"+token+".png"),output=new File(c.getFilesDir(),"qa_v065_mask_"+token+".png");
+        Bitmap source=Bitmap.createBitmap(192,192,Bitmap.Config.ARGB_8888);source.eraseColor(Color.rgb(192,84,44));Bitmap crop=Bitmap.createBitmap(source,32,32,128,128);
+        try(OutputStream stream=new FileOutputStream(original)){source.compress(Bitmap.CompressFormat.PNG,100,stream);}try(OutputStream stream=new FileOutputStream(output)){crop.compress(Bitmap.CompressFormat.PNG,100,stream);}source.recycle();crop.recycle();
+        String sourceHash=FoodCutoutEngine.hash(original),outputHash=FoodCutoutEngine.hash(output);final JSONArray[] saved={null};CutoutEditor[] current={null};
+        try{
+            uiAssert(()->CutoutEditor.show(screen,original,output,new JSONArray().put(32).put(32).put(160).put(160),night,bounds->saved[0]=bounds));waitForIdleSync();
+            current[0]=(CutoutEditor)cutoutTagV065("cutout_editor_canvas");CutoutEditor editor=current[0];int[] initial=cutoutMaskV065(editor);
+            cutoutLayoutV065(editor,c);cutoutButtonsV065(false,false);cutoutOutlineV065(editor);cutoutButtonsV065(false,false);cutoutLivePreviewV065(editor);screenshot(name+(night?"-night":"-day")+"-initial-outline");
+            cutoutStrokeV065(editor,64,90,100,90,MotionEvent.ACTION_UP);int[] first=cutoutMaskV065(editor);if(Arrays.equals(initial,first)||Color.alpha(first[90*192+80])>24)throw new Exception("Real erase stroke did not clear source mask");cutoutButtonsV065(true,false);
+            cutoutActionV065("cutout_editor_undo");sameCutoutMaskV065(editor,initial,"undo first stroke");cutoutButtonsV065(false,true);
+            cutoutActionV065("cutout_editor_redo");sameCutoutMaskV065(editor,first,"redo first stroke");
+            cutoutStrokeV065(editor,128,70,128,110,MotionEvent.ACTION_UP);int[] second=cutoutMaskV065(editor);if(Arrays.equals(first,second))throw new Exception("Second erase stroke was not committed");
+            cutoutActionV065("cutout_editor_undo");sameCutoutMaskV065(editor,first,"undo exactly one stroke");
+            cutoutStrokeV065(editor,64,128,100,128,MotionEvent.ACTION_UP);int[] branch=cutoutMaskV065(editor);cutoutButtonsV065(true,false);if(Arrays.equals(first,branch)||Arrays.equals(second,branch))throw new Exception("New branch after undo did not replace redo");
+            cutoutActionV065("cutout_editor_undo");sameCutoutMaskV065(editor,first,"branch undo");cutoutButtonsV065(true,true);
+            cutoutStrokeV065(editor,64,60,100,60,MotionEvent.ACTION_CANCEL);sameCutoutMaskV065(editor,first,"cancelled brush preview");cutoutButtonsV065(true,true);
+            uiAssert(()->{CutoutViewport viewport=(CutoutViewport)ownField(editor,"viewport");float x=viewport.left()+90*viewport.scale(),y=viewport.top()+100*viewport.scale();cutoutEventV20(editor,MotionEvent.ACTION_DOWN,x,y);cutoutEventV20(editor,MotionEvent.ACTION_POINTER_DOWN|(1<<MotionEvent.ACTION_POINTER_INDEX_SHIFT),x-30,y,x+30,y);cutoutEventV20(editor,MotionEvent.ACTION_MOVE,x-45,y+12,x+45,y+12);cutoutEventV20(editor,MotionEvent.ACTION_POINTER_UP|(1<<MotionEvent.ACTION_POINTER_INDEX_SHIFT),x-45,y+12,x+45,y+12);cutoutEventV20(editor,MotionEvent.ACTION_UP,x-45,y+12);});
+            sameCutoutMaskV065(editor,first,"two-finger navigation");cutoutButtonsV065(true,true);cutoutActionV065("cutout_editor_redo");sameCutoutMaskV065(editor,branch,"redo after navigation");
+            click("重置");sameCutoutMaskV065(editor,initial,"reset");cutoutButtonsV065(true,false);cutoutActionV065("cutout_editor_undo");sameCutoutMaskV065(editor,branch,"undo reset");cutoutActionV065("cutout_editor_redo");sameCutoutMaskV065(editor,initial,"redo reset");cutoutActionV065("cutout_editor_undo");
+            cutoutActionV065("cutout_editor_mode");cutoutStrokeV065(editor,80,90,80,90,MotionEvent.ACTION_UP);int[] restored=cutoutMaskV065(editor);if(Color.alpha(restored[90*192+80])<230||Arrays.equals(restored,branch))throw new Exception("Restore brush did not recover original");cutoutActionV065("cutout_editor_undo");sameCutoutMaskV065(editor,branch,"undo restore");cutoutActionV065("cutout_editor_redo");sameCutoutMaskV065(editor,restored,"redo restore");
+            cutoutOutlineV065(editor);cutoutActionV065("cutout_editor_outline");sameCutoutMaskV065(editor,restored,"hide before save");
+            screenshot(name+(night?"-night":"-day")+"-editor");click("取消");
+            if(saved[0]!=null||!outputHash.equals(FoodCutoutEngine.hash(output))||!sourceHash.equals(FoodCutoutEngine.hash(original)))throw new Exception("Cancel modified source/output or invoked save");
+            uiAssert(()->{if(!Boolean.TRUE.equals(ownField(editor,"disposed")))throw new Exception("Dismiss did not release editor bitmaps");});
+            uiAssert(()->CutoutEditor.show(screen,original,output,new JSONArray().put(32).put(32).put(160).put(160),night,bounds->saved[0]=bounds));waitForIdleSync();current[0]=(CutoutEditor)cutoutTagV065("cutout_editor_canvas");CutoutEditor saving=current[0];cutoutButtonsV065(false,false);
+            uiAssert(()->{if(!Boolean.TRUE.equals(ownField(saving,"outlineVisible")))throw new Exception("Preview eye state leaked into next editor");});
+            cutoutStrokeV065(saving,64,90,100,90,MotionEvent.ACTION_UP);int[] expected=cutoutMaskV065(saving);if(night)cutoutActionV065("cutout_editor_outline");click("保存");
+            if(saved[0]==null||outputHash.equals(FoodCutoutEngine.hash(output))||!sourceHash.equals(FoodCutoutEngine.hash(original)))throw new Exception("Explicit save failed or rewrote original");
+            Bitmap result=BitmapFactory.decodeFile(output.getPath());try{if(result==null)throw new Exception("Saved output not PNG");int left=saved[0].getInt(0),top=saved[0].getInt(1);for(int y=0;y<192;y++)for(int x=0;x<192;x++){int actual=x>=left&&y>=top&&x<left+result.getWidth()&&y<top+result.getHeight()?Color.alpha(result.getPixel(x-left,y-top)):0;if(Math.abs(actual-Color.alpha(expected[y*192+x]))>1)throw new Exception("Saved alpha differs from editable mask/contains preview border at "+x+","+y);}}finally{if(result!=null)result.recycle();}
+            uiAssert(()->{if(!Boolean.TRUE.equals(ownField(saving,"disposed")))throw new Exception("Save did not release editor");});
+        }finally{final boolean[] lingering={false};uiAssert(()->{for(View root:android.view.inspector.WindowInspector.getGlobalWindowViews()){View view=root.findViewWithTag("cutout_editor_canvas");if(view!=null&&view.isShown())lingering[0]=true;}});if(lingering[0]){sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);waitForIdleSync();}original.delete();output.delete();new File(output.getPath()+".partial").delete();}
+    }
+    private void cutoutHistoryLimitV065(MainActivity screen)throws Exception {
+        uiAssert(()->{
+            Bitmap source=Bitmap.createBitmap(256,256,Bitmap.Config.ARGB_8888);source.eraseColor(Color.rgb(168,92,31));Bitmap alpha=source.copy(Bitmap.Config.ARGB_8888,false);
+            java.lang.reflect.Constructor<CutoutEditor> constructor=CutoutEditor.class.getDeclaredConstructor(Context.class,Bitmap.class,Bitmap.class);constructor.setAccessible(true);CutoutEditor editor=constructor.newInstance(screen,source,alpha);alpha.recycle();editor.layout(0,0,1024,1024);
+            try{List<int[]> history=new ArrayList<>();Bitmap mask=(Bitmap)ownField(editor,"mask");history.add(bitmapPixelsV065(mask));CutoutViewport viewport=(CutoutViewport)ownField(editor,"viewport");
+                for(int i=0;i<40;i++){float x=viewport.left()+(30+(i%8)*27)*viewport.scale(),y=viewport.top()+(30+(i/8)*40)*viewport.scale();cutoutEventV20(editor,MotionEvent.ACTION_DOWN,x,y);cutoutEventV20(editor,MotionEvent.ACTION_UP,x,y);history.add(bitmapPixelsV065(mask));}
+                for(int i=39;i>=8;i--){invokeAnyV20(editor,"undo",new Class[]{});if(!Arrays.equals(history.get(i),bitmapPixelsV065(mask)))throw new Exception("Bounded history lost exact mask state at "+i);}
+                int[] baked=bitmapPixelsV065(mask);invokeAnyV20(editor,"undo",new Class[]{});if(!Arrays.equals(baked,bitmapPixelsV065(mask)))throw new Exception("History exceeded 32 retained steps");
+                for(int i=9;i<=40;i++){invokeAnyV20(editor,"redo",new Class[]{});if(!Arrays.equals(history.get(i),bitmapPixelsV065(mask)))throw new Exception("Bounded redo lost exact mask state at "+i);}
+            }finally{invokeAnyV20(editor,"release",new Class[]{});}
+        });
+    }
+    private int[] bitmapPixelsV065(Bitmap mask){int[] pixels=new int[mask.getWidth()*mask.getHeight()];mask.getPixels(pixels,0,mask.getWidth(),0,0,mask.getWidth(),mask.getHeight());return pixels;}
+    private void revisionV061b5(Context c,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(c);java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();String today=HomeCalendarDates.key(Calendar.getInstance());
+        JSONObject fixture=new JSONObject().put(today,new JSONObject().put("breakfast",new JSONObject().put("text","原有早餐文字").put("calories",240)).put("manualCaloriesOverride",true).put("manualCaloriesTotal",321));String before=fixture.toString();
+        JSONObject profile=new JSONObject().put("decoration","green").put("nightMode",false).put("foodStickerBorder","dashed").put("bookFont","xiaolai").put("font",100).put("foodRecognitionOnboardingSeen",true).put("seenAnnouncementVersion",c.getPackageManager().getPackageInfo(c.getPackageName(),0).versionName).put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false);
+        prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).putString(NutritionStore.DAYS,before).commit();MainActivity screen=(MainActivity)startActivitySync(new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();String name=args.getString("name","v061b5");
+        cutoutEditorV065(screen,c,false,name);cutoutEditorV065(screen,c,true,name);cutoutHistoryLimitV065(screen);cutoutCloseWorkerV065(screen);cutoutGesturesV20(screen,c);restoreOutsideCrop(screen,c);
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("Manual editor changed existing diary/nutrition");if(requests.get()!=0)throw new Exception("Manual editor attempted HTTP(S)");
+        Bundle result=new Bundle();result.putString("stream","PASS 0.6.1-beta.5: real brush erase/restore undo/redo and divergent redo; cancel/multipointer leave history intact; reset undo/redo; exact last32 history compaction; eye preview visibly changes outline without changing mask, active held brush outline updates before UP then CANCEL restores silhouette/history; close while worker queued releases snapshot and blocks late delivery; ordinary/day+night rounded clip and balanced tool gaps/accessibility targets; cancel bytes unchanged, saved alpha equals mask without preview edge, original/diary/manual calories preserved; old pinch/constant screen brush/outside-crop Restore regressions. Synthetic PNGs, no model/network or brand-device appearance claim. HTTP(S)="+requests.get()+".\n");finish(Activity.RESULT_OK,result);
+    }
+    private View shownTagV066(String tag)throws Exception {
+        final View[] found={null};uiAssert(()->{List<View> roots=android.view.inspector.WindowInspector.getGlobalWindowViews();for(int i=roots.size()-1;i>=0&&found[0]==null;i--){View view=roots.get(i).findViewWithTag(tag);if(view!=null&&view.isShown())found[0]=view;}});
+        if(found[0]==null)throw new Exception("Missing current beta6 control: "+tag);return found[0];
+    }
+    private View weekCellV066(TodayWeekStrip week,String date)throws Exception {
+        View cell=week.currentRow().findViewWithTag("today_week_day_"+date);if(cell==null)throw new Exception("Missing beta6 visible week cell");return cell;
+    }
+    private void waterLevelV066(TodayWeekStrip week,String date,float expected)throws Exception {
+        View cell=weekCellV066(week,date);float level=((Number)ownField(cell,"waterLevel")).floatValue();if(Math.abs(level-expected)>.0001f)throw new Exception("Week calorie ratio differs for synthetic fixture date "+date+": "+level+" vs "+expected);
+    }
+    private void waterStoppedV066(TodayWeekStrip week)throws Exception {
+        if(ownField(week,"waterAnimator")!=null||Math.abs(((Number)ownField(week,"waterAmplitude")).floatValue())>.001f)throw new Exception("Week water retained a hidden/finished animation");
+    }
+    private int waterPixelV066(Bitmap image,TodayWeekStrip week,String date,float x,float y)throws Exception {
+        View cell=weekCellV066(week,date);View row=week.currentRow();return image.getPixel(Math.min(image.getWidth()-1,Math.max(0,row.getLeft()+cell.getLeft()+Math.round(cell.getWidth()*x))),Math.min(image.getHeight()-1,Math.max(0,row.getTop()+cell.getTop()+Math.round(cell.getHeight()*y))));
+    }
+    private int waterChangesV066(Bitmap first,Bitmap second,TodayWeekStrip week,String date)throws Exception {
+        View cell=weekCellV066(week,date);View row=week.currentRow();int changed=0;
+        for(int y=row.getTop()+cell.getTop();y<row.getTop()+cell.getBottom();y++)for(int x=row.getLeft()+cell.getLeft();x<row.getLeft()+cell.getRight();x++)if(x>=0&&x<first.getWidth()&&y>=0&&y<first.getHeight()&&first.getPixel(x,y)!=second.getPixel(x,y))changed++;
+        return changed;
+    }
+    private int waterInteriorChangesV066(Bitmap first,Bitmap second,TodayWeekStrip week,String date)throws Exception {
+        View cell=weekCellV066(week,date);View row=week.currentRow();int changed=0;
+        int left=row.getLeft()+cell.getLeft(),top=row.getTop()+cell.getTop();
+        for(int y=Math.round(cell.getHeight()*.2f);y<cell.getHeight()*.8f;y++)for(int x=Math.round(cell.getWidth()*.25f);x<cell.getWidth()*.75f;x++)if(first.getPixel(left+x,top+y)!=second.getPixel(left+x,top+y))changed++;
+        return changed;
+    }
+    private void waterWaitV066(TodayWeekStrip week)throws Exception {
+        long deadline=android.os.SystemClock.elapsedRealtime()+4000;final boolean[] ended={false};do{uiAssert(()->ended[0]=ownField(week,"waterAnimator")==null);if(ended[0]){uiAssert(()->waterStoppedV066(week));return;}Thread.sleep(35);}while(android.os.SystemClock.elapsedRealtime()<deadline);throw new Exception("Water feedback did not settle to idle");
+    }
+    private void monthMarkerV066(MainActivity screen,Context c,String date,boolean firstRow,String name)throws Exception {
+        setHomeDateV22(screen,date,true);HomeCalendarView calendar=calendarV15(screen);uiAssert(()->{
+            View month=(View)ownField(calendar,"monthPager");android.widget.LinearLayout[] pages=(android.widget.LinearLayout[])ownField(month,"pages");String selected=(String)ownField(calendar,"selectedKey");RectF rect=new RectF();
+            if(!date.equals(selected)||!Boolean.TRUE.equals(invokeAnyV20(month,"markerRect",new Class[]{android.widget.LinearLayout.class,String.class,RectF.class},pages[1],selected,rect)))throw new Exception("Missing selected month marker");if(firstRow&&Math.abs(rect.top)>1)throw new Exception("Month clip probe is not on the first row");
+            Bitmap actual=renderViewV26(month);int pad=PaperComponents.dp(c,8);Bitmap reference=Bitmap.createBitmap(actual.getWidth(),actual.getHeight()+pad*2,Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(reference);canvas.translate(0,pad);
+            try{
+                invokeAnyV20(month,"drawMarker",new Class[]{Canvas.class,RectF.class,float.class},canvas,rect,1f);RectF ink=(RectF)ownField(month,"markerDrawBounds");float half=PaperComponents.dp(c,1)*.5f;
+                if(ink.top-rect.top<half+.5f)throw new Exception("Month marker still places its top stroke outside the cell clip");int peak=0,changed=0,top=Math.max(0,(int)Math.floor(rect.top)),bottom=Math.min(actual.getHeight(),top+PaperComponents.dp(c,4));
+                for(int y=top;y<bottom;y++){peak=Math.max(peak,Color.alpha(actual.getPixel(Math.round(rect.centerX()),y)));for(int x=Math.max(0,(int)Math.floor(rect.left));x<Math.min(actual.getWidth(),Math.ceil(rect.right));x++)if(actual.getPixel(x,y)!=reference.getPixel(x,y+pad))changed++;}
+                if(peak<180||changed>2)throw new Exception("Month marker top arc differs from its unclipped reference or is covered by the today background");
+                String today=HomeCalendarDates.key(Calendar.getInstance());if(date.equals(today)){
+                    View cell=pages[1].findViewWithTag("home_calendar_day_"+date);if(cell==null||!cell.isSelected()||cell.getBackground()==null)throw new Exception("No selected actual-today cell background to inspect");android.graphics.drawable.Drawable background=cell.getBackground();Rect old=new Rect(background.getBounds());Bitmap layer=Bitmap.createBitmap(cell.getWidth(),cell.getHeight(),Bitmap.Config.ARGB_8888);
+                    try{background.setBounds(0,0,cell.getWidth(),cell.getHeight());background.draw(new Canvas(layer));for(int pixel:bitmapPixelsV065(layer))if(Color.alpha(pixel)!=0)throw new Exception("Selected today still paints a competing child outline");}finally{background.setBounds(old);layer.recycle();}
+                }
+            }finally{actual.recycle();reference.recycle();}invalidateSoftwareProbeTreeV062(screen.getWindow().getDecorView());
+        });screenshot(name+"-month-marker-"+date);
+    }
+    private void waterCalendarV066(MainActivity screen,Context c,android.content.SharedPreferences prefs,String before,String name)throws Exception {
+        setHomeDateV22(screen,"2000-03-08",false);final HomeCalendarView calendar=calendarV15(screen);final TodayWeekStrip week=calendar.weekStrip();waterWaitV066(week);
+        final Map<String,Integer> amounts=new HashMap<>();amounts.put("2000-03-07",250);amounts.put("2000-03-08",500);amounts.put("2000-03-09",1000);amounts.put("2000-03-10",1600);amounts.put("2000-03-12",750);amounts.put("2000-03-01",400);
+        final Bitmap[] filled={null},empty={null};uiAssert(()->{
+            // This first assertion uses only the real MainActivity->calendar projection.
+            waterLevelV066(week,"2000-03-06",0);waterLevelV066(week,"2000-03-07",.25f);waterLevelV066(week,"2000-03-08",.5f);waterLevelV066(week,"2000-03-09",1);waterLevelV066(week,"2000-03-10",1);waterLevelV066(week,"2000-03-11",0);waterLevelV066(week,"2000-03-12",.75f);
+            View half=weekCellV066(week,"2000-03-08");if(!String.valueOf(half.getContentDescription()).contains("500")||!String.valueOf(half.getContentDescription()).contains("1000"))throw new Exception("Week water progress has no accessible calorie/goal description");
+            filled[0]=renderViewV26(week);week.setCalorieProgress(0,amounts);waterLevelV066(week,"2000-03-08",0);waterStoppedV066(week);empty[0]=renderViewV26(week);
+            for(String date:new String[]{"2000-03-06","2000-03-11"})if(waterInteriorChangesV066(filled[0],empty[0],week,date)!=0||waterChangesV066(filled[0],empty[0],week,date)==0)throw new Exception("Zero-intake capsule has interior fill or lacks goal-only dashed outline");
+            if(waterPixelV066(filled[0],week,"2000-03-08",.5f,.10f)!=waterPixelV066(empty[0],week,"2000-03-08",.5f,.10f)||waterPixelV066(filled[0],week,"2000-03-08",.5f,.90f)==waterPixelV066(empty[0],week,"2000-03-08",.5f,.90f))throw new Exception("Half-full week capsule does not fill upward from bottom");
+            for(String date:new String[]{"2000-03-09","2000-03-10"})if(waterPixelV066(filled[0],week,date,.5f,.10f)==waterPixelV066(empty[0],week,date,.5f,.10f)||waterPixelV066(filled[0],week,date,.5f,.90f)==waterPixelV066(empty[0],week,date,.5f,.90f)||Color.alpha(waterPixelV066(filled[0],week,date,.5f,.10f))>64)throw new Exception("At/above-goal capsule is not full or its shading is too heavy");
+            if(waterPixelV066(filled[0],week,"2000-03-08",.01f,.01f)!=waterPixelV066(empty[0],week,"2000-03-08",.01f,.01f))throw new Exception("Water paint escapes rounded capsule corners");
+            week.setCalorieProgress(1000,amounts);Bitmap restored=renderViewV26(week);try{if(!Arrays.equals(bitmapPixelsV065(filled[0]),bitmapPixelsV065(restored)))throw new Exception("Goal toggle changed unrelated date/calendar pixels");}finally{restored.recycle();filled[0].recycle();empty[0].recycle();}
+        });
+        java.util.concurrent.CountDownLatch committed=new java.util.concurrent.CountDownLatch(1);uiAssert(()->{View decor=screen.getWindow().getDecorView();if(android.os.Build.VERSION.SDK_INT>=29&&decor.isHardwareAccelerated())decor.getViewTreeObserver().registerFrameCommitCallback(committed::countDown);else committed.countDown();invalidateSoftwareProbeTreeV062(decor);});if(!committed.await(5,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("No fresh water hardware frame after software pixel probes");screenshot(name+"-week-water");
+        final android.animation.ValueAnimator[] animation={null};final Bitmap[] still={null};uiAssert(()->{
+            weekCellV066(week,"2000-03-08").performClick();animation[0]=(android.animation.ValueAnimator)ownField(week,"waterAnimator");
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+                if(animation[0]==null||animation[0].getDuration()!=960)throw new Exception("Retapping selected date gave no 960ms water feedback");animation[0].pause();animation[0].setCurrentPlayTime(0);still[0]=renderViewV26(week);animation[0].setCurrentPlayTime(320);Bitmap moving=renderViewV26(week);
+                try{if(waterChangesV066(still[0],moving,week,"2000-03-08")<3)throw new Exception("Water feedback clock does not change the wave surface");}finally{still[0].recycle();moving.recycle();}animation[0].end();waterStoppedV066(week);
+            }else waterStoppedV066(week);
+        });
+        uiAssert(()->{
+            Calendar target=dayV22("2000-03-12");calendar.setDayProgress(dayV22("2000-03-08"),target,.68f);android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(week,"waterAnimator");
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+                if(clock==null)throw new Exception("Switching dates did not start target-only water feedback");clock.pause();clock.setCurrentPlayTime(0);Bitmap first=renderViewV26(week);clock.setCurrentPlayTime(320);Bitmap second=renderViewV26(week);
+                try{if(waterChangesV066(first,second,week,"2000-03-08")!=0||waterChangesV066(first,second,week,"2000-03-12")<3)throw new Exception("Date switch animated old water or did not animate the incoming date");}finally{first.recycle();second.recycle();}clock.end();waterStoppedV066(week);
+            }else waterStoppedV066(week);calendar.setDayProgress(dayV22("2000-03-08"),dayV22("2000-03-08"),0);
+        });
+        final View[] rows=(View[])ownField(week,"pages");final Calendar from=dayV22("2000-03-08"),to=dayV22("2000-03-09");uiAssert(()->{
+            calendar.setDayProgress(from,to,.24f);calendar.setDayProgress(from,to,.68f);if(calendar.weekStrip()!=week)throw new Exception("Water/date progress rebuilt the real week");View[] current=(View[])ownField(week,"pages");for(int i=0;i<3;i++)if(rows[i]!=current[i])throw new Exception("Water feedback replaced a retained week page");
+            if(Math.abs(((Number)ownField(week,"dayProgress")).floatValue()-.68f)>.001f)throw new Exception("Water feature changed shared date progress");waterLevelV066(week,"2000-03-08",.5f);waterLevelV066(week,"2000-03-09",1);calendar.setDayProgress(from,from,0);
+            weekCellV066(week,"2000-03-08").performClick();calendar.setExpanded(true,false);if(Boolean.TRUE.equals(ownField(week,"waterActive")))throw new Exception("Expanded calendar still exposes bottle fill");waterStoppedV066(week);calendar.setDatePickedDuringExpansion(true);calendar.setExpanded(false,false);TodayWeekStrip rebuilt=calendar.weekStrip();if(!Boolean.TRUE.equals(ownField(rebuilt,"waterActive")))throw new Exception("Collapsed calendar lost bottle fill");waterLevelV066(rebuilt,"2000-03-08",.5f);waterStoppedV066(week);
+        });
+        final TodayWeekStrip returned=calendar.weekStrip();uiAssert(()->{weekCellV066(returned,"2000-03-08").performClick();returned.setRootActive(false);waterStoppedV066(returned);returned.setRootActive(true);weekCellV066(returned,"2000-03-08").performClick();invoke(screen,"showTab",new Class[]{int.class,boolean.class},1,false);});settleV15();uiAssert(()->waterStoppedV066(returned));
+        uiAssert(()->invoke(screen,"showTab",new Class[]{int.class,boolean.class},0,false));settleV15();
+        setHomeDateV22(screen,"2000-03-01",false);uiAssert(()->waterLevelV066(calendarV15(screen).weekStrip(),"2000-03-01",.4f));
+        setHomeDateV22(screen,"2000-03-08",false);uiAssert(()->{TodayWeekStrip current=calendarV15(screen).weekStrip();waterLevelV066(current,"2000-03-08",.5f);assertRenderPure(screen,prefs,before);});
+        monthMarkerV066(screen,c,"2000-03-01",true,name);Calendar today=Calendar.getInstance();String todayKey=HomeCalendarDates.key(today);boolean todayFirstRow=todayKey.compareTo(HomeCalendarDates.key(HomeCalendarDates.grid(today).get(6)))<=0;monthMarkerV066(screen,c,todayKey,todayFirstRow,name);uiAssert(()->assertRenderPure(screen,prefs,before));
+    }
+    private void apiDeleteV066(MainActivity screen,Context c,android.content.SharedPreferences prefs,String before)throws Exception {
+        final JSONObject[] configured={null};final ApiCredentialPolicy.Snapshot[] authority={null};final Object[] probe={null};final View[] oldPrimary={null};final java.util.concurrent.atomic.AtomicBoolean disconnected=new java.util.concurrent.atomic.AtomicBoolean();
+        final HttpURLConnection connection=new HttpURLConnection(new URL("https://invalid.test/qa-no-network")){
+            @Override public void connect(){}@Override public boolean usingProxy(){return false;}@Override public void disconnect(){disconnected.set(true);}
+        };
+        uiAssert(()->{
+            JSONObject profile=PrivateProfileStore.read(c);profile.put("apiKey","qa-beta6-placeholder-only").put("apiEndpoint","https://invalid.test/v1/chat/completions").put("apiModel","qa-beta6-model").put("apiModels",new JSONArray().put("qa-beta6-model")).put("apiModelMode","fast").put("apiModelImageInputs",new JSONObject().put("qa-beta6-model",true)).put("apiModelImageInputsEndpoint","https://invalid.test/v1/chat/completions").put("apiModelDisplayNames",new JSONObject().put("qa-beta6-model","QA Model")).put("apiModelDisplayNamesEndpoint","https://invalid.test/v1/chat/completions").put("apiVisionSupported",true).put("apiEnabled",true).put("foodAutoAnalyze",true).put("foodPhotoConsent",true).put("calorieRecognition",true).put("aiAnalysisEnabled",true).put("aiAutoAnalysis",true).put("aiVisionEnabled",true).put("aiRecordAccess",true).put("aiChatMemory",true).put("foodJsonSchema",true).put("cloudToken","qa-beta6-cloud-placeholder").put("cloudUserId","qa-beta6-user").put("autoCloudSync",false);ApiCredentialPolicy.changed(profile);
+            if(!PrivateProfileStore.write(c,profile))throw new Exception("Could not persist synthetic beta6 API fixture");setMainField(screen,"profile",PrivateProfileStore.read(c));configured[0]=PrivateProfileStore.read(c);authority[0]=ApiCredentialPolicy.capture(configured[0]);
+            Class<?> type=Class.forName("com.eatrecord.app.MainActivity$ApiProbeSession");java.lang.reflect.Constructor<?> constructor=type.getDeclaredConstructor(MainActivity.class);constructor.setAccessible(true);probe[0]=constructor.newInstance(screen);if(!Boolean.TRUE.equals(invokeAnyV20(probe[0],"register",new Class[]{HttpURLConnection.class},connection)))throw new Exception("Synthetic API session did not register");invoke(screen,"configureApi",new Class[]{});
+        });waitForIdleSync();
+        View config=dialogRootV15("api_key_input");uiAssert(()->{List<View> views=new ArrayList<>();collectViews(config,views);for(View view:views)if(view instanceof android.widget.TextView&&"检测模型".contentEquals(((android.widget.TextView)view).getText()))oldPrimary[0]=view;if(oldPrimary[0]==null)throw new Exception("Missing old configuration primary action");});
+        View delete=shownTagV066("api_key_delete");uiAssert(delete::performClick);waitForIdleSync();shownTagV066("api_key_delete_confirm");
+        if(!configured[0].toString().equals(PrivateProfileStore.read(c).toString()))throw new Exception("Opening delete confirmation mutated API authority");
+        View cancel=shownTagV066("api_key_delete_cancel");uiAssert(cancel::performClick);waitForIdleSync();uiAssert(()->{if(!Boolean.TRUE.equals(invokeAnyV20(probe[0],"current",new Class[]{}))||disconnected.get())throw new Exception("Cancelling delete revoked pending API work");});
+        if(!configured[0].toString().equals(PrivateProfileStore.read(c).toString()))throw new Exception("Cancel changed saved API configuration or generation");shownTagV066("api_key_input");
+        uiAssert(delete::performClick);waitForIdleSync();View apply=shownTagV066("api_key_delete_apply");uiAssert(apply::performClick);waitForIdleSync();
+        JSONObject cleared=PrivateProfileStore.read(c);for(String key:new String[]{"apiKey","apiEndpoint","apiModel","apiModelMode","apiModels","apiModelImageInputs","apiModelImageInputsEndpoint","apiModelDisplayNames","apiModelDisplayNamesEndpoint","apiVisionSupported"})if(cleared.has(key))throw new Exception("Deleted API configuration retained synthetic field: "+key);
+        for(String key:new String[]{"apiEnabled","foodAutoAnalyze","foodPhotoConsent","calorieRecognition","aiAnalysisEnabled","aiAutoAnalysis","aiVisionEnabled","aiRecordAccess","aiChatMemory"})if(cleared.optBoolean(key))throw new Exception("API deletion retained dependent authorization: "+key);
+        if(ApiCredentialPolicy.generation(cleared)<=ApiCredentialPolicy.generation(configured[0])||ApiCredentialPolicy.current(authority[0],cleared)||!"qa-beta6-cloud-placeholder".equals(cleared.optString("cloudToken"))||!"qa-beta6-user".equals(cleared.optString("cloudUserId"))||!cleared.optBoolean("foodJsonSchema")||cleared.optInt("dailyCalorieGoal")!=1000)throw new Exception("Deletion did not revoke old authority or changed unrelated settings");
+        uiAssert(()->{if(Boolean.TRUE.equals(invokeAnyV20(probe[0],"current",new Class[]{}))||Boolean.TRUE.equals(invokeAnyV20(probe[0],"register",new Class[]{HttpURLConnection.class},connection)))throw new Exception("Old probe remained authorized after deletion");oldPrimary[0].performClick();});
+        long deadline=android.os.SystemClock.elapsedRealtime()+3000;while(!disconnected.get()&&android.os.SystemClock.elapsedRealtime()<deadline)Thread.sleep(20);if(!disconnected.get())throw new Exception("Removed credentials left a tracked connection active");
+        uiAssert(()->invoke(screen,"configureApi",new Class[]{}));waitForIdleSync();uiAssert(()->{
+            View root=dialogRootV15("api_key_input");android.widget.EditText key=(android.widget.EditText)root.findViewWithTag("api_key_input"),endpoint=(android.widget.EditText)root.findViewWithTag("api_endpoint_input");android.widget.TextView model=(android.widget.TextView)root.findViewWithTag("api_model_select");
+            if(key.length()!=0||endpoint==null||endpoint.length()!=0||model==null||!"选择模型".contentEquals(model.getText())||root.findViewWithTag("api_key_delete")!=null)throw new Exception("Reopened configuration resurrected saved key/address/model");
+        });tapDialogV20(screen,"取消");
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("API deletion changed existing diary/nutrition");
+    }
+    private void revisionV061b6(Context c,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(c);java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();JSONObject fixture=new JSONObject();
+        fixture.put("2000-03-07",new JSONObject().put("calories",250));fixture.put("2000-03-08",new JSONObject().put("calories",9000).put("manualCaloriesOverride",true).put("manualCaloriesTotal",500).put("breakfast",new JSONObject().put("text","保留的手写早餐")));
+        // Production mergeLatest retains nutrition only for a meal-owned source.
+        // Use a real tiny synthetic PNG rather than an orphan foodItems record.
+        String sourceName="qa_v066_food.png";Bitmap source=Bitmap.createBitmap(48,48,Bitmap.Config.ARGB_8888);source.eraseColor(Color.rgb(168,91,45));try(OutputStream output=new FileOutputStream(new File(c.getFilesDir(),sourceName))){source.compress(Bitmap.CompressFormat.PNG,100,output);}finally{source.recycle();}
+        JSONObject food=FoodAnalysisResult.parse(RESPONSE).value;food.put("id","qa-v066-food").put("sourcePhoto",sourceName).put("status","completed").put("analysisStatus","completed");food.getJSONObject("nutrients").put("caloriesKcal",1000);fixture.put("2000-03-09",new JSONObject().put("calories",12).put("lunch",new JSONObject().put("photos",new JSONArray().put(sourceName)).put("foodItems",new JSONArray().put(food))));fixture.put("2000-03-10",new JSONObject().put("calories",1600));fixture.put("2000-03-12",new JSONObject().put("calories",750));fixture.put("2000-03-01",new JSONObject().put("calories",400));if(FoodUi.displayCalories(fixture.getJSONObject("2000-03-09"))!=1000)throw new Exception("Invalid owned nutrition fixture");String before=fixture.toString();
+        JSONObject profile=new JSONObject().put("dailyCalorieGoal",1000).put("nightMode","true".equals(args.getString("night"))).put("decoration","blue").put("bookFont","xiaolai").put("font",100).put("foodRecognitionOnboardingSeen",true).put("seenAnnouncementVersion",c.getPackageManager().getPackageInfo(c.getPackageName(),0).versionName).put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false);
+        prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).putString(NutritionStore.DAYS,before).commit();MainActivity screen=(MainActivity)startActivitySync(new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();String name=args.getString("name","v061b6"),phase=args.getString("phase","all");
+        if(!Arrays.asList("all","water","api").contains(phase))throw new Exception("Unknown beta6 QA phase");if(!"api".equals(phase))waterCalendarV066(screen,c,prefs,before,name);if(!"water".equals(phase))apiDeleteV066(screen,c,prefs,before);
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}"))||requests.get()!=0)throw new Exception("Beta6 feature changed diary or attempted network");Bundle result=new Bundle();String checks=("api".equals(phase)?"":"real calorie projection/manual priority, per-date zero/quarter/half/full/over-goal pixels, no-goal baseline/round clipping, repeat-click finite wave, shared date progress/retained rows, expansion/rebuild/root-owner cleanup; ")+("water".equals(phase)?"":"API confirmation cancel preserves authority, confirm clears key/address/model/detection/mode and dependent grants, old probe/connection/late primary blocked, reopened fields empty, cloud/schema/goal preserved; ");result.putString("stream","PASS 0.6.1-beta.6 phase="+phase+": "+checks+"diary/manual nutrition preserved. Synthetic fixtures only, HTTP(S)="+requests.get()+".\n");finish(Activity.RESULT_OK,result);
+    }
+    private Map<String,Float> naturalWeekAlphaV067(TodayWeekStrip week,String naturalMonth,Map<String,Float> previous)throws Exception {
+        Map<String,Float> result=new HashMap<>();android.widget.LinearLayout[] rows=(android.widget.LinearLayout[])ownField(week,"pages");
+        for(android.widget.LinearLayout row:rows)for(int i=0;i<row.getChildCount();i++){
+            View cell=row.getChildAt(i);String date=(String)ownField(cell,"date");float alpha=cell.getAlpha(),expected=date.substring(0,7).equals(naturalMonth)?1f:.43f;
+            if(Math.abs(alpha-expected)>.001f)throw new Exception("Compact week dimming follows selection rather than the natural year/month: "+date);
+            if(previous!=null&&previous.containsKey(date)&&Math.abs(alpha-previous.get(date))>.001f)throw new Exception("Selecting another day changed an existing date's alpha: "+date);result.put(date,alpha);
+        }return result;
+    }
+    private void monthAlphaV067(MainActivity screen)throws Exception {
+        Calendar today=HomeCalendarDates.day(Calendar.getInstance());String todayKey=HomeCalendarDates.key(today);
+        setHomeDateV22(screen,todayKey,true);uiAssert(()->{
+            HomeCalendarView calendar=calendarV15(screen);Object month=ownField(calendar,"monthPager");android.widget.LinearLayout[] pages=(android.widget.LinearLayout[])ownField(month,"pages");Calendar anchor=(Calendar)ownField(calendar,"month");int futureInMonth=0,adjacent=0;boolean probedFuture=false;
+            for(int p=0;p<3;p++){Calendar pageMonth=(Calendar)anchor.clone();pageMonth.add(Calendar.MONTH,p-1);
+                for(int r=0;r<pages[p].getChildCount();r++){ViewGroup row=(ViewGroup)pages[p].getChildAt(r);for(int i=0;i<row.getChildCount();i++){
+                    View cell=row.getChildAt(i);String tag=String.valueOf(cell.getTag()),date=tag.substring(tag.length()-10);boolean outside=!HomeCalendarDates.sameMonth(dayV22(date),pageMonth),future=date.compareTo(todayKey)>0;
+                    float expected=outside?.43f:1f;if(Math.abs(cell.getAlpha()-expected)>.001f)throw new Exception("Month dimming depends on future rather than page month");
+                    if(cell.isEnabled()==future)throw new Exception("Month future-date selection guard changed");
+                    if(future&&!probedFuture){String selected=(String)ownField(calendar,"selectedKey"),home=(String)invoke(screen,"homeDate",new Class[]{});cell.performClick();if(!selected.equals(ownField(calendar,"selectedKey"))||!home.equals(invoke(screen,"homeDate",new Class[]{})))throw new Exception("Disabled future month date still selected through its listener");probedFuture=true;}
+                    if(future&&!outside)futureInMonth++;if(outside)adjacent++;
+                }}
+            }
+            if(futureInMonth==0||adjacent==0)throw new Exception("Month alpha fixture missed future/current-month or adjacent-month dates");
+        });
+        final String naturalMonth=todayKey.substring(0,7);setHomeDateV22(screen,todayKey,false);uiAssert(()->{
+            TodayWeekStrip week=calendarV15(screen).weekStrip();naturalWeekAlphaV067(week,naturalMonth,null);for(int i=0;i<7;i++){View cell=week.currentRow().getChildAt(i);String date=(String)ownField(cell,"date");if(date.compareTo(todayKey)>0&&cell.isEnabled())throw new Exception("Future week date became selectable");}
+        });
+        final Calendar first=HomeCalendarDates.month(today),previousDay=(Calendar)first.clone();previousDay.add(Calendar.DATE,-1);final String firstKey=HomeCalendarDates.key(first),previousKey=HomeCalendarDates.key(previousDay);
+        setHomeDateV22(screen,previousKey,false);uiAssert(()->{
+            HomeCalendarView calendar=calendarV15(screen);TodayWeekStrip week=calendar.weekStrip();Map<String,Float> original=naturalWeekAlphaV067(week,naturalMonth,null);View[] rows=((View[])ownField(week,"pages")).clone();
+            for(float progress:new float[]{0,.24f,.68f,1}){calendar.setDayProgress(previousDay,first,progress);naturalWeekAlphaV067(week,naturalMonth,original);}
+            for(float progress:new float[]{0,.24f,.68f,1}){calendar.setDayProgress(first,previousDay,progress);naturalWeekAlphaV067(week,naturalMonth,original);}
+            calendar.setDayProgress(previousDay,first,.68f);calendar.setDayProgress(previousDay,previousDay,0);naturalWeekAlphaV067(week,naturalMonth,original);
+            if(calendar.weekStrip()!=week)throw new Exception("Natural-month styling rebuilt a linked week");for(View row:rows){boolean retained=false;for(View current:(View[])ownField(week,"pages"))if(current==row)retained=true;if(!retained)throw new Exception("Natural-month styling replaced a retained week row");}
+        });
+        setHomeDateV22(screen,previousKey,false);uiAssert(()->{
+            TodayWeekStrip week=calendarV15(screen).weekStrip();naturalWeekAlphaV067(week,naturalMonth,null);View cell=week.findViewWithTag("today_week_day_"+firstKey);if(cell==null||!cell.isEnabled()||!cell.performClick())throw new Exception("Cannot click current-month first day in real week");
+        });settleV15();uiAssert(()->{if(!firstKey.equals(invoke(screen,"homeDate",new Class[]{})))throw new Exception("Week date click did not reach month boundary");naturalWeekAlphaV067(calendarV15(screen).weekStrip(),naturalMonth,null);});
+        setHomeDateV22(screen,firstKey,false);queuedSwipeV24(screen,screenRect(pagerV15(screen)),false,.60f,false);settleV15();uiAssert(()->{if(!previousKey.equals(invoke(screen,"homeDate",new Class[]{})))throw new Exception("Real meal-sheet drag did not cross backward month boundary");naturalWeekAlphaV067(calendarV15(screen).weekStrip(),naturalMonth,null);});
+        queuedSwipeV24(screen,screenRect(pagerV15(screen)),true,.60f,false);settleV15();uiAssert(()->{if(!firstKey.equals(invoke(screen,"homeDate",new Class[]{})))throw new Exception("Real meal-sheet reverse drag did not return to current month");naturalWeekAlphaV067(calendarV15(screen).weekStrip(),naturalMonth,null);});
+        queuedSwipeV24(screen,screenRect(pagerV15(screen)),false,.25f,true);settleV15();uiAssert(()->{if(!firstKey.equals(invoke(screen,"homeDate",new Class[]{})))throw new Exception("Cancelled meal-sheet drag changed selected date");naturalWeekAlphaV067(calendarV15(screen).weekStrip(),naturalMonth,null);});
+        Calendar oldYear=(Calendar)first.clone();oldYear.set(Calendar.YEAR,2000);oldYear.set(Calendar.DAY_OF_MONTH,15);setHomeDateV22(screen,HomeCalendarDates.key(oldYear),false);uiAssert(()->{
+            TodayWeekStrip week=calendarV15(screen).weekStrip();naturalWeekAlphaV067(week,naturalMonth,null);int sameNumber=0;for(int i=0;i<7;i++){View cell=week.currentRow().getChildAt(i);String date=(String)ownField(cell,"date");if(date.substring(5,7).equals(naturalMonth.substring(5,7))){sameNumber++;if(cell.getAlpha()>.5f)throw new Exception("Compact month styling ignored year when reopening a historical date");}}if(sameNumber==0)throw new Exception("Historical same-month-number probe has no matching dates");
+        });
+        setHomeDateV22(screen,firstKey,false);uiAssert(()->naturalWeekAlphaV067(calendarV15(screen).weekStrip(),naturalMonth,null));setHomeDateV22(screen,previousKey,false);uiAssert(()->naturalWeekAlphaV067(calendarV15(screen).weekStrip(),naturalMonth,null));
+    }
+    private void weekdayWaterV067(MainActivity screen)throws Exception {
+        setHomeDateV22(screen,"2000-03-06",false);final TodayWeekStrip week=calendarV15(screen).weekStrip();waterWaitV066(week);
+        uiAssert(()->{
+            float base=UiTokens.class.getField("WEEK_WATER_SLOSH_DP").getFloat(null);if(base<1.1f||base>1.5f)throw new Exception("Water increase is missing or no longer restrained");
+            Set<String> profiles=new HashSet<>(),curves=new HashSet<>();
+            for(int i=0;i<7;i++){
+                View cell=week.currentRow().getChildAt(i);String date=(String)ownField(cell,"date");int weekday=((Number)ownField(cell,"weekday")).intValue();float amplitude=((Number)ownField(cell,"waveAmplitudeFactor")).floatValue(),frequency=((Number)ownField(cell,"waveFrequencyFactor")).floatValue(),phase=((Number)ownField(cell,"wavePhaseOffset")).floatValue();
+                if(weekday!=i||amplitude<.85f||amplitude>1.15f||frequency<.9f||frequency>1.1f||Math.abs(phase)>.25f)throw new Exception("Weekday water profile is not small and stable");profiles.add(amplitude+":"+frequency+":"+phase);
+                invokeAnyV20(week,"startWaterMotion",new Class[]{String.class,String.class,int.class},date,date,weekday);android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(week,"waterAnimator");
+                if(!android.animation.ValueAnimator.areAnimatorsEnabled()){waterStoppedV066(week);continue;}
+                if(clock==null||clock.getDuration()!=960)throw new Exception("Weekday feedback lost finite slow timing");clock.pause();clock.setCurrentPlayTime(0);Bitmap still=renderViewV26(week);clock.setCurrentPlayTime(320);Bitmap moving=renderViewV26(week);
+                float sampled=((Number)ownField(week,"waterPhase")).floatValue();curves.add(Float.toString(sampled));
+                try{if(waterChangesV066(still,moving,week,date)<3)throw new Exception("Weekday feedback did not move target water");String other=(String)ownField(week.currentRow().getChildAt((i+1)%7),"date");if(waterChangesV066(still,moving,week,other)!=0)throw new Exception("Weekday feedback moved another date");}finally{still.recycle();moving.recycle();}
+                clock.end();waterStoppedV066(week);
+                invokeAnyV20(week,"startWaterMotion",new Class[]{String.class,String.class,int.class},date,date,weekday);clock=(android.animation.ValueAnimator)ownField(week,"waterAnimator");clock.pause();clock.setCurrentPlayTime(320);
+                if(Math.abs(((Number)ownField(week,"waterPhase")).floatValue()-sampled)>.0001f)throw new Exception("Weekday water profile changed between identical gestures");
+                float oldPhase=((Number)ownField(week,"waterPhase")).floatValue(),oldAmplitude=((Number)ownField(week,"waterAmplitude")).floatValue();
+                invokeAnyV20(week,"startWaterMotion",new Class[]{String.class,String.class,int.class},date,date,weekday);clock=(android.animation.ValueAnimator)ownField(week,"waterAnimator");clock.pause();clock.setCurrentPlayTime(0);
+                if(Math.abs(((Number)ownField(week,"waterPhase")).floatValue()-oldPhase)>.001f||Math.abs(((Number)ownField(week,"waterAmplitude")).floatValue()-oldAmplitude)>.001f)throw new Exception("Repeated same-day feedback reset its presented wave");clock.setCurrentPlayTime(600);if(((Number)ownField(week,"waterAmplitude")).floatValue()>1.001f)throw new Exception("Repeated waves accumulated amplitude");clock.end();waterStoppedV066(week);
+            }
+            if(profiles.size()!=7||android.animation.ValueAnimator.areAnimatorsEnabled()&&curves.size()<4)throw new Exception("Monday through Sunday water still shares one curve");
+        });
+    }
+    private int nutritionRootsV067(){int count=0;for(View root:android.view.inspector.WindowInspector.getGlobalWindowViews())if(root.isShown()&&root.findViewWithTag("day_nutrition_summary")!=null)count++;return count;}
+    private android.widget.EditText goalInputV067(AlertDialog dialog)throws Exception {
+        View input=dialog.getWindow().getDecorView().findViewWithTag("daily_calorie_goal_input");if(!(input instanceof android.widget.EditText))throw new Exception("Missing inline daily goal input");return (android.widget.EditText)input;
+    }
+    private void openGoalV067(AlertDialog dialog)throws Exception {
+        uiAssert(()->{View entry=dialog.getWindow().getDecorView().findViewWithTag("day_nutrition_goal");if(entry==null||!entry.performClick())throw new Exception("Goal entry not clickable");});settleV15();
+        uiAssert(()->{View decor=dialog.getWindow().getDecorView(),editor=decor.findViewWithTag("daily_calorie_goal_body");if(!dialog.isShowing()||editor==null||editor.getVisibility()!=View.VISIBLE||goalInputV067(dialog).getRootView()!=decor||nutritionRootsV067()!=1)throw new Exception("Goal editing opened another window or failed to expand inline");});
+    }
+    private boolean dragGoalScrollV067(AlertDialog dialog,String tag)throws Exception {
+        final float[] path=new float[3];final boolean[] available={false};
+        uiAssert(()->{
+            View decor=dialog.getWindow().getDecorView(),scroll=decor.findViewWithTag("day_nutrition_scroll"),action=decor.findViewWithTag(tag);if(scroll==null||action==null)return;
+            Rect viewport=new Rect(),window=new Rect();scroll.getWindowVisibleDisplayFrame(window);if(!scroll.getGlobalVisibleRect(viewport)||!viewport.intersect(window)||viewport.height()<PaperComponents.dp(dialog.getContext(),20))return;
+            Rect target=screenRect(action);boolean below=target.bottom>viewport.bottom||target.top>=viewport.top&&target.centerY()>=viewport.centerY();
+            // SummaryPanel leaves 24dp side padding, so this path avoids the
+            // focused input and action buttons while exercising native touch scroll.
+            path[0]=viewport.right-PaperComponents.dp(dialog.getContext(),8);path[1]=viewport.top+viewport.height()*(below?.82f:.22f);path[2]=viewport.top+viewport.height()*(below?.22f:.82f);available[0]=true;
+        });
+        if(!available[0])return false;final long down=android.os.SystemClock.uptimeMillis();
+        for(int i=0;i<=8;i++){
+            long targetTime=down+i*32,remaining=targetTime-android.os.SystemClock.uptimeMillis();if(remaining>0)Thread.sleep(remaining);final int step=i;
+            uiAssert(()->{View decor=dialog.getWindow().getDecorView();int[] origin=new int[2];decor.getLocationOnScreen(origin);int action=step==0?MotionEvent.ACTION_DOWN:step==8?MotionEvent.ACTION_UP:MotionEvent.ACTION_MOVE;MotionEvent event=MotionEvent.obtain(down,down+step*32,action,path[0]-origin[0],path[1]+(path[2]-path[1])*step/8-origin[1],0);event.setSource(InputDevice.SOURCE_TOUCHSCREEN);try{decor.dispatchTouchEvent(event);}finally{event.recycle();}});
+        }return true;
+    }
+    private void goalActionV067(AlertDialog dialog,String tag)throws Exception {
+        final int[] scrollAfterRequest={-1};uiAssert(()->{View decor=dialog.getWindow().getDecorView(),action=decor.findViewWithTag(tag);if(action==null||!action.isShown())throw new Exception("Missing inline goal action: "+tag);action.requestRectangleOnScreen(new Rect(0,0,action.getWidth(),action.getHeight()),true);View scroll=decor.findViewWithTag("day_nutrition_scroll");if(scroll!=null)scrollAfterRequest[0]=scroll.getScrollY();});settleV15();
+        int dragAttempts=0;
+        try{
+            while(dragAttempts<4){
+                final boolean[] ready={false};uiAssert(()->{View action=dialog.getWindow().getDecorView().findViewWithTag(tag);Rect visible=new Rect();ready[0]=action!=null&&action.isEnabled()&&action.getGlobalVisibleRect(visible)&&visible.height()>=PaperComponents.dp(dialog.getContext(),44);});
+                if(ready[0])break;if(!dragGoalScrollV067(dialog,tag))break;dragAttempts++;settleV15();
+            }
+            if(dragAttempts>0){final int[] reached={-1,-1};uiAssert(()->{View decor=dialog.getWindow().getDecorView(),action=decor.findViewWithTag(tag),scroll=decor.findViewWithTag("day_nutrition_scroll");Rect visible=new Rect();if(action!=null&&action.getGlobalVisibleRect(visible))reached[0]=visible.height();if(scroll!=null)reached[1]=scroll.getScrollY();});Bundle progress=new Bundle();progress.putString("stream","INFO inline goal reachability "+tag+": requestRectScrollY="+scrollAfterRequest[0]+", nativeTouchDragAttempts="+dragAttempts+", finalScrollY="+reached[1]+", finalVisibleH="+reached[0]+" (44dp minimum unchanged).\n");sendStatus(0,progress);}
+            final int performedDrags=dragAttempts;uiAssert(()->{
+            View decor=dialog.getWindow().getDecorView(),action=decor.findViewWithTag(tag);Rect visible=new Rect();boolean shown=action!=null&&action.getGlobalVisibleRect(visible);
+            if(action==null||!action.isEnabled()||!shown||visible.height()<PaperComponents.dp(dialog.getContext(),44)||!action.performClick()){
+                View scroll=decor.findViewWithTag("day_nutrition_scroll"),summary=decor.findViewWithTag("day_nutrition_summary"),editor=decor.findViewWithTag("daily_calorie_goal_body"),input=decor.findViewWithTag("daily_calorie_goal_input");Rect window=new Rect();decor.getWindowVisibleDisplayFrame(window);
+                throw new Exception("Inline goal action is not scroll-reachable above the IME: "+tag
+                    +" actionH="+(action==null?-1:action.getHeight())+" actionMeasuredH="+(action==null?-1:action.getMeasuredHeight())+" actionRect="+(action==null?"none":screenRect(action))+" globalVisible="+shown+" visibleRect="+visible
+                    +" scrollH="+(scroll==null?-1:scroll.getHeight())+" scrollY="+(scroll==null?-1:scroll.getScrollY())+" scrollYAfterRequest="+scrollAfterRequest[0]+" nativeTouchDragAttempts="+performedDrags+" scrollRangeEstimate="+(scroll==null||summary==null?-1:Math.max(0,summary.getHeight()-scroll.getHeight()+scroll.getPaddingTop()+scroll.getPaddingBottom()))+" scrollRect="+(scroll==null?"none":screenRect(scroll))
+                    +" summaryH="+(summary==null?-1:summary.getHeight())+" summaryMeasuredH="+(summary==null?-1:summary.getMeasuredHeight())+" editorH="+(editor==null?-1:editor.getHeight())
+                    +" inputRect="+(input==null?"none":screenRect(input))+" inputFocused="+(input!=null&&input.hasFocus())+" decorH="+decor.getHeight()+" decorRect="+screenRect(decor)+" windowVisibleFrame="+window+" windowLayoutH="+dialog.getWindow().getAttributes().height+" softInputMode="+dialog.getWindow().getAttributes().softInputMode);
+            }
+        });}catch(Exception failure){try{screenshot("v061b7-goal-reach-failure");}catch(Exception capture){failure.addSuppressed(capture);}throw failure;}settleV15();
+    }
+    private void goalPersistedV067(Context c,int expected)throws Exception {if(PrivateProfileStore.read(c).optInt("dailyCalorieGoal")!=expected)throw new Exception("Inline goal persistence differs from explicit save");}
+    private void nutritionInlineV067(MainActivity screen,Context c,android.content.SharedPreferences prefs,String before,String name)throws Exception {
+        setHomeDateV22(screen,"2000-03-08",false);final String selected=(String)invoke(screen,"homeDate",new Class[]{});final AlertDialog[] dialog={null};
+        uiAssert(()->dialog[0]=((FoodUi)invoke(screen,"foodUi",new Class[]{})).dayNutrition(selected));settleV15();View original=dialog[0].getWindow().getDecorView();
+        uiAssert(()->{
+            View entry=original.findViewWithTag("day_nutrition_goal"),done=original.findViewWithTag("day_nutrition_done");if(entry==null||done==null||done.getHeight()<PaperComponents.dp(c,44)||nutritionRootsV067()!=1)throw new Exception("Nutrition summary footer is not compact and accessible");
+            int gap=screenRect(done).top-screenRect(entry).bottom;if(gap<0||gap>PaperComponents.dp(c,24))throw new Exception("Nutrition summary retains excessive empty footer space: "+gap);
+        });screenshot(name+"-nutrition-collapsed");openGoalV067(dialog[0]);goalPersistedV067(c,1000);
+        uiAssert(()->{android.widget.EditText input=goalInputV067(dialog[0]);if(!"1000".contentEquals(input.getText())||input.getHeight()<PaperComponents.dp(c,44)||!input.isSingleLine())throw new Exception("Inline goal input lost saved value or accessible single-line layout");input.setText("2300");});goalActionV067(dialog[0],"daily_calorie_goal_cancel");goalPersistedV067(c,1000);
+        openGoalV067(dialog[0]);uiAssert(()->{if(!"1000".contentEquals(goalInputV067(dialog[0]).getText()))throw new Exception("Cancelled goal draft leaked into reopening");});
+        for(String invalid:new String[]{"299","10001","9999999999999999999"}){uiAssert(()->goalInputV067(dialog[0]).setText(invalid));goalActionV067(dialog[0],"daily_calorie_goal_save");goalPersistedV067(c,1000);uiAssert(()->{if(!dialog[0].isShowing()||goalInputV067(dialog[0]).getError()==null||original!=dialog[0].getWindow().getDecorView())throw new Exception("Invalid goal dismissed or replaced the original summary");});}
+        uiAssert(()->{JSONObject latest=PrivateProfileStore.read(c);latest.put("qaBeta7Preserved",true);if(!PrivateProfileStore.write(c,latest))throw new Exception("Unable to seed unrelated profile field");goalInputV067(dialog[0]).setText("2000");});goalActionV067(dialog[0],"daily_calorie_goal_save");goalPersistedV067(c,2000);
+        uiAssert(()->{View decor=dialog[0].getWindow().getDecorView();if(decor!=original||!dialog[0].isShowing()||decor.findViewWithTag("daily_calorie_goal_body").getVisibility()!=View.GONE||!visibleText(decor).contains("500 / 2000 kcal")||!PrivateProfileStore.read(c).optBoolean("qaBeta7Preserved"))throw new Exception("Goal save did not update the same summary or merge newest profile");});
+        for(String value:new String[]{"300","10000","0",""}){openGoalV067(dialog[0]);uiAssert(()->goalInputV067(dialog[0]).setText(value));goalActionV067(dialog[0],"daily_calorie_goal_save");goalPersistedV067(c,value.isEmpty()?0:Integer.parseInt(value));uiAssert(()->{if(!dialog[0].isShowing()||dialog[0].getWindow().getDecorView()!=original)throw new Exception("Valid goal save replaced the nutrition dialog");});}
+        openGoalV067(dialog[0]);uiAssert(()->{goalInputV067(dialog[0]).setText("1700");goalInputV067(dialog[0]).onEditorAction(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);});settleV15();goalPersistedV067(c,1700);screenshot(name+"-nutrition-goal-saved");
+        openGoalV067(dialog[0]);final android.widget.EditText[] closedInput={null};uiAssert(()->{closedInput[0]=goalInputV067(dialog[0]);closedInput[0].setText("2400");});goalActionV067(dialog[0],"day_nutrition_done");goalPersistedV067(c,1700);
+        uiAssert(()->{if(dialog[0].isShowing())throw new Exception("Done did not close original nutrition dialog");closedInput[0].onEditorAction(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);});goalPersistedV067(c,1700);
+        uiAssert(()->dialog[0]=((FoodUi)invoke(screen,"foodUi",new Class[]{})).dayNutrition(selected));settleV15();openGoalV067(dialog[0]);uiAssert(()->goalInputV067(dialog[0]).setText("2500"));
+        for(int i=0;i<3&&dialog[0].isShowing();i++){sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);waitForIdleSync();}goalPersistedV067(c,1700);uiAssert(()->{if(dialog[0].isShowing())dialog[0].dismiss();});settleV15();
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}"))||!selected.equals(invoke(screen,"homeDate",new Class[]{})))throw new Exception("Inline goal changed diary/manual nutrition or selected date");
+        uiAssert(()->{HomeCalendarView calendar=calendarV15(screen);if(((Number)ownField(calendar,"calorieGoal")).intValue()!=1700)throw new Exception("Underlying calendar retained the old saved goal");});
+    }
+    private void revisionV061b7(Context c,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(c);java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();JSONObject fixture=new JSONObject();for(int day=6;day<=12;day++)fixture.put(String.format(Locale.ROOT,"2000-03-%02d",day),new JSONObject().put("calories",500));fixture.getJSONObject("2000-03-08").put("manualCaloriesOverride",true).put("manualCaloriesTotal",500).put("breakfast",new JSONObject().put("text","保留的手写早餐"));String before=fixture.toString();
+        JSONObject profile=new JSONObject().put("dailyCalorieGoal",1000).put("nightMode","true".equals(args.getString("night"))).put("decoration","green").put("bookFont","xiaolai").put("font",100).put("foodRecognitionOnboardingSeen",true).put("seenAnnouncementVersion",c.getPackageManager().getPackageInfo(c.getPackageName(),0).versionName).put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false);
+        prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).putString(NutritionStore.DAYS,before).commit();MainActivity screen=(MainActivity)startActivitySync(new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();String phase=args.getString("phase","all"),name=args.getString("name","v061b7");
+        if(!Arrays.asList("all","calendar","goal").contains(phase))throw new Exception("Unknown beta7 QA phase");if(!"goal".equals(phase)){monthAlphaV067(screen);weekdayWaterV067(screen);}if(!"calendar".equals(phase))nutritionInlineV067(screen,c,prefs,before,name);
+        if(requests.get()!=0||!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("Beta7 attempted network or changed diary");Bundle result=new Bundle();result.putString("stream","PASS 0.6.1-beta.7 phase="+phase+": "+("goal".equals(phase)?"":"page-month dimming with unchanged future guards, linked week/month styling and retained rows, restrained deterministic weekday water profiles, target-only finite feedback and repeated-input continuity; ")+("calendar".equals(phase)?"":"compact single-window nutrition/goal editor, cancel/invalid/close/Back preserve unsaved target, explicit/IME save and empty/zero bounds, newest-profile merge, same-dialog update and underlying calendar refresh; ")+"diary/manual calories and selected date preserved. Synthetic fixtures, HTTP(S)="+requests.get()+".\n");finish(Activity.RESULT_OK,result);
+    }
+    private Bitmap waterFrameV068(MainActivity screen)throws Exception {
+        java.util.concurrent.CountDownLatch committed=new java.util.concurrent.CountDownLatch(1);
+        uiAssert(()->{if(!screen.hasWindowFocus())throw new Exception("A different window obscures the historical water probe");View decor=screen.getWindow().getDecorView();if(android.os.Build.VERSION.SDK_INT>=29&&decor.isHardwareAccelerated())decor.getViewTreeObserver().registerFrameCommitCallback(committed::countDown);else committed.countDown();invalidateSoftwareProbeTreeV062(decor);});
+        if(!committed.await(5,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("No fresh historical water hardware frame");
+        Bitmap image=getUiAutomation().takeScreenshot();if(image==null)throw new Exception("Historical water screenshot unavailable");
+        try{uiAssert(()->{if(!screen.hasWindowFocus())throw new Exception("Historical water screenshot was obscured by another window");});return image;}catch(Exception failure){image.recycle();throw failure;}
+    }
+    private Bitmap waterLayerV068(TodayWeekStrip week,View cell,String method)throws Exception {
+        Bitmap layer=Bitmap.createBitmap(week.getWidth(),week.getHeight(),Bitmap.Config.ARGB_8888);
+        try{invokeAnyV20(week,method,new Class[]{Canvas.class,android.widget.LinearLayout.class,cell.getClass()},new Canvas(layer),week.currentRow(),cell);return layer;}
+        catch(Exception failure){layer.recycle();throw failure;}
+    }
+    private void revisionV061b8(Context c,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(c);java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        int[] calories={250,500,750,1000,1600,0,600};JSONObject fixture=new JSONObject();Map<String,Integer> amounts=new HashMap<>();
+        for(int i=0;i<7;i++){String date=String.format(Locale.ROOT,"2000-03-%02d",6+i);fixture.put(date,new JSONObject().put("calories",calories[i]));amounts.put(date,calories[i]);}
+        fixture.getJSONObject("2000-03-08").put("manualCaloriesOverride",true).put("manualCaloriesTotal",750).put("breakfast",new JSONObject().put("text","保留的手写早餐"));String before=fixture.toString();
+        JSONObject profile=new JSONObject().put("dailyCalorieGoal",1000).put("nightMode","true".equals(args.getString("night"))).put("decoration","yellow").put("bookFont","xiaolai").put("font",100).put("foodRecognitionOnboardingSeen",true).put("seenAnnouncementVersion",c.getPackageManager().getPackageInfo(c.getPackageName(),0).versionName).put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false);
+        prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).putString(NutritionStore.DAYS,before).commit();
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();setHomeDateV22(screen,"2000-03-08",false);
+        TodayWeekStrip week=calendarV15(screen).weekStrip();waterWaitV066(week);final Rect[] cells=new Rect[7];
+        uiAssert(()->{
+            for(int i=0;i<7;i++){
+                String date=String.format(Locale.ROOT,"2000-03-%02d",6+i);View cell=weekCellV066(week,date);cells[i]=screenRect(cell);
+                if(cell.getAlpha()>.5f)throw new Exception("Historical water fixture is not month-dimmed");
+                waterLevelV066(week,date,Math.min(1f,calories[i]/1000f));float original=cell.getAlpha();
+                for(String painter:new String[]{"drawWater","drawBottle"}){
+                    Bitmap dim=waterLayerV068(week,cell,painter),normal=null;
+                    try{cell.setAlpha(1);normal=waterLayerV068(week,cell,painter);if(!dim.sameAs(normal))throw new Exception("Date-label opacity still fades historical progress: "+painter);
+                        if("drawWater".equals(painter)){int alpha=Color.alpha(waterPixelV066(dim,week,date,.5f,.9f));if((calories[i]>0)!=(alpha>0))throw new Exception("Historical water lost real progress or filled an empty day");}
+                    }finally{cell.setAlpha(original);dim.recycle();if(normal!=null)normal.recycle();}
+                }
+            }
+        });
+        Bitmap filled=waterFrameV068(screen),empty=null;
+        try{
+            uiAssert(()->week.setCalorieProgress(0,amounts));empty=waterFrameV068(screen);
+            for(int i=0;i<7;i++){Rect cell=cells[i];int x=cell.centerX(),y=cell.top+Math.round(cell.height()*.9f);boolean different=filled.getPixel(x,y)!=empty.getPixel(x,y);if(different!=(calories[i]>0))throw new Exception("Hardware frame does not show each historical day's actual water level: "+i);}
+        }finally{filled.recycle();if(empty!=null)empty.recycle();uiAssert(()->week.setCalorieProgress(1000,amounts));}
+        Bitmap shown=waterFrameV068(screen);try{File dir=new File(c.getExternalFilesDir(null),"qa");dir.mkdirs();try(FileOutputStream out=new FileOutputStream(new File(dir,args.getString("name","v061b8")+"-all-days.png"))){shown.compress(Bitmap.CompressFormat.PNG,100,out);}}finally{shown.recycle();}
+        uiAssert(()->{
+            String from="2000-03-08",to="2000-03-07";invokeAnyV20(week,"startWaterMotion",new Class[]{String.class,String.class,int.class},from,to,1);android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(week,"waterAnimator");
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+                if(clock==null)throw new Exception("Historical target no longer gives wave feedback");clock.pause();clock.setCurrentPlayTime(0);Bitmap still=renderViewV26(week);clock.setCurrentPlayTime(320);Bitmap moving=renderViewV26(week);
+                try{if(waterChangesV066(still,moving,week,to)<3||waterChangesV066(still,moving,week,from)!=0)throw new Exception("Historical wave feedback lost single-date ownership");}finally{still.recycle();moving.recycle();}clock.end();
+            }
+            waterStoppedV066(week);
+        });
+        monthAlphaV067(screen);
+        if(requests.get()!=0||!before.equals(prefs.getString(NutritionStore.DAYS,"{}"))||PrivateProfileStore.read(c).optInt("dailyCalorieGoal")!=1000)throw new Exception("Historical water fix changed data, goal or network authority");
+        Bundle result=new Bundle();result.putString("stream","PASS 0.6.1-beta.8: real seven-day calorie projection with historical label dimming, water/outline pixels independent of label opacity, six nonempty days visible in fresh HWUI frames and empty day unfilled, single-target wave/reduced-motion cleanup, natural-month stability/future guards/year and root/gesture regressions. Diary/manual calories and goal unchanged; synthetic fixtures, HTTP(S)="+requests.get()+".\n");finish(Activity.RESULT_OK,result);
+    }
     @Override public void onStart(){
         Bundle result=new Bundle();
         try{
@@ -4751,6 +5582,14 @@ public final class UpgradeSmoke extends Instrumentation {
             // override that new fixture or permit a real service request.
             if(!c.getSharedPreferences(PrivateProfileStore.PRIVATE_PREFS,0).edit().clear().commit())throw new Exception("Cannot reset isolated QA private settings fixture");
             if(args!=null&&Arrays.asList("offline-v22","prepare-offline-v22","download-online-v22").contains(args.getString("scenario")))throw new IllegalArgumentException("Retired recognition QA scenario");
+            if(args!=null&&"revision-v061b8".equals(args.getString("scenario"))){revisionV061b8(c,p);return;}
+            if(args!=null&&"revision-v061b7".equals(args.getString("scenario"))){revisionV061b7(c,p);return;}
+            if(args!=null&&"revision-v061b6".equals(args.getString("scenario"))){revisionV061b6(c,p);return;}
+            if(args!=null&&"revision-v061b5".equals(args.getString("scenario"))){revisionV061b5(c,p);return;}
+            if(args!=null&&"revision-v061b4".equals(args.getString("scenario"))){revisionV061(c,p);return;}
+            if(args!=null&&"revision-v061b3".equals(args.getString("scenario"))){revisionV061(c,p);return;}
+            if(args!=null&&"revision-v061b2".equals(args.getString("scenario"))){revisionV061(c,p);return;}
+            if(args!=null&&"revision-v061".equals(args.getString("scenario"))){revisionV061(c,p);return;}
             if(args!=null&&"release-v060".equals(args.getString("scenario"))){releaseV060(c,p);return;}
             if(args!=null&&"revision-v35".equals(args.getString("scenario"))){revisionV35(c,p);return;}
             if(args!=null&&"revision-v34".equals(args.getString("scenario"))){revisionV34(c,p);return;}

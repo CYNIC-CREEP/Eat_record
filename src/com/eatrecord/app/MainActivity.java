@@ -147,11 +147,23 @@ public class MainActivity extends Activity {
             public void recognitionEnabled(boolean enabled) { chooseRecognitionSource(FoodRecognitionPolicy.source(profile),enabled);refreshRecognitionSettings(); }
             public int detailAccentColor() { return accentSoft; }
             public void saveProfile() { MainActivity.this.saveProfile(); }
+            public boolean saveDailyGoal(int value) {
+                if(value!=0&&(value<300||value>10000))return false;
+                synchronized(NutritionStore.LOCK){
+                    JSONObject latest=PrivateProfileStore.read(MainActivity.this);
+                    try{latest.put("dailyCalorieGoal",value);}catch(JSONException invalid){return false;}
+                    if(!PrivateProfileStore.write(MainActivity.this,latest))return false;
+                    profile=readProfile();
+                }
+                // The open nutrition dialog owns its draft and visible totals.
+                // Rebuild the retained home only after the modal loses ownership.
+                invalidateRootPages();return true;
+            }
             public void saveDays() { MainActivity.this.saveDays(); }
             // Reading a detail must not invalidate the unchanged home behind it.
             public void reload() { days = readJson(DATA_KEY); profile = readProfile(); }
-            public void refresh() { if (inBookDetail) renderBookDetail(bookDetailDate); else if(inMoreSettingsPage)renderMealReminderSettingsPage();else if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inThemeSettingsPage)renderThemeSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent(); }
-            public void api() { configureApi(() -> { days = readJson(DATA_KEY); profile = readProfile(); if (foodProcessing == null) {if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent();} }); }
+            public void refresh() { if (inBookDetail) renderBookDetail(bookDetailDate); else if(inMealManagementPage)rerenderPreservingScroll(()->renderMealManagementPage());else if(inMoreSettingsPage)renderMealReminderSettingsPage();else if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inThemeSettingsPage)renderThemeSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent(); }
+            public void api() { configureApi(() -> { days = readJson(DATA_KEY); profile = readProfile(); if (foodProcessing == null) {if(inMealManagementPage)rerenderPreservingScroll(()->renderMealManagementPage());else if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent();} }); }
             public void preview(String date, String meal, String file) { showPhotoViewer(date, meal, file); }
             public void previewDetails(String date,String meal,String file,java.util.function.BooleanSupplier current,java.util.function.Consumer<Boolean> ready){
                 showPhotoViewer(date,meal,file,current,ready);
@@ -383,6 +395,7 @@ public class MainActivity extends Activity {
     private boolean favoriteRecordsFromBooks;
     private boolean inInterfaceLayoutPage = false;
     private boolean inMoreSettingsPage = false;
+    private boolean inMealManagementPage = false;
     private boolean inSmartAssistantPage = false;
     private String smartAssistantSection = "";
     private boolean foodAdvancedExpanded;
@@ -397,7 +410,23 @@ public class MainActivity extends Activity {
     private boolean resumeAboutAfterUpdateLog = false;
     private int preferencesScrollY = 0;
     private ImageView themeModeTransitionOverlay;
+    private ThemeRevealView circularThemeReveal;
+    private AdvisorPager advisorPager;
+    private boolean advisorActivated;
+    private String advisorDate;
+    private final Runnable refreshAdvisorPage=new Runnable(){public void run(){
+        if(rootStopped||!advisorAttached()||!advisorPager.atToday())return;
+        if(!homeDate().equals(advisorDate)){
+            if(windowTouchActive||rootPager.isInteracting()){root.postDelayed(this,80);return;}
+            View day=content.findViewWithTag("today_day_pager");
+            if(day instanceof TodayDayPager&&((TodayDayPager)day).isInteracting()){root.postDelayed(this,80);return;}
+            advisorDate=homeDate();advisorActivated=false;View page=buildAiAnalysisRoot(true);page.setBackground(pageBackground());advisorPager.replaceAdvisor(page);
+        }
+    }};
+    private View themeModeButton;
     private PageCrossfade pageCrossfade;
+    private boolean navPageTransition;
+    private long navPageTransitionGeneration;
     private boolean cachedRootReturn,returnWorkExecuting;
     private boolean startupRecoveryBlocked;
     private long returnRequestGeneration;
@@ -436,6 +465,7 @@ public class MainActivity extends Activity {
     private long rootPagerGeneration;
     private boolean rootStopped,rootCacheEvicted;
     private int rootCacheScroll;
+    private boolean rootCacheAdvisor;
     private String rootHomeRestoreDate;
     private void rememberRootHomeDestination(){
         if(rootPagesVisible()){
@@ -451,7 +481,7 @@ public class MainActivity extends Activity {
     private void releaseBackgroundRootPages(){
         if(!rootStopped||rootPager==null)return;
         RootPagePager previous=rootPager;boolean live=rootPagesVisible();previous.freeze();
-        if(live){currentTab=rootTab(previous.target());rememberRootHomeDestination();rootCacheScroll=currentContentScrollY();rootCacheEvicted=true;}
+        if(live){currentTab=rootTab(previous.target());rememberRootHomeDestination();rootCacheScroll=currentContentScrollY();rootCacheAdvisor=advisorVisible();rootCacheEvicted=true;}
         rootPagerGeneration++;rootPager=null;
         if(live)content.removeView(previous);rootPagesDirty=true;
     }
@@ -462,7 +492,7 @@ public class MainActivity extends Activity {
     };
     private final Runnable refreshRootPages=new Runnable(){public void run(){
         if(rootStopped||!rootPagesDirty||!rootPagesVisible()||isFinishing()||isDestroyed())return;
-        if(mediaPreviewActive())return;
+        if(mediaPreviewActive()||circularThemeReveal!=null||advisorVisible())return;
         View day=content.findViewWithTag("today_day_pager"),calendar=content.findViewWithTag("home_calendar");
         if(windowTouchActive||bookOpeningOverlay!=null||rootPager.isInteracting()||pageCrossfade!=null&&pageCrossfade.active()||activeGlassDialogCount>0||activeOverlay!=null||foodProcessing!=null||!editingMediaItems.isEmpty()||getCurrentFocus() instanceof EditText||!hasWindowFocus()
                 ||day instanceof TodayDayPager&&((TodayDayPager)day).isInteracting()
@@ -472,7 +502,9 @@ public class MainActivity extends Activity {
         rememberRootHomeDestination();int y=currentContentScrollY();days=readJson(DATA_KEY);profile=readProfile();applyDecoration();
         renderCurrent();restoreScrollPosition(currentPageScroll(),y);
     }};
-    private boolean rootPagesVisible(){return rootPager!=null&&rootPager.getParent()==content&&content!=null&&content.indexOfChild(rootPager)>=0;}
+    private boolean rootPagesVisible(){return rootPager!=null&&content!=null&&rootPager.getParent()==content&&content.indexOfChild(rootPager)>=0;}
+    private boolean advisorAttached(){return rootPagesVisible()&&advisorPager!=null&&advisorPager.getParent()==rootPager&&rootPager.page(0)==advisorPager;}
+    private boolean advisorVisible(){return advisorAttached()&&currentTab==0&&!advisorPager.atToday();}
     private boolean mediaPreviewActive(){return inPhotoViewer||photoOverlay!=null||aiPreviewOverlay!=null;}
     private void invalidateRootPages(){rootPagesDirty=true;if(root!=null&&!rootStopped){root.removeCallbacks(refreshRootPages);if(!mediaPreviewActive())root.postDelayed(refreshRootPages,120);}}
     private void resumeDeferredRootRefresh(){
@@ -483,7 +515,7 @@ public class MainActivity extends Activity {
     private static int rootIndex(int tab){return tab==0?0:tab==1?1:2;}
     private static int rootTab(int index){return index==2?3:index;}
     private void positionRootIndicator(float position){
-        if(!rootPagesVisible()||!rootPager.isInteracting()||navIndicator==null||navIndicator.getWidth()<=0||navBar.getWidth()<=0)return;
+        if(navPageTransition||!rootPagesVisible()||!rootPager.isInteracting()||navIndicator==null||navIndicator.getWidth()<=0||navBar.getWidth()<=0)return;
         if(!navPeerActive){cancelPendingNavIndicatorLayout();navIndicatorGeneration++;navIndicator.animate().cancel();navPeerActive=true;}
         int left=Math.min(1,(int)Math.floor(position)),right=left+1;float t=Math.max(0,Math.min(1,position-left));
         float width=lerp(navItemWidth(rootTab(left)),navItemWidth(rootTab(right)),t);
@@ -495,25 +527,65 @@ public class MainActivity extends Activity {
         homeFoodRefreshPending=false;homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);
         boolean suppress=suppressEntryAnimation;suppressEntryAnimation=true;View[] pages;
         String todayDate=rootHomeRestoreDate==null?homeDate():rootHomeRestoreDate;rootHomeRestoreDate=null;
-        try{pages=new View[]{buildTodayRoot(todayDate),buildBooksRoot(),buildMeRoot()};}finally{suppressEntryAnimation=suppress;}
+        final RootPagePager[] installed={null};
+        try{
+            View today=buildTodayRoot(todayDate);
+            if(aiAnalysisEnabled()){
+                advisorActivated=false;advisorDate=homeDate();View advisor=buildAiAnalysisRoot(true);advisor.setBackground(pageBackground());
+                advisorPager=createAdvisorContainer(installed,today,advisor);today=advisorPager;
+            }else advisorPager=null;
+            pages=new View[]{today,buildBooksRoot(),buildMeRoot()};
+        }finally{suppressEntryAnimation=suppress;}
         rootPagesDirty=false;rootCacheEvicted=false;rootPagesDay=dateKey(Calendar.getInstance());
-        final long generation=++rootPagerGeneration;final RootPagePager[] installed={null};
+        final long generation=++rootPagerGeneration;
         RootPagePager created=new RootPagePager(this,pages,rootIndex(currentTab),new RootPagePager.Listener(){
             public void onProgress(float position){if(installed[0]!=null&&generation==rootPagerGeneration&&installed[0]==rootPager)positionRootIndicator(position);}
             public void onTarget(int index){
-                if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;currentTab=rootTab(index);navPeerActive=true;
-                updateNav(false);updateFab();
+                if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;currentTab=rootTab(index);
+                inAiAnalysisPage=index==0&&advisorPager!=null&&!advisorPager.atToday();
+                if(navPageTransition){updateNav(false);updateFab();return;}
+                navPeerActive=true;updateNav(false);updateFab();
             }
             public void onRest(int index){
                 if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;currentTab=rootTab(index);
+                if(index!=0&&advisorPager!=null)advisorPager.resetForRootExit();
+                inAiAnalysisPage=index==0&&advisorPager!=null&&!advisorPager.atToday();
+                if(navPageTransition){updateNav(false);updateFab();return;}
                 navPeerActive=false;navIndicator.setScaleX(1);updateNav(false);updateFab();finishPeerIndicator(effectiveNavTab());
+                if(index==0&&advisorPager!=null)advisorPager.resumeVertical();
                 if(rootPagesDirty){root.removeCallbacks(refreshRootPages);root.postDelayed(refreshRootPages,120);}
             }
         });
-        installed[0]=created;rootPager=created;
-        content.addView(rootPager,new FrameLayout.LayoutParams(-1,-1));rootPager.select(rootIndex(currentTab),false);
+        installed[0]=created;rootPager=created;content.addView(created,new FrameLayout.LayoutParams(-1,-1));created.select(rootIndex(currentTab),false);
     }
 
+    private AdvisorPager createAdvisorContainer(final RootPagePager[] installed,View today,View advisor){
+        final AdvisorPager[] owner={null};
+        owner[0]=new AdvisorPager(this,today,advisor,new AdvisorPager.Listener(){
+            private boolean current(){return owner[0]!=null&&advisorPager==owner[0]&&installed[0]!=null&&rootPager==installed[0]&&advisorAttached();}
+            public void onMoving(){
+                if(!current())return;preservePendingHomeReturn();installed[0].freeze();
+                fab.animate().cancel();manualFoodButton.animate().cancel();
+                fab.setScaleX(1);fab.setScaleY(1);manualFoodButton.setScaleX(1);manualFoodButton.setScaleY(1);
+            }
+            public void onProgress(float position,float height){
+                if(!current()||!owner[0].interacting()||currentTab!=0||installed[0].target()!=0||navPageTransition)return;
+                float alpha=1-Math.max(0,Math.min(1,position/Math.max(1,height)));
+                positionAdvisorControl(fab,alpha,position);positionAdvisorControl(manualFoodButton,alpha,position);
+            }
+            public void onRest(boolean visible){
+                if(!current())return;inAiAnalysisPage=currentTab==0&&visible;
+                boolean onToday=currentTab==0&&!visible;
+                for(View button:new View[]{fab,manualFoodButton}){button.setTranslationY(0);button.setAlpha(onToday?1:0);button.setVisibility(onToday?View.VISIBLE:View.GONE);}
+                installed[0].resume();updateFab();
+                if(currentTab==0&&visible){if(!advisorActivated){advisorActivated=true;if(aiAutoAnalysisEnabled())requestAiAnalysis(homeDate(),false);}}
+                else if(!visible)resumeDeferredRootRefresh();
+            }
+        });return owner[0];
+    }
+    private void positionAdvisorControl(View button,float alpha,float position){
+        button.setVisibility(alpha>0?View.VISIBLE:View.GONE);button.setAlpha(alpha);button.setTranslationY(-position);button.setClickable(false);
+    }
     private FoodRecognitionSetup foodRecognitionSetup;
     private int peerPointer=-1;
     private float peerDownX,peerDownY;
@@ -526,6 +598,7 @@ public class MainActivity extends Activity {
         if(!homeFoodRefreshPending||isFinishing()||isDestroyed())return;
         if(mediaPreviewActive())return;
         if(currentTab!=0||!mainPeerVisible()){homeFoodRefreshPending=false;return;}
+        if(advisorVisible())return;
         if(!hasWindowFocus())return;
         View pager=content.findViewWithTag("today_day_pager"),calendar=content.findViewWithTag("home_calendar");
         if(windowTouchActive||activeGlassDialogCount>0||activeOverlay!=null||foodProcessing!=null||rootPagesVisible()&&rootPager.isInteracting()||!editingMediaItems.isEmpty()||pageCrossfade!=null&&pageCrossfade.active()
@@ -671,6 +744,9 @@ public class MainActivity extends Activity {
         updateSystemBars();
 
         root = new FrameLayout(this);
+        root.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
+            if(circularThemeReveal!=null&&!circularThemeReveal.matchesSize(r-l,b-t))circularThemeReveal.finish();
+        });
         disableForceDark(root);
         root.setBackground(pageBackground());
         setContentView(root);
@@ -769,13 +845,18 @@ public class MainActivity extends Activity {
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if(startupRecoveryBlocked)return;
+        if(circularThemeReveal!=null&&root!=null&&circularThemeReveal.matchesSize(root.getWidth(),root.getHeight())){
+            refreshCurrentThemeSurface();return;
+        }
         cancelReturnFeedback();
         cancelPendingBookClose();backSwipeTracking=false;if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();
         clearPeerPointer();
         if(pageCrossfade!=null)pageCrossfade.clear();finishPeerIndicator(effectiveNavTab());
         boolean keepThemeSettingsVisible = inThemeSettingsPage;
+        boolean keepAdvisorVisible = advisorVisible();
         boolean keepAssistantVisible = inSmartAssistantPage;
         boolean keepRemindersVisible = inMoreSettingsPage;
+        boolean keepMealManagementVisible = inMealManagementPage;
         boolean keepPreferencesVisible = inPreferencesPage;
         int previousScrollY = keepThemeSettingsVisible&&themeModeTransitionOverlay!=null?themeModeTransitionScrollY:currentContentScrollY();
         applyNightModeOverride();
@@ -805,10 +886,12 @@ public class MainActivity extends Activity {
             renderCurrentAssistantSettingsPage();restoreScrollPosition(currentPageScroll(),previousScrollY);
         } else if(keepRemindersVisible) {
             renderMealReminderSettingsPage();restoreScrollPosition(currentPageScroll(),previousScrollY);
+        } else if(keepMealManagementVisible) {
+            renderMealManagementPage();restoreScrollPosition(currentPageScroll(),previousScrollY);
         } else if(keepPreferencesVisible) {
             renderPreferencesPage(previousScrollY);
         } else {
-            renderCurrent();
+            rememberRootHomeDestination();renderCurrent();if(keepAdvisorVisible&&advisorPager!=null)advisorPager.showAdvisorImmediately();restoreScrollPosition(currentPageScroll(),previousScrollY);
         }
         updateFab();
         updateNavIndicator(false);
@@ -824,7 +907,7 @@ public class MainActivity extends Activity {
             foodReceiverRegistered = true;
         }
         synchronized (NutritionStore.LOCK) { NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
-        if(rootCacheEvicted){int saved=rootCacheScroll;profile=readProfile();renderCurrent();restoreScrollPosition(currentPageScroll(),saved);}
+        if(rootCacheEvicted){int saved=rootCacheScroll;boolean advisor=rootCacheAdvisor;profile=readProfile();renderCurrent();if(advisor&&currentTab==0&&advisorPager!=null)advisorPager.showAdvisorImmediately();restoreScrollPosition(currentPageScroll(),saved);}
         FoodAnalysisJobService.schedule(this, false, 0);
         resumeFoodProcessing();
         if(rootPagesVisible()){rootPager.resume();if(!dateKey(Calendar.getInstance()).equals(rootPagesDay))invalidateRootPages();}
@@ -840,7 +923,7 @@ public class MainActivity extends Activity {
         if(focused&&root!=null&&profile!=null)root.post(()->maybeShowRecognitionSetup());
     }
 
-    @Override protected void onPause(){photoViewerGeneration++;if(resetPhotoViewerTarget!=null)resetPhotoViewerTarget.run();cancelReturnFeedback();super.onPause();}
+    @Override protected void onPause(){if(advisorAttached()&&currentTab==0)advisorPager.pause();photoViewerGeneration++;if(resetPhotoViewerTarget!=null)resetPhotoViewerTarget.run();cancelReturnFeedback();super.onPause();}
 
     @Override
     protected void onDestroy() {
@@ -974,11 +1057,26 @@ public class MainActivity extends Activity {
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         if(startupRecoveryBlocked)return super.dispatchTouchEvent(event);
+        if(circularThemeReveal!=null)return true;
         if(event.getActionMasked()==MotionEvent.ACTION_DOWN){
             if(bookOpeningOverlay!=null&&bookOpeningOverlay.closing&&containsRawPoint(navHost,event.getRawX(),event.getRawY()))bookOpeningOverlay.finish();
             windowTouchActive=true;if(rootPagesVisible()&&!dateKey(Calendar.getInstance()).equals(rootPagesDay))invalidateRootPages();}
         if(event.getActionMasked()==MotionEvent.ACTION_UP||event.getActionMasked()==MotionEvent.ACTION_CANCEL){
             windowTouchActive=false;if(homeFoodRefreshPending){homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);homeFoodRefreshHandler.postDelayed(homeFoodRefresh,80);}
+        }
+        if(advisorAttached()){
+            View calendar=content.findViewWithTag("home_calendar");
+            boolean expanded=calendar instanceof HomeCalendarView&&((HomeCalendarView)calendar).canCollapse();
+            boolean eligible=currentTab==0&&aiAnalysisEnabled()&&!expanded&&!navPeerActive
+                    &&activeGlassDialogCount==0&&activeOverlay==null&&!mediaPreviewActive()&&foodProcessing==null
+                    &&editingMediaItems.isEmpty()&&(pageCrossfade==null||!pageCrossfade.active())
+                    &&!containsRawPoint(navHost,event.getRawX(),event.getRawY())
+                    &&!(fab.getVisibility()==View.VISIBLE&&containsRawPoint(fab,event.getRawX(),event.getRawY()))
+                    &&!(manualFoodButton.getVisibility()==View.VISIBLE&&containsRawPoint(manualFoodButton,event.getRawX(),event.getRawY()));
+            if(advisorPager.handle(event,eligible,()->{
+                MotionEvent cancelled=MotionEvent.obtain(event);cancelled.setAction(MotionEvent.ACTION_CANCEL);
+                super.dispatchTouchEvent(cancelled);cancelled.recycle();clearPeerPointer();clearHomeCollapseGesture();
+            }))return true;
         }
         if (dispatchPeerSwipe(event)) return true;
         if (dispatchHomeCalendarCollapse(event)) return true;
@@ -1012,7 +1110,7 @@ public class MainActivity extends Activity {
         if(action==MotionEvent.ACTION_DOWN){
             if(!containsRawPoint(navHost,event.getRawX(),event.getRawY()))cancelPendingNavClick();
             peerSwallow=false;clearPeerPointer();
-            if(!rootPagesVisible()||bookOpeningOverlay!=null||inPhotoViewer||inBookDetail||inStickerGalleryPage||inAiAnalysisPage||activeOverlay!=null||photoOverlay!=null||aiPreviewOverlay!=null||foodProcessing!=null||!editingMediaItems.isEmpty()||activeGlassDialogCount>0||!containsRawPoint(content,event.getRawX(),event.getRawY())
+            if(navPageTransition||advisorPager!=null&&advisorPager.interacting()||!rootPagesVisible()||bookOpeningOverlay!=null||inPhotoViewer||inBookDetail||inStickerGalleryPage||inAiAnalysisPage||activeOverlay!=null||photoOverlay!=null||aiPreviewOverlay!=null||foodProcessing!=null||!editingMediaItems.isEmpty()||activeGlassDialogCount>0||!containsRawPoint(content,event.getRawX(),event.getRawY())
                     ||containsRawPoint(navHost,event.getRawX(),event.getRawY())
                     ||fab!=null&&fab.isClickable()&&containsRawPoint(fab,event.getRawX(),event.getRawY())
                     ||manualFoodButton!=null&&manualFoodButton.getVisibility()==View.VISIBLE&&containsRawPoint(manualFoodButton,event.getRawX(),event.getRawY()))return false;
@@ -1057,10 +1155,7 @@ public class MainActivity extends Activity {
         if(peerTracker!=null){peerTracker.recycle();peerTracker=null;}
         peerTracking=peerDragging=peerExisting=false;peerPointer=-1;
     }
-    private boolean mainPeerVisible(){
-        if(content==null||content.getChildCount()==0)return false;
-        Object tag=content.getChildAt(0).getTag();return tag!=null&&tag.toString().startsWith("main_peer_");
-    }
+    private boolean mainPeerVisible(){return rootPagesVisible();}
     private boolean nestedHorizontalAt(View view,float x,float y,int direction){
         if(view.getVisibility()!=View.VISIBLE||!containsRawPoint(view,x,y))return false;
         if(view instanceof TodayDayPager||view instanceof HomeCalendarView
@@ -1215,8 +1310,8 @@ public class MainActivity extends Activity {
             return;
         }
         final String date = homeDate();
-        final String[] keys = {"breakfast", "lunch", "dinner"};
-        showChoiceDialog("添加图片", new String[]{"早餐", "午餐", "晚餐"}, 0, new ChoiceHandler() {
+        final String[] keys = entryMealKeys();
+        showChoiceDialog("添加图片", entryMealTitles(), 0, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 if (which < 0 || which >= keys.length || pendingSharedStickerUri == null) {
@@ -1259,11 +1354,7 @@ public class MainActivity extends Activity {
                         return;
                     }
                     if (index == 0 && currentTab == 0 && !inStickerGalleryPage && !inBookDetail && !inPhotoViewer) {
-                        if (aiAnalysisEnabled()) {
-                            toggleAiAnalysisPage();
-                        } else if (inAiAnalysisPage) {
-                            closeAiAnalysisPage();
-                        }
+                        if(inAiAnalysisPage)closeAiAnalysisPage();
                         return;
                     }
                     requestTabFromNav(index);
@@ -1430,6 +1521,7 @@ public class MainActivity extends Activity {
         if(tab==2){homeCalendarExpanded=true;showTab(0,animated);return;}
         final int oldTab = currentTab;
         final boolean peer=mainPeerVisible();
+        final boolean advisorExit=advisorVisible();
         clearPeerPointer();
         if (animated && tab == oldTab) {
             return;
@@ -1448,6 +1540,7 @@ public class MainActivity extends Activity {
         inFavoriteRecordsPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
+        inMealManagementPage = false;
         inApiOfficialSitesPage = false;
         inStickerGalleryPage = false;
         inAiAnalysisPage = false;
@@ -1493,11 +1586,40 @@ public class MainActivity extends Activity {
                 }
             }
         };
+        if(advisorExit&&restorePreferences||navPageTransition){
+            slideTabFromAdvisor(render,direction,tab);return;
+        }
         if(peer&&rootPagesVisible()&&(pageCrossfade==null||!pageCrossfade.active())&&!restorePreferences){
             if(pageCrossfade!=null&&pageCrossfade.active())pageCrossfade.clear();
+            if(advisorPager!=null)advisorPager.stopForRootNavigation();
             rootPager.select(rootIndex(tab),true);
         }else smoothContentSwap(render,direction);
     }
+    /** Keep the retained advisor sheet and the pill on the same horizontal clock. */
+    private void slideTabFromAdvisor(Runnable render,float direction,int tab){
+        final long[] generation={0};
+        final float[] origin={0,0};
+        cancelPendingNavIndicatorLayout();navIndicator.animate().cancel();
+        smoothContentSwap(render,direction,false,new PageCrossfade.ProgressListener(){
+            public void onStart(){
+                generation[0]=++navPageTransitionGeneration;
+                origin[0]=navIndicator.getTranslationX();origin[1]=navIndicator.getWidth()*navIndicator.getScaleX();
+                navPageTransition=true;navPeerActive=true;
+            }
+            public void onProgress(float movement){
+                if(generation[0]!=navPageTransitionGeneration)return;
+                navPageTransition=true;navPeerActive=true;
+                navIndicator.setVisibility(View.VISIBLE);navIndicator.setPivotX(0);
+                navIndicator.setTranslationX(lerp(origin[0],navItemX(tab),movement));
+                navIndicator.setScaleX(lerp(origin[1],navItemWidth(tab),movement)/Math.max(1,navIndicator.getWidth()));
+            }
+            public void onEnd(){
+                if(generation[0]!=navPageTransitionGeneration)return;
+                navPageTransition=false;navIndicator.setScaleX(1);finishPeerIndicator(effectiveNavTab());resumeDeferredRootRefresh();
+                    }
+        });
+    }
+
     private boolean navHapticEnabled() {
         return profile == null || profile.optBoolean("navHaptic", true);
     }
@@ -1622,12 +1744,15 @@ public class MainActivity extends Activity {
     }
 
     private void smoothContentSwap(final Runnable renderAction, final float direction,boolean gentle) {
+        smoothContentSwap(renderAction,direction,gentle,null);
+    }
+    private void smoothContentSwap(final Runnable renderAction, final float direction,boolean gentle,PageCrossfade.ProgressListener progress) {
         photoViewerGeneration++;
-        if(direction<0&&afterReturnFeedback(()->smoothContentSwap(renderAction,direction,gentle)))return;
+        if(progress==null&&direction<0&&afterReturnFeedback(()->smoothContentSwap(renderAction,direction,gentle,progress)))return;
         cancelReturnFeedback();
         cancelPendingBookClose();if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();cancelThemeModeTransition();
         cancelPendingNavClick();if(rootPagesVisible()){preservePendingHomeReturn();rootPager.freeze();}
-        if(navPeerActive){
+        if(navPeerActive&&progress==null){
             clearPeerPointer();
             finishPeerIndicator(effectiveNavTab());
         }
@@ -1639,11 +1764,12 @@ public class MainActivity extends Activity {
             boolean previous=suppressEntryAnimation,previousReturn=cachedRootReturn;
             suppressEntryAnimation=true;cachedRootReturn=direction<0;
             try{renderAction.run();}finally{suppressEntryAnimation=previous;cachedRootReturn=previousReturn;}
-        },direction,gentle);
+        },direction,gentle,progress);
     }
     private void softContentSwap(final Runnable renderAction) { smoothContentSwap(renderAction,1f); }
 
     private void renderCurrent() {
+        if(advisorPager!=null){advisorPager=null;}
         photoViewerGeneration++;
         // Clean Me/books roots are already laid out. Reusing them avoids rebuilding
         // three pages on Back. Today is rebuilt because detached media owns its decode lifecycle.
@@ -1661,7 +1787,7 @@ public class MainActivity extends Activity {
         calendarCardHost=null;calendarCardView=null;calendarSummaryView=null;
         root.setBackground(pageBackground());if(rootPager!=null)rootPager.freeze();content.removeAllViews();
         if(currentTab==2){currentTab=0;homeCalendarExpanded=true;}
-        if(reuse){content.addView(rootPager,new FrameLayout.LayoutParams(-1,-1));rootPager.select(rootIndex(currentTab),false);}
+        if(reuse){advisorPager=rootPager.page(0) instanceof AdvisorPager?(AdvisorPager)rootPager.page(0):null;content.addView(rootPager,new FrameLayout.LayoutParams(-1,-1));rootPager.select(rootIndex(currentTab),false);}
         else installRootPages();
     }
 
@@ -1778,7 +1904,7 @@ public class MainActivity extends Activity {
         if (inHintManagerPage || inVibrationPage || inStickerSettingsPage
                  || inNotebookSettingsPage || inDataSecurityPage
                 || inCloudSyncPage || inRecycleBinPage
-                || inInterfaceLayoutPage || inMoreSettingsPage || inSmartAssistantPage) {
+                || inInterfaceLayoutPage || inMoreSettingsPage || inMealManagementPage || inSmartAssistantPage) {
             content.animate().cancel();
             smoothContentSwap(new Runnable() {
                 @Override
@@ -1803,6 +1929,7 @@ public class MainActivity extends Activity {
         inFavoriteRecordsPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
+        inMealManagementPage = false;
         inSmartAssistantPage = false;
         inApiOfficialSitesPage = false;
     }
@@ -1813,7 +1940,7 @@ public class MainActivity extends Activity {
                  && !inNotebookSettingsPage
                 && !inDataSecurityPage && !inCloudSyncPage && !inRecycleBinPage
 
-                && !inInterfaceLayoutPage && !inMoreSettingsPage && !inSmartAssistantPage
+                && !inInterfaceLayoutPage && !inMoreSettingsPage && !inMealManagementPage && !inSmartAssistantPage
                 && !inApiOfficialSitesPage;
     }
 
@@ -1863,7 +1990,7 @@ public class MainActivity extends Activity {
                 && !inPreferencesPage && !inThemeSettingsPage && !inProfileSettingsPage;
         fab.animate().alpha(show ? 1f : 0f).scaleX(show ? 1f : .8f).scaleY(show ? 1f : .8f).setDuration(160).start();
         fab.setClickable(show);
-        if (show) { fab.bringToFront();updatePhotoFabState(false);fab.setOnClickListener(v -> chooseMealForPhoto()); }
+        if (show) { fab.setVisibility(View.VISIBLE);fab.bringToFront();updatePhotoFabState(false);fab.setOnClickListener(v -> chooseMealForPhoto()); }
         else fab.setOnClickListener(null);
         if (manualFoodButton != null) {
             manualFoodButton.setVisibility(show ? View.VISIBLE : View.GONE);
@@ -1978,8 +2105,6 @@ public class MainActivity extends Activity {
         TextView energy = label(calorieLabel + (target > 0 ? " / " + target : "") + " kcal", 34, UiTokens.ink(nightDecoration()), false);
         energy.setTag("today_energy");energy.setMinHeight(dp(48));energy.setPadding(0,0,0,dp(4));energy.setContentDescription((hasEntries&&!energyKnown?"营养数据尚未补充，不代表零摄入":"当日已记录热量 " + calories + " 千卡") + (target > 0 ? "，目标 " + target + " 千卡" : "，未设置个人目标"));
         energy.setOnClickListener(v -> {retainHomeFoodDate(date);foodUi().dayNutrition(date);});summary.addView(energy);
-        String source = day != null && day.optBoolean("manualCaloriesOverride") ? "手动热量优先" : NutritionStore.totals(day).optInt("count") > 0 ? "AI 估算 · 点食物查看详情" : day != null && day.optInt("calories") > 0 ? "旧版热量记录" : hasEntries?"餐食已收好 · 热量待补充":"留下今天的第一份美味";
-        if(hasEntries||energyKnown){TextView hint = label(source,12,UiTokens.secondary(nightDecoration()),false);hint.setPadding(0,0,0,dp(12));summary.addView(hint);}
         LinearLayout.LayoutParams summaryLp=new LinearLayout.LayoutParams(-1,-2);
         summaryLp.rightMargin=-dp(TodayPaperView.CONTENT_INSET+JournalActionIcon.TRAILING_INSET-TodayPaperView.RULE_INSET);
         paper.addView(summary,0,summaryLp);
@@ -2002,7 +2127,17 @@ public class MainActivity extends Activity {
             public String holiday(String key){return holidayLabel(key);}
         });
         calendar.setDatePickedDuringExpansion(homeCalendarPickedDuringExpansion);
-        calendar.setPalette(accent,accentSoft);return calendar;
+        calendar.setPalette(accent,accentSoft);
+        int goal=Math.max(0,profile.optInt("dailyCalorieGoal"));
+        HashMap<String,Integer> calorieDays=new HashMap<>();
+        if(goal>0){
+            java.util.Iterator<String> dates=days.keys();
+            while(dates.hasNext()){
+                String key=dates.next();int calories=FoodUi.displayCalories(days.optJSONObject(key));
+                if(calories>0)calorieDays.put(key,calories);
+            }
+        }
+        calendar.setCalorieProgress(goal,calorieDays);return calendar;
     }
 
     private void retainHomeFoodDate(String date) {
@@ -2011,6 +2146,7 @@ public class MainActivity extends Activity {
     }
 
     private void syncHomeVisibleDate(Calendar picked) {
+        if(root!=null){root.removeCallbacks(refreshAdvisorPage);root.postDelayed(refreshAdvisorPage,80);}
         homeDateKey=dateKey(picked);todayWeekAnchor=(Calendar)picked.clone();todayWeekSelection=homeDateKey;
         View calendar=content==null?null:content.findViewWithTag("home_calendar");
         if(calendar instanceof HomeCalendarView){
@@ -2045,9 +2181,7 @@ public class MainActivity extends Activity {
     private void manageDayRecords(final String date) {
         JSONObject day=days.optJSONObject(date);
         final List<MealOption> meals=visibleMealsForDay(day==null?new JSONObject():day);
-        // Night meals can be added before a day contains its first snack record.
-        // Keep this UI choice independent of the legacy three-meal preference.
-        addMealIfMissing(meals,"snack");sortMeals(meals);
+        if(nightSnackEnabled())addMealIfMissing(meals,"snack");sortMeals(meals);
         String[] entries=new String[meals.size()];
         for(int i=0;i<meals.size();i++)entries[i]="编辑"+meals.get(i).title+"记录";
         showChoiceDialog("管理今日记录",entries,-1,which->{
@@ -2215,6 +2349,8 @@ public class MainActivity extends Activity {
     }
 
     private void openAiAnalysisPage() {
+        if(!aiAnalysisEnabled())return;
+        if(currentTab==0&&advisorAttached()){advisorPager.select(true);return;}
         softContentSwap(new Runnable() {
             @Override
             public void run() {
@@ -2224,6 +2360,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeAiAnalysisPage() {
+        if(currentTab==0&&advisorAttached()){advisorPager.select(false);return;}
         if(content.findViewWithTag("ai_chat_read_only")!=null){smoothContentSwap(()->renderAiChatArchivePage(),-1f);return;}
         if(content.findViewWithTag("ai_chat_archive")!=null){smoothContentSwap(()->renderAiAnalysisPage(),-1f);return;}
         smoothContentSwap(new Runnable() {
@@ -2237,6 +2374,9 @@ public class MainActivity extends Activity {
     }
 
     private void renderAiAnalysisPage() {
+        if(currentTab==0&&aiAnalysisEnabled()){
+            renderCurrent();if(advisorPager!=null)advisorPager.showAdvisorImmediately();return;
+        }
         exitMediaEditMode(false);
         inPreferencesPage = false;
         inHintManagerPage = false;
@@ -2252,10 +2392,12 @@ public class MainActivity extends Activity {
         updateFab();
         content.removeAllViews();
 
+        content.addView(buildAiAnalysisRoot(false),new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private View buildAiAnalysisRoot(boolean preview) {
         FrameLayout host = new FrameLayout(this);
-        disableForceDark(host);
-        content.addView(host, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        host.setTag("advisor_page");disableForceDark(host);
         ScrollView scroll = pageScroll();
         aiAnalysisScrollView = scroll;
         scroll.setClipToPadding(false);
@@ -2265,7 +2407,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout header = row(Gravity.CENTER_VERTICAL);
-        if(currentTab==3){
+        if(currentTab==3&&!preview){
             TextView back=label("‹",38,Color.rgb(34,34,34),true);back.setGravity(Gravity.CENTER);
             back.setBackground(surfaceRound(dp(25)));back.setContentDescription("返回我");attachPressAnimation(back);
             back.setOnClickListener(v->closeAiAnalysisPage());header.addView(back,new LinearLayout.LayoutParams(dp(52),dp(52)));
@@ -2330,7 +2472,7 @@ public class MainActivity extends Activity {
             showAiAnalysisText(cached, false);
         } else if (aiAutoAnalysisEnabled()) {
             showAiAnalysisText("餐饮分析正在看今天吃了什么...", true);
-            requestAiAnalysis(date, false);
+            if(!preview)requestAiAnalysis(date, false);
         } else {
             showAiAnalysisText("今天的记录有变化，点一下下面按钮，我再帮你看看。", false);
         }
@@ -2355,7 +2497,8 @@ public class MainActivity extends Activity {
 
         page.addView(space(dp(230)));
         addAiChatBar(host);
-        animateIn(page);
+        if(!preview)animateIn(page);
+        return host;
     }
 
     private void openAiChatArchivePage() {
@@ -2548,9 +2691,10 @@ public class MainActivity extends Activity {
         lp.gravity = Gravity.BOTTOM;
         lp.leftMargin = dp(14);
         lp.rightMargin = dp(14);
-        lp.bottomMargin = dp(12);
+        int chatBottom=dp(photoFabBottomMargin());
+        lp.bottomMargin = chatBottom;
         host.addView(bar, lp);
-        attachKeyboardLift(host, bar, dp(12));
+        attachKeyboardLift(host, bar, chatBottom);
     }
 
     private View aiProfileAvatarButton() {
@@ -2578,12 +2722,16 @@ public class MainActivity extends Activity {
 
     private void attachKeyboardLift(final FrameLayout host,final View bar,final int baseBottom){
         final ScrollView scrollOwner=aiAnalysisScrollView;
-        final Rect visible=new Rect();final int[] hostLoc=new int[2];
+        final Rect visible=new Rect();final int[] rootLoc=new int[2];
         final Runnable adjust=()->{
             if(!host.isAttachedToWindow()||!bar.isAttachedToWindow())return;
-            host.getWindowVisibleDisplayFrame(visible);host.getLocationOnScreen(hostLoc);
-            int keyboardTop=visible.bottom-hostLoc[1],keyboard=Math.max(0,host.getHeight()-keyboardTop);
-            int target=keyboard>dp(120)?Math.max(baseBottom,host.getHeight()-keyboardTop-dp(4)):baseBottom;
+            if(root==null||root.getHeight()<=0||host.getHeight()<=0)return;
+            root.getWindowVisibleDisplayFrame(visible);root.getLocationOnScreen(rootLoc);
+            // A retained advisor is translated below Today. Its screen origin is not
+            // the window's keyboard boundary; only the stationary root owns occlusion.
+            int keyboard=Math.max(0,rootLoc[1]+root.getHeight()-visible.bottom);
+            int requested=keyboard>dp(120)?Math.max(baseBottom,keyboard+dp(4)):baseBottom;
+            int target=Math.min(requested,Math.max(baseBottom,host.getHeight()-bar.getHeight()-dp(8)));
             FrameLayout.LayoutParams lp=(FrameLayout.LayoutParams)bar.getLayoutParams();
             if(lp!=null&&Math.abs(lp.bottomMargin-target)>dp(1)){
                 lp.bottomMargin=target;bar.setLayoutParams(lp);bar.animate().cancel();
@@ -4422,8 +4570,8 @@ public class MainActivity extends Activity {
 
     private void chooseMealForText() {
         final String date=homeDate();
-        final String[] keys={"breakfast","lunch","dinner","snack"};
-        showChoiceDialog("手写餐食",new String[]{"早餐","午餐","晚餐","夜宵"},-1,which->{
+        final String[] keys=entryMealKeys();
+        showChoiceDialog("手写餐食",entryMealTitles(),-1,which->{
             if(which>=0&&which<keys.length)showManualMealTextEditor(date,keys[which]);
         });
     }
@@ -4491,8 +4639,8 @@ public class MainActivity extends Activity {
 
     private void chooseMealForPhoto() {
         final String date = homeDate();
-        final String[] keys = {"breakfast", "lunch", "dinner", "snack"};
-        showChoiceDialog("添加图片", new String[]{"早餐", "午餐", "晚餐", "夜宵"}, 0, new ChoiceHandler() {
+        final String[] keys = entryMealKeys();
+        showChoiceDialog("添加图片", entryMealTitles(), 0, new ChoiceHandler() {
             @Override
             public void onChoice(int which) {
                 if (which >= 0 && which < keys.length) {
@@ -4837,24 +4985,7 @@ public class MainActivity extends Activity {
 
 
     private int dayTotalCalories(JSONObject day) {
-        if (NutritionStore.totals(day).optInt("count") > 0) return FoodUi.displayCalories(day);
-        if (day == null) {
-            return 0;
-        }
-        if (day.optBoolean("manualCaloriesOverride", false)) {
-            int total = day.optInt("manualCaloriesTotal", 0);
-            if (total > 0) {
-                return total;
-            }
-            for (MealOption option : allMealOptions()) {
-                JSONObject meal = day.optJSONObject(option.key);
-                if (meal != null && !meal.optBoolean("skipped", false)) {
-                    total += Math.max(0, meal.optInt("manualCalories", 0));
-                }
-            }
-            return total;
-        }
-        return Math.max(0, day.optInt("calories", 0));
+        return FoodUi.displayCalories(day);
     }
 
     private int dayTotalCostCents(JSONObject day) {
@@ -4895,11 +5026,12 @@ public class MainActivity extends Activity {
     }
 
     private void showManualMealStatsDialog(final String date) {
-        final JSONObject day = ensureDay(date);
+        final JSONObject day = readJson(DATA_KEY).optJSONObject(date);
+        if (day == null) return;
         final List<MealOption> meals = new ArrayList<MealOption>();
-        for (MealOption option : visibleMealsForDate(date)) {
-            JSONObject meal = optObj(day, option.key);
-            if (!meal.optBoolean("skipped", false)) {
+        for (MealOption option : visibleMealsForDay(day)) {
+            JSONObject meal = day.optJSONObject(option.key);
+            if (meal == null || !meal.optBoolean("skipped", false)) {
                 meals.add(option);
             }
         }
@@ -4926,8 +5058,16 @@ public class MainActivity extends Activity {
             public void onClick(View v) {
                 boolean next = !favorite.isFavorite();
                 try {
-                    day.put("favorite", next);
-                    saveDays();
+                    // Favorite owns one field, never the dialog's older food/nutrition snapshot.
+                    synchronized (NutritionStore.LOCK) {
+                        JSONObject latest = readJson(DATA_KEY), current = latest.optJSONObject(date);
+                        if (current == null) return;
+                        current.put("favorite", next);
+                        if (!prefs.edit().putString(DATA_KEY, latest.toString()).commit()) {
+                            showGlassToast("收藏保存失败，请重试", Toast.LENGTH_SHORT);return;
+                        }
+                        days = latest;
+                    }
                     favorite.setFavorite(next);
                     favorite.animate().cancel();
                     favorite.setScaleX(0.88f);
@@ -4946,15 +5086,17 @@ public class MainActivity extends Activity {
         });
         titleRow.addView(favorite, new LinearLayout.LayoutParams(dp(44), dp(44)));
         box.addView(titleRow);
-        TextView subtitle = label(displayDate(date) + " · 手动热量会替代当天的 AI 估算", 14,
+        TextView subtitle = label(displayDate(date) + " · 同步识别热量，手填优先；清空恢复识别", 14,
                 Color.rgb(104, 108, 116), false);
         subtitle.setPadding(0, dp(7), 0, dp(10));
         box.addView(subtitle);
 
         final List<EditText> calorieInputs = new ArrayList<EditText>();
         final List<EditText> costInputs = new ArrayList<EditText>();
+        final boolean[] calorieEdited = new boolean[meals.size()], costEdited = new boolean[meals.size()];
+        final String[] syncedCalories = new String[meals.size()], syncedCosts = new String[meals.size()];
+        final boolean[] syncing = {false}, closed = {false};
         for (MealOption option : meals) {
-            JSONObject meal = optObj(day, option.key);
             TextView mealTitle = label(option.title, 16, Color.rgb(48, 50, 54), true);
             mealTitle.setPadding(dp(2), dp(8), 0, dp(2));
             box.addView(mealTitle);
@@ -4962,16 +5104,29 @@ public class MainActivity extends Activity {
             LinearLayout inputRow = row(Gravity.CENTER_VERTICAL);
             final EditText calorie = numberInput("热量 kcal");
             calorie.setInputType(InputType.TYPE_CLASS_NUMBER);
-            setNumberText(calorie, meal.optInt("manualCalories", 0));
+            calorie.setContentDescription(option.title + "热量，千卡；清空恢复识别值");
             calorie.setBackground(round(nightDecoration() ? Color.argb(122, 35, 37, 42)
                             : Color.argb(118, 255, 255, 255), dp(14), adjustAlpha(accent, 52), dp(1)));
             final EditText cost = numberInput("消费 元");
-            int storedCost = meal.optInt("mealCostCents", 0);
-            cost.setText(storedCost > 0 ? formatCostCents(storedCost) : "");
             cost.setBackground(round(nightDecoration() ? Color.argb(122, 35, 37, 42)
                             : Color.argb(118, 255, 255, 255), dp(14), adjustAlpha(accent, 52), dp(1)));
             calorieInputs.add(calorie);
             costInputs.add(cost);
+            final int index = calorieInputs.size() - 1;
+            calorie.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence s,int start,int count,int after) { }
+                public void onTextChanged(CharSequence s,int start,int before,int count) {
+                    if (!syncing[0]) calorieEdited[index] = !s.toString().equals(syncedCalories[index]);
+                }
+                public void afterTextChanged(Editable value) { }
+            });
+            cost.addTextChangedListener(new TextWatcher() {
+                public void beforeTextChanged(CharSequence s,int start,int count,int after) { }
+                public void onTextChanged(CharSequence s,int start,int before,int count) {
+                    if (!syncing[0]) costEdited[index] = !s.toString().equals(syncedCosts[index]);
+                }
+                public void afterTextChanged(Editable value) { }
+            });
             LinearLayout.LayoutParams calorieLp = new LinearLayout.LayoutParams(0, dp(46), 1);
             LinearLayout.LayoutParams costLp = new LinearLayout.LayoutParams(0, dp(46), 1);
             costLp.leftMargin = dp(10);
@@ -4995,37 +5150,59 @@ public class MainActivity extends Activity {
         save.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                int totalCalories = 0;
-                boolean hasManualCalories = false;
                 try {
+                    // Validate before changing the latest snapshot. Blank releases only this meal.
+                    final int[] enteredCalories = new int[meals.size()];
                     for (int i = 0; i < meals.size(); i++) {
-                        JSONObject meal = optObj(day, meals.get(i).key);
-                        int calories = Math.max(0, parseIntSafe(calorieInputs.get(i).getText().toString()));
-                        int costCents = parseCostCents(costInputs.get(i).getText().toString());
-                        if (calories > 0) {
-                            meal.put("manualCalories", calories);
-                            totalCalories += calories;
-                            hasManualCalories = true;
-                        } else {
-                            meal.remove("manualCalories");
-                        }
-                        if (costCents > 0) {
-                            meal.put("mealCostCents", costCents);
-                        } else {
-                            meal.remove("mealCostCents");
+                        if (!calorieEdited[i]) continue;
+                        String entered = calorieInputs.get(i).getText().toString().trim();
+                        try { enteredCalories[i] = entered.isEmpty() ? -1 : Integer.parseInt(entered); }
+                        catch (NumberFormatException invalid) { calorieInputs.get(i).setError("请填写有效整数，或清空恢复识别");return; }
+                        if (!entered.isEmpty() && enteredCalories[i] < 0) {
+                            calorieInputs.get(i).setError("热量不能小于0");return;
                         }
                     }
-                    if (hasManualCalories) {
-                        day.put("manualCaloriesOverride", true);
-                        day.put("manualCaloriesTotal", totalCalories);
-                        day.remove("calories");
-                        day.remove("calorieSignature");
-                        day.remove("caloriePending");
-                    } else {
-                        day.remove("manualCaloriesOverride");
-                        day.remove("manualCaloriesTotal");
+                    synchronized (NutritionStore.LOCK) {
+                        JSONObject latest = readJson(DATA_KEY), current = latest.optJSONObject(date);
+                        if (current == null) { showGlassToast("当天记录已删除，请重新打开", Toast.LENGTH_SHORT);return; }
+                        boolean changed = false, caloriesChanged = false;
+                        for (int i = 0; i < meals.size(); i++) {
+                            if (!calorieEdited[i] && !costEdited[i]) continue;
+                            String key = meals.get(i).key;JSONObject meal = current.optJSONObject(key);
+                            if (meal != null && meal.optBoolean("skipped") || meal == null && day.has(key)) {
+                                showGlassToast("餐次已变化，请重新打开后填写", Toast.LENGTH_SHORT);return;
+                            }
+                            if (meal == null) { meal = new JSONObject();current.put(key, meal); }
+                            if (calorieEdited[i]) {
+                                if (enteredCalories[i] >= 0) meal.put("manualCalories", enteredCalories[i]);
+                                else meal.remove("manualCalories");
+                                caloriesChanged = true;
+                            }
+                            if (costEdited[i]) {
+                                int costCents = parseCostCents(costInputs.get(i).getText().toString());
+                                if (costCents > 0) meal.put("mealCostCents", costCents);
+                                else meal.remove("mealCostCents");
+                            }
+                            changed = true;
+                        }
+                        if (caloriesChanged) {
+                            // Discard inactive legacy meal fields instead of reviving old edits.
+                            if (!current.optBoolean("manualCaloriesOverride")) {
+                                for (String key : NutritionStore.MEALS) {
+                                    JSONObject meal = current.optJSONObject(key);boolean edited = false;
+                                    for (int i = 0; i < meals.size(); i++) if (key.equals(meals.get(i).key) && calorieEdited[i]) edited = true;
+                                    if (meal != null && !edited) meal.remove("manualCalories");
+                                }
+                            }
+                            current.remove("manualCaloriesTotal");
+                            if (NutritionStore.hasManualMealCalories(current)) current.put("manualCaloriesOverride", true).put("manualCaloriesByMeal", true);
+                            else { current.remove("manualCaloriesOverride");current.remove("manualCaloriesByMeal"); }
+                        }
+                        if (changed && !prefs.edit().putString(DATA_KEY, latest.toString()).commit()) {
+                            showGlassToast("热量与消费保存失败，请重试", Toast.LENGTH_SHORT);return;
+                        }
+                        days = latest;
                     }
-                    saveDays();
                     dialog.dismiss();
                     rerenderPreservingScroll(new Runnable() {
                         @Override
@@ -5052,6 +5229,39 @@ public class MainActivity extends Activity {
         scroll.setFillViewport(false);
         scroll.addView(box, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        // Observe nutrition completion while open, without overwriting any user draft.
+        final Runnable syncFields = () -> {
+            if (closed[0]) return;
+            JSONObject current = readJson(DATA_KEY).optJSONObject(date);
+            syncing[0] = true;
+            try {
+                for (int i = 0; i < meals.size(); i++) {
+                    String key = meals.get(i).key;
+                    if (!calorieEdited[i]) {
+                        double value = NutritionStore.displayMealCalories(current, key);
+                        String text = Double.isFinite(value) ? Long.toString(Math.round(value)) : "";
+                        syncedCalories[i] = text;
+                        if (!text.equals(calorieInputs.get(i).getText().toString())) calorieInputs.get(i).setText(text);
+                    }
+                    if (!costEdited[i]) {
+                        JSONObject meal = current == null ? null : current.optJSONObject(key);
+                        int value = meal == null ? 0 : meal.optInt("mealCostCents");
+                        String text = value > 0 ? formatCostCents(value) : "";syncedCosts[i] = text;
+                        if (!text.equals(costInputs.get(i).getText().toString())) costInputs.get(i).setText(text);
+                    }
+                }
+                favorite.setFavorite(current != null && current.optBoolean("favorite"));
+                favorite.setContentDescription(favorite.isFavorite() ? "取消收藏这一天" : "收藏这一天");
+            } finally { syncing[0] = false; }
+        };
+        final SharedPreferences.OnSharedPreferenceChangeListener listener = (store,key) -> {
+            if (DATA_KEY.equals(key)) box.post(() -> { if (!closed[0] && dialog.isShowing()) syncFields.run(); });
+        };
+        box.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            public void onViewAttachedToWindow(View view) { prefs.registerOnSharedPreferenceChangeListener(listener);syncFields.run(); }
+            public void onViewDetachedFromWindow(View view) { closed[0] = true;prefs.unregisterOnSharedPreferenceChangeListener(listener); }
+        });
+        syncFields.run();
         showRoundedDialog(dialog, scroll);
         Window window = dialog.getWindow();
         if (window != null && meals.size() > 3) {
@@ -6144,7 +6354,12 @@ public class MainActivity extends Activity {
         host.addView(scroll, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        View meHeader=label("我",34,Color.rgb(28,28,30),true);
+        LinearLayout meHeader=row(Gravity.CENTER_VERTICAL);
+        meHeader.addView(label("我",34,Color.rgb(28,28,30),true),new LinearLayout.LayoutParams(0,-2,1));
+        themeModeButton=new ThemeModeIcon(this,nightDecoration());themeModeButton.setTag("theme_mode_toggle");
+        themeModeButton.setContentDescription(nightDecoration()?"切换日间模式":"切换夜间模式");
+        themeModeButton.setFocusable(true);themeModeButton.setOnClickListener(this::toggleThemeFromMe);
+        meHeader.addView(themeModeButton,new LinearLayout.LayoutParams(dp(48),dp(48)));
         installStickyHeader(host, scroll, page, meHeader);
 
         LinearLayout profileCard = row(Gravity.CENTER_VERTICAL);
@@ -6677,6 +6892,10 @@ public class MainActivity extends Activity {
 
     private void openMealReminderSettingsPage(){smoothContentSwap(()->renderMealReminderSettingsPage(),1f);}
 
+    private void openMealManagementPage(){smoothContentSwap(()->renderMealManagementPage(),1f);}
+
+    private void closeMealManagementPage(){smoothContentSwap(()->renderPreferencesPage(preferencesScrollY),-1f);}
+
     private void openHintManagerPage() {
         smoothContentSwap(new Runnable() {
             @Override
@@ -6893,6 +7112,7 @@ public class MainActivity extends Activity {
         inDataSecurityPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
+        inMealManagementPage = false;
         inSmartAssistantPage = false;
         inApiOfficialSitesPage = false;
         inUpdateLogPage = false;
@@ -6930,7 +7150,8 @@ public class MainActivity extends Activity {
             }
         }));
         page.addView(settingRow("三餐提醒",mealNotificationsEnabled()?"已开启 · "+mealNotificationTime("breakfastNotificationTime","08:00")+" / "+mealNotificationTime("lunchNotificationTime","12:00")+" / "+mealNotificationTime("dinnerNotificationTime","18:30"):"设置早餐、午餐和晚餐提醒", "@reminder",accent,v->openMealReminderSettingsPage()));
-
+        View meals=settingRow("餐次管理",nightSnackEnabled()?"三餐与夜宵 · 夜宵已开启":"三餐与夜宵 · 夜宵未开启","@dining",accent,v->openMealManagementPage());
+        meals.setTag("meal_management_entry");page.addView(meals);
         section(page, "照片与文案");
 
         page.addView(settingRow("照片查看", "原图背景 · " + photoBgTitle(), "@media", accent, new View.OnClickListener() {
@@ -6967,6 +7188,36 @@ public class MainActivity extends Activity {
         if (restoreScrollY <= 0) {
             animateIn(page);
         }
+    }
+
+    private void renderMealManagementPage() {
+        clearPreferencesSubPageFlags();
+        inPreferencesPage=true;
+        inMealManagementPage=true;
+        inBookDetail=false;
+        inPhotoViewer=false;
+        updateFab();
+        content.removeAllViews();
+        ScrollView scroll=pageScroll();
+        LinearLayout page=basePage();page.setTag("meal_management_page");
+        scroll.addView(page);content.addView(scroll);
+
+        LinearLayout top=row(Gravity.CENTER_VERTICAL);
+        TextView back=label("‹",38,Color.rgb(34,34,34),true);
+        back.setGravity(Gravity.CENTER);back.setBackground(surfaceRound(dp(25)));
+        back.setContentDescription("返回其他设置");attachPressAnimation(back);
+        back.setOnClickListener(v->closeMealManagementPage());
+        top.addView(back,new LinearLayout.LayoutParams(dp(52),dp(52)));
+        TextView title=label("餐次管理",30,Color.rgb(28,28,30),true);title.setPadding(dp(14),0,0,0);
+        top.addView(title,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1));
+        installStickyHeader(scroll,page,top);
+
+        section(page,"餐次");
+        View snack=settingsToggleRow("开启夜宵",nightSnackEnabled(),()->setProfileBoolean("nightSnackEnabled",!nightSnackEnabled()));
+        snack.setTag("night_snack_toggle");page.addView(snack);
+        TextView snackHint=label("开启后可添加夜宵；关闭仍保留已有夜宵记录。",13,UiTokens.secondary(nightDecoration()),false);
+        snackHint.setPadding(0,dp(8),0,dp(12));page.addView(snackHint);
+        page.addView(space(dp(120)));animateIn(page);
     }
 
     private void renderInterfaceLayoutPage() {
@@ -8405,19 +8656,21 @@ public class MainActivity extends Activity {
         }, "api-credential-cancel").start();
     }
 
-    private boolean removeSavedApiKey() {
+    /** -1: this dialog no longer owns the configuration, 0: local write failed, 1: saved. */
+    private int removeSavedApiKey(ApiCredentialPolicy.Snapshot expected, long expectedEpoch) {
         List<HttpURLConnection> cancelled;
         boolean persisted;
         synchronized (NutritionStore.LOCK) {
             JSONObject latest = PrivateProfileStore.read(this);
-            try { ApiCredentialPolicy.remove(latest); } catch (JSONException unavailable) { return false; }
+            if (expectedEpoch != apiCredentialEpoch || !ApiCredentialPolicy.sameAuthority(expected, latest)) return -1;
+            try { ApiCredentialPolicy.remove(latest); } catch (JSONException unavailable) { return -1; }
             profile = latest;
             cancelled = advanceApiCredentialEpochLocked();
             persisted = PrivateProfileStore.write(this, latest);
         }
         disconnectApiConnections(cancelled);
         FoodAnalysisJobService.recognitionSettingsChanged(this);
-        return persisted;
+        return persisted ? 1 : 0;
     }
 
     private final class ApiProbeSession {
@@ -8449,6 +8702,9 @@ public class MainActivity extends Activity {
     private void configureApi(final Runnable onSaved) {
         final AlertDialog dialog = new AlertDialog.Builder(this).create();
         final ApiProbeSession probeSession = new ApiProbeSession();
+        final ApiCredentialPolicy.Snapshot openingAuthority = ApiCredentialPolicy.capture(profile);
+        final AlertDialog[] deleteConfirmation = new AlertDialog[1];
+        final boolean[] removing = new boolean[]{false};
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(22), dp(20), dp(22), dp(18));
@@ -8480,16 +8736,40 @@ public class MainActivity extends Activity {
             removeKey.setTag("api_key_delete");removeKey.setPadding(dp(4), dp(8), dp(4), dp(8));
             removeKey.setMinHeight(dp(44));attachPressAnimation(removeKey);
             removeKey.setOnClickListener(v -> {
+                if (!dialog.isShowing() || !probeSession.current() || removing[0]
+                        || deleteConfirmation[0] != null) return;
                 removeKey.setEnabled(false);
-                boolean persisted = removeSavedApiKey();
-                keyInput.setText("");dialog.dismiss();
-                refreshRecognitionSettings();
-                showGlassToast(persisted ? "已删除 Key，并关闭依赖 API 的授权"
-                        : "本次会话已移除 Key，本机保存失败，请重试", Toast.LENGTH_LONG);
+                final AlertDialog confirm = PaperComponents.dialogBuilder(MainActivity.this, nightDecoration())
+                        .setTitle("删除 API 配置？")
+                        .setMessage("将删除已保存的 API Key、请求地址、模型与检测记录，并关闭依赖 API 的授权。已有餐食和营养记录会保留。")
+                        .setNegativeButton("取消", null).setPositiveButton("删除", null).create();
+                deleteConfirmation[0] = confirm;
+                confirm.setOnShowListener(shown -> {
+                    confirm.getWindow().getDecorView().setTag("api_key_delete_confirm");
+                    confirm.getButton(AlertDialog.BUTTON_NEGATIVE).setTag("api_key_delete_cancel");
+                    confirm.getButton(AlertDialog.BUTTON_POSITIVE).setTag("api_key_delete_apply");
+                    confirm.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(apply -> {
+                        if (!dialog.isShowing() || !probeSession.current() || removing[0]
+                                || deleteConfirmation[0] != confirm) { confirm.dismiss(); return; }
+                        removing[0] = true;confirm.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+                        int result = removeSavedApiKey(openingAuthority, probeSession.epoch);
+                        confirm.dismiss();keyInput.setText("");dialog.dismiss();
+                        refreshRecognitionSettings();
+                        showGlassToast(result > 0 ? "已删除 API 配置，并关闭依赖 API 的授权"
+                                : result == 0 ? "本次会话已移除 API 配置，本机保存失败，请重试"
+                                : "API 配置已改变，请重新打开后核对", Toast.LENGTH_LONG);
+                    });
+                });
+                confirm.setOnDismissListener(closed -> {
+                    if (deleteConfirmation[0] == confirm) deleteConfirmation[0] = null;
+                    if (dialog.isShowing() && !removing[0]) removeKey.setEnabled(true);
+                });
+                confirm.show();PaperComponents.styleDialog(confirm, nightDecoration());
             });
             box.addView(removeKey);
         }
         final EditText endpointInput = apiInput("HTTPS Chat Completions 完整地址");
+        endpointInput.setTag("api_endpoint_input");
         endpointInput.setText(apiEndpoint());
         box.addView(endpointInput);
         final String[] selectedModel = new String[]{apiModelName()};
@@ -8501,7 +8781,8 @@ public class MainActivity extends Activity {
         final String[] detectedEndpoint = new String[]{""};
         final boolean[] applyingDetectedEndpoint = new boolean[]{false};
         final TextView[] primaryAction = new TextView[1];
-        final TextView modelSelect = apiSelectBox(ApiModelPresentation.selection(apiModelName(),ApiModelPresentation.names(profile,apiEndpoint())));
+        final TextView modelSelect = apiSelectBox(apiModelName().isEmpty() ? "选择模型"
+                : ApiModelPresentation.selection(apiModelName(),ApiModelPresentation.names(profile,apiEndpoint())));
         modelSelect.setTag("api_model_select");
         modelSelect.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -8556,7 +8837,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 probeReady[0] = false;
-                modelSelect.setText(ApiModelPresentation.selection(selectedModel[0],
+                modelSelect.setText(selectedModel[0].isEmpty() ? "选择模型" : ApiModelPresentation.selection(selectedModel[0],
                     ApiModelPresentation.names(profile,endpointInput.getText().toString().trim())));
                 if (primaryAction[0] != null) {
                     primaryAction[0].setText("检测模型");
@@ -8720,6 +9001,7 @@ public class MainActivity extends Activity {
                 new View.OnAttachStateChangeListener() {
                     @Override public void onViewAttachedToWindow(View view) { }
                     @Override public void onViewDetachedFromWindow(View view) {
+                        if (deleteConfirmation[0] != null) deleteConfirmation[0].dismiss();
                         probeSession.close();keyInput.setText("");detectedKey[0] = "";
                         view.removeOnAttachStateChangeListener(this);
                     }
@@ -9894,12 +10176,12 @@ public class MainActivity extends Activity {
 
     private String apiEndpoint() {
         String endpoint = profile == null ? "" : profile.optString("apiEndpoint", "");
-        return endpoint.trim().length() == 0 ? "https://api.deepseek.com/chat/completions" : endpoint.trim();
+        return endpoint.trim();
     }
 
     private String apiModelName() {
         String model = profile == null ? "" : profile.optString("apiModel", "");
-        return model.trim().length() == 0 ? "deepseek-flash" : model.trim();
+        return model.trim();
     }
 
     private String apiModelMode() {
@@ -10687,6 +10969,10 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean nightSnackEnabled(){return profile.optBoolean("nightSnackEnabled",false);}
+    private String[] entryMealKeys(){return nightSnackEnabled()?new String[]{"breakfast","lunch","dinner","snack"}:DEFAULT_MEAL_KEYS.clone();}
+    private String[] entryMealTitles(){return nightSnackEnabled()?new String[]{"早餐","午餐","晚餐","夜宵"}:new String[]{"早餐","午餐","晚餐"};}
+
     private List<MealOption> activeMeals() {
         JSONArray arr = profile.optJSONArray("meals");
         if (arr == null || arr.length() == 0) {
@@ -10701,6 +10987,8 @@ public class MainActivity extends Activity {
                 result.add(meal);
             }
         }
+        if(nightSnackEnabled())addMealIfMissing(result,"snack");
+        else for(int i=result.size()-1;i>=0;i--)if("snack".equals(result.get(i).key))result.remove(i);
         sortMeals(result);
         if (result.isEmpty()) {
             result.add(new MealOption("breakfast", "早餐", 0));
@@ -11052,22 +11340,6 @@ public class MainActivity extends Activity {
                 }
             }));
         }
-
-        section(page,"显示");
-        page.addView(settingsToggleRow("夜间模式", nightDecoration(), new ToggleHandler() {
-            @Override
-            public boolean onToggle() {
-                beginThemeModeTransition();
-                boolean ok=setProfileBoolean("nightMode",!nightDecoration());
-                if(ok){
-                    applyNightModeOverride();applyDecoration();updateSystemBars();
-                    int y=themeModeTransitionScrollY;boolean previous=suppressEntryAnimation;suppressEntryAnimation=true;
-                    try{renderThemeSettingsPage();}finally{suppressEntryAnimation=previous;}
-                    restoreScrollPosition(currentPageScroll(),y);refreshCurrentThemeSurface();finishThemeModeTransition();
-                }else cancelThemeModeTransition();
-                return ok;
-            }
-        }));
 
         section(page, "界面疏密");
         page.addView(settingRow("界面疏密", layoutTitle(), "≡", accent, new View.OnClickListener() {
@@ -11429,6 +11701,54 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean hasUncapturableSurface(View view){
+        if(view.getVisibility()!=View.VISIBLE)return false;
+        if(view instanceof android.view.SurfaceView||view instanceof android.view.TextureView)return true;
+        if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++)if(hasUncapturableSurface(group.getChildAt(i)))return true;}
+        return false;
+    }
+
+    private void toggleThemeFromMe(View trigger){
+        if(circularThemeReveal!=null||currentTab!=3||!rootPagesVisible()||rootPager.isInteracting())return;
+        int scroll=currentContentScrollY();rememberRootHomeDestination();
+        final boolean fromNight=nightDecoration();
+        final View[] revealedButton={null};
+        Bitmap old=null;
+        if(ValueAnimator.areAnimatorsEnabled()&&root.getWidth()>0&&root.getHeight()>0
+                &&(long)root.getWidth()*root.getHeight()*4<=32L*1024*1024
+                &&(getWindow().getAttributes().flags&WindowManager.LayoutParams.FLAG_SECURE)==0&&!hasUncapturableSurface(root)){
+            float previousAlpha=trigger.getAlpha();
+            try{trigger.setAlpha(0);old=Bitmap.createBitmap(root.getWidth(),root.getHeight(),Bitmap.Config.ARGB_8888);root.draw(new Canvas(old));}
+            catch(OutOfMemoryError|RuntimeException unavailable){if(old!=null)old.recycle();old=null;}
+            finally{trigger.setAlpha(previousAlpha);}
+        }
+        if(old!=null){
+            int[] button=new int[2],layer=new int[2];trigger.getLocationInWindow(button);root.getLocationInWindow(layer);
+            final ThemeRevealView[] owner={null};
+            owner[0]=new ThemeRevealView(this,old,button[0]-layer[0]+trigger.getWidth()*.5f,button[1]-layer[1]+trigger.getHeight()*.5f,()->{
+                if(revealedButton[0]!=null)revealedButton[0].setAlpha(1);
+                if(circularThemeReveal==owner[0]){circularThemeReveal=null;resumeDeferredRootRefresh();}
+            });
+            owner[0].setIconTransition(fromNight,trigger.getWidth(),trigger.getHeight());
+            circularThemeReveal=owner[0];root.addView(circularThemeReveal,new FrameLayout.LayoutParams(-1,-1));
+        }
+        if(!setProfileBoolean("nightMode",!nightDecoration())){cancelThemeModeTransition();return;}
+        boolean previous=suppressEntryAnimation;suppressEntryAnimation=true;
+        try{applyNightModeOverride();applyDecoration();renderCurrent();refreshCurrentThemeSurface();restoreScrollPosition(currentPageScroll(),scroll);}
+        finally{suppressEntryAnimation=previous;}
+        final ThemeRevealView reveal=circularThemeReveal;
+        if(reveal!=null){
+            revealedButton[0]=themeModeButton;if(themeModeButton!=null)themeModeButton.setAlpha(0);
+            reveal.bringToFront();
+            root.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener(){public boolean onPreDraw(){
+                root.getViewTreeObserver().removeOnPreDrawListener(this);
+                if(circularThemeReveal==reveal){
+                    reveal.start();
+                }return true;
+            }});root.invalidate();
+        }
+    }
+
     private void beginThemeModeTransition() {
         themeModeTransitionScrollY = currentContentScrollY();
         if (!ValueAnimator.areAnimatorsEnabled() || root == null || root.getWidth() <= 0 || root.getHeight() <= 0) {
@@ -11480,6 +11800,7 @@ public class MainActivity extends Activity {
     }
 
     private void cancelThemeModeTransition() {
+        if(circularThemeReveal!=null)circularThemeReveal.finish();
         if (themeModeTransitionOverlay != null) {
             removeThemeModeTransitionOverlay(themeModeTransitionOverlay);
         }
@@ -16168,18 +16489,6 @@ public class MainActivity extends Activity {
             if (!p.has("calorieRecognition")) {
                 p.put("calorieRecognition", false);
             }
-            if (!p.has("apiEndpoint")) {
-                p.put("apiEndpoint", "https://api.deepseek.com/chat/completions");
-            }
-        if (!p.has("apiModel")) {
-            p.put("apiModel", "deepseek-flash");
-        }
-        if (!p.has("apiModels")) {
-            p.put("apiModels", new JSONArray());
-        }
-        if (!p.has("apiModelMode")) {
-            p.put("apiModelMode", "fast");
-        }
         if (!p.has("aiAnalysisEnabled")) {
             p.put("aiAnalysisEnabled", false);
         }
@@ -16223,9 +16532,6 @@ public class MainActivity extends Activity {
         }
         if (!p.has("aiBustCm")) {
             p.put("aiBustCm", 0);
-        }
-        if (!p.has("apiKey")) {
-            p.put("apiKey", "");
         }
             if (!p.has("photoCollection")) {
                 p.put("photoCollection", false);
@@ -17976,6 +18282,7 @@ public class MainActivity extends Activity {
     }
 
     private ScrollView findFirstScrollView(View view) {
+        if(view instanceof AdvisorPager)return findFirstScrollView(((AdvisorPager)view).selectedPage());
         if(view instanceof RootPagePager)return findFirstScrollView(((RootPagePager)view).selectedPage());
         if(view instanceof TodayDayPager)return findFirstScrollView(((TodayDayPager)view).currentPage());
         if (view instanceof ScrollView) {
@@ -20366,12 +20673,10 @@ public class MainActivity extends Activity {
             paint.setStrokeCap(Paint.Cap.ROUND);
             paint.setStyle(Paint.Style.FILL);
             if (favorite) {
-                int starTop = adjustAlpha(blendColor(accent, Color.WHITE,
-                        nightDecoration() ? 0.38f : 0.68f), nightDecoration() ? 228 : 234);
-                int starMiddle = adjustAlpha(blendColor(accent, Color.WHITE,
-                        nightDecoration() ? 0.24f : 0.52f), nightDecoration() ? 220 : 224);
-                int starBottom = adjustAlpha(blendColor(accent, Color.WHITE,
-                        nightDecoration() ? 0.12f : 0.38f), nightDecoration() ? 210 : 214);
+                int color = favoriteColor();
+                int starTop = blendColor(color, Color.WHITE, 0.16f);
+                int starMiddle = color;
+                int starBottom = blendColor(color, Color.BLACK, 0.06f);
                 paint.setShader(new LinearGradient(cx, cy - size * 0.30f, cx, cy + size * 0.30f,
                         new int[]{starTop, starMiddle, starBottom},
                         new float[]{0f, 0.50f, 1f}, Shader.TileMode.CLAMP));
@@ -20386,8 +20691,17 @@ public class MainActivity extends Activity {
             paint.setShader(null);
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(dp(1.8f));
-            paint.setColor(adjustAlpha(accent, nightDecoration() ? 190 : 166));
+            paint.setColor(favorite ? favoriteColor() : adjustAlpha(accent, nightDecoration() ? 190 : 166));
             canvas.drawPath(star, paint);
+        }
+
+        private int favoriteColor() {
+            String mode = profile.optString("decoration", "yellow");
+            if ("yellow".equals(mode)) return UiTokens.yellow();
+            float[] hsv = new float[3];Color.colorToHSV(accent, hsv);
+            hsv[1] = Math.min(0.85f, Math.max(hsv[1], "night".equals(mode) ? 0.36f : 0.62f));
+            hsv[2] = Math.max(hsv[2], nightDecoration() ? 0.88f : 0.78f);
+            return Color.HSVToColor(hsv);
         }
     }
 

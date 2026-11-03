@@ -1,9 +1,14 @@
 package com.eatrecord.app;
 
 import android.animation.ValueAnimator;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.content.Context;
 import android.os.Bundle;
 import android.graphics.Canvas;
+import android.graphics.DashPathEffect;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.view.Gravity;
@@ -18,6 +23,8 @@ import android.widget.TextView;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Locale;
+import java.util.Map;
+import java.util.HashMap;
 
 /** Three real pages: drag tracks the finger; release settles without replacing visible text. */
 public final class TodayWeekStrip extends FrameLayout {
@@ -41,9 +48,23 @@ public final class TodayWeekStrip extends FrameLayout {
     private float dayProgress;
     private boolean dayPreview;
     private String previewTargetWeek;
+    private String referenceMonth;
+    private final Map<String,Integer> calorieDays=new HashMap<>();
+    private int calorieGoal;
+    private boolean waterActive=true;
+    private int waterAccent,waterSoft;
+    private final Paint waterPaint=new Paint(Paint.ANTI_ALIAS_FLAG),waterLine=new Paint(Paint.ANTI_ALIAS_FLAG),bottleLine=new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final DashPathEffect bottleDash;
+    private final Path waterClip=new Path(),waterFill=new Path(),waterSurface=new Path();
+    private final RectF waterBounds=new RectF();
+    private ValueAnimator waterAnimator;
+    private float waterPhase,waterAmplitude;
+    private String waterDate,waterFromDate;
 
     public TodayWeekStrip(Context context,boolean night,Calendar selected,Calendar anchor,Listener listener){
         super(context);this.night=night;this.selected=(Calendar)selected.clone();this.start=(Calendar)anchor.clone();this.listener=listener;
+        waterAccent=UiTokens.ink(night);waterSoft=UiTokens.line(night);waterLine.setStyle(Paint.Style.STROKE);waterLine.setStrokeWidth(Math.max(1,dp(.65f)));
+        bottleLine.setStyle(Paint.Style.STROKE);bottleLine.setStrokeWidth(Math.max(1,dp(.75f)));bottleDash=new DashPathEffect(new float[]{dp(3),dp(3)},0);
         selectedKey=key(selected);selectedTag="today_week_day_"+selectedKey;dayMarker=PaperComponents.rounded(context,night);setWillNotDraw(false);
         spring = new GestureSpring(new GestureSpring.Listener() {
             public void onUpdate(float value) {
@@ -68,25 +89,57 @@ public final class TodayWeekStrip extends FrameLayout {
         rebuild();
     }
     private int dp(float n){return PaperComponents.dp(getContext(),n);}
+    private float px(float n){return n*getResources().getDisplayMetrics().density;}
     private String key(Calendar day){return new SimpleDateFormat("yyyy-MM-dd",Locale.ROOT).format(day.getTime());}
     public Calendar weekStart(){return (Calendar)start.clone();}
     public LinearLayout currentRow(){return pages[1];}
+    /** Read-only data supplied alongside the meal sheet; drawing never reads preferences. */
+    public void setCalorieProgress(int goal,Map<String,Integer> byDate){
+        calorieGoal=Math.max(0,goal);calorieDays.clear();
+        if(byDate!=null)for(Map.Entry<String,Integer> entry:byDate.entrySet())if(entry.getKey()!=null&&entry.getValue()!=null&&entry.getValue()>0)calorieDays.put(entry.getKey(),entry.getValue());
+        for(LinearLayout row:pages)for(int i=0;i<row.getChildCount();i++)updateWater((DayCell)row.getChildAt(i));
+        if(calorieGoal==0||!hasWater(waterDate))stopWaterMotion();invalidate();
+    }
+    public void setPalette(int accent,int accentSoft){waterAccent=accent;waterSoft=accentSoft;invalidate();}
+    /** The month calendar is a separate presentation and has no calorie bottles. */
+    public void setWaterActive(boolean active){if(waterActive==active)return;waterActive=active;if(!active)stopWaterMotion();invalidate();}
+    private final class DayCell extends TextView{
+        final String date,month;final boolean today;
+        final int weekday;
+        final float waveAmplitudeFactor,waveFrequencyFactor,wavePhaseOffset;
+        int calories;float waterLevel;
+        DayCell(String date,String text,boolean today,int weekday){
+            super(TodayWeekStrip.this.getContext());this.date=date;this.month=date.substring(0,7);this.today=today;this.weekday=weekday;
+            waveAmplitudeFactor=UiTokens.weekWaterAmplitude(weekday);waveFrequencyFactor=UiTokens.weekWaterFrequency(weekday);wavePhaseOffset=UiTokens.weekWaterPhase(weekday);
+            setText(text);setTextSize(AppTypography.sp(getContext(),14));setTextColor(UiTokens.ink(night));setTypeface(AppTypography.typeface(getContext(),false));setIncludeFontPadding(true);setLineSpacing(dp(2),1.04f);
+        }
+    }
+    private void updateWater(DayCell cell){
+        boolean outMonth=!cell.month.equals(referenceMonth);cell.setAlpha(outMonth?.43f:1f);
+        Integer value=calorieDays.get(cell.date);cell.calories=cell.isEnabled()&&value!=null?value:0;
+        cell.waterLevel=calorieGoal>0&&cell.calories>0?Math.min(1f,(float)cell.calories/calorieGoal):0;
+        cell.setContentDescription(cell.date+(outMonth?"，非本月":"")+(!cell.isEnabled()?"，未来日期不可选择":cell.isSelected()?"，已选择":"")
+            +(calorieGoal>0&&cell.calories>0?"，摄入"+cell.calories+"千卡，目标"+calorieGoal+"千卡":""));
+    }
     private void populateRow(int page){Calendar base=(Calendar)start.clone();base.add(Calendar.DATE,(page-1)*7);populateRow(page,base);}
     private void populateRow(int page,Calendar base){
         String today=key(Calendar.getInstance());String[] names={"一","二","三","四","五","六","日"};
             LinearLayout row=pages[page];row.removeAllViews();Calendar day=(Calendar)base.clone();
             for(int i=0;i<7;i++){
                 final Calendar picked=(Calendar)day.clone();String date=key(picked);boolean active=date.equals(selectedKey),future=date.compareTo(today)>0;
-                TextView cell=PaperComponents.text(getContext(),names[i]+"\n"+day.get(Calendar.DAY_OF_MONTH),14,UiTokens.ink(night),false);
+                DayCell cell=new DayCell(date,names[i]+"\n"+day.get(Calendar.DAY_OF_MONTH),date.equals(today),(picked.get(Calendar.DAY_OF_WEEK)+5)%7);
                 cell.getPaint().setFakeBoldText(active);
                 cell.setTag("today_week_day_"+date);cell.setGravity(Gravity.CENTER);cell.setPadding(0,dp(6),0,dp(6));cell.setMinHeight(dp(64));
-                cell.setAlpha(future?.3f:1f);cell.setEnabled(!future);cell.setSelected(active);
-                cell.setContentDescription(date+(future?"，未来日期不可选择":active?"，已选择":""));
-                cell.setOnClickListener(v->{if(!future&&listener!=null&&ownsRoot())listener.onDay((Calendar)picked.clone());});
+                cell.setEnabled(!future);cell.setSelected(active);
+                updateWater(cell);
+                cell.setOnClickListener(v->{if(!future&&listener!=null&&ownsRoot()){startWaterMotion(selectedKey,date,cell.weekday);listener.onDay((Calendar)picked.clone());}});
                 row.addView(cell,new LinearLayout.LayoutParams(0,-2,1));day.add(Calendar.DATE,1);
             }
     }
     private void rebuild(){
+        // The compact strip has no browsed-month heading. Its fading follows the
+        // real current month, never the diary's changing selected date.
+        referenceMonth=key(Calendar.getInstance()).substring(0,7);
         previewTargetWeek=null;
         for(int page=0;page<3;page++)populateRow(page);
         updateRangeDescription();positionPages();
@@ -117,6 +170,7 @@ public final class TodayWeekStrip extends FrameLayout {
                 alignWeek(from);previewTargetWeek=null;
             }
             previewFromStamp=from.getTimeInMillis();previewToStamp=to.getTimeInMillis();previewFromKey=key(from);previewToKey=key(to);
+            if(moving&&(!previewToKey.equals(waterDate)||!previewFromKey.equals(waterFromDate)))startWaterMotion(previewFromKey,previewToKey,(to.get(Calendar.DAY_OF_WEEK)+5)%7);
             previewFromTag="today_week_day_"+previewFromKey;previewToTag="today_week_day_"+previewToKey;previewWeekShift=HomeDayMotion.weekShift(from,to);
             rootResumePending=false;rootResumeVelocity=0;stopAnimation();
             if(!moving){
@@ -145,11 +199,14 @@ public final class TodayWeekStrip extends FrameLayout {
         for(LinearLayout page:pages)for(int i=0;i<page.getChildCount();i++){
             View cell=page.getChildAt(i);String tag=String.valueOf(cell.getTag()),date=tag.substring("today_week_day_".length());boolean active=date.equals(selectedKey);
             if(cell.isSelected()!=active){cell.setSelected(active);((TextView)cell).getPaint().setFakeBoldText(active);cell.invalidate();}
-            cell.setContentDescription(date+(!cell.isEnabled()?"，未来日期不可选择":active?"，已选择":""));
+            updateWater((DayCell)cell);
         }
     }
     @Override protected void onDraw(Canvas canvas){
         super.onDraw(canvas);selectionBounds.setEmpty();
+        // Draw the stationary date containers first. The moving selection marker
+        // keeps its existing solid paper surface and covers any crossing dashes.
+        if(waterActive&&calorieGoal>0)for(LinearLayout row:pages)for(int i=0;i<row.getChildCount();i++)drawBottle(canvas,row,(DayCell)row.getChildAt(i));
         for(LinearLayout row:pages){
             View from=row.findViewWithTag(dayPreview?previewFromTag:selectedTag);
             View to=dayPreview?row.findViewWithTag(previewToTag):null;
@@ -157,14 +214,74 @@ public final class TodayWeekStrip extends FrameLayout {
             else if(from!=null)drawMarker(canvas,row,from.getLeft(),from.getTop(),from.getWidth(),from.getHeight(),dayPreview?1-dayProgress:1);
             else if(to!=null)drawMarker(canvas,row,to.getLeft(),to.getTop(),to.getWidth(),to.getHeight(),dayProgress);
         }
+        if(waterActive&&calorieGoal>0)for(LinearLayout row:pages)for(int i=0;i<row.getChildCount();i++)drawWater(canvas,row,(DayCell)row.getChildAt(i));
     }
+    private void drawBottle(Canvas canvas,LinearLayout row,DayCell cell){
+        if(cell.isSelected()||cell.getWidth()<=0||cell.getHeight()<=0)return;
+        float left=row.getLeft()+row.getTranslationX()+cell.getLeft(),top=row.getTop()+cell.getTop();
+        if(left+cell.getWidth()<=0||left>=getWidth())return;
+        float inset=dp(1),width=cell.getWidth()-inset*2,height=cell.getHeight()-inset*2;
+        if(width<=0||height<=0)return;
+        waterBounds.set(left+inset,top+inset,left+inset+width,top+inset+height);float radius=Math.min(width,height)*.5f;
+        // Month membership dims the date label, not its progress container.
+        bottleLine.setColor(UiTokens.line(night));bottleLine.setAlpha(cell.today?190:160);
+        bottleLine.setPathEffect(cell.today?null:bottleDash);canvas.drawRoundRect(waterBounds,radius,radius,bottleLine);
+    }
+    private void drawWater(Canvas canvas,LinearLayout row,DayCell cell){
+        float level=cell.waterLevel;if(level<=0||cell.getWidth()<=0||cell.getHeight()<=0)return;
+        float left=row.getLeft()+row.getTranslationX()+cell.getLeft(),top=row.getTop()+cell.getTop();
+        if(left+cell.getWidth()<=0||left>=getWidth())return;
+        float inset=dp(1),width=cell.getWidth()-inset*2,height=cell.getHeight()-inset*2;
+        if(width<=0||height<=0)return;
+        waterBounds.set(left+inset,top+inset,left+inset+width,top+inset+height);float radius=Math.min(width,height)*.5f;
+        // Keep historical progress just as legible as this month's progress.
+        waterPaint.setColor(waterSoft);waterPaint.setAlpha(night?45:35);
+        if(level>=1){canvas.drawRoundRect(waterBounds,radius,radius,waterPaint);return;}
+        float room=height*Math.min(level,1-level),still=Math.min(px(UiTokens.WEEK_WATER_STATIC_DP),room*.4f);
+        boolean sloshing=cell.date.equals(waterDate);
+        float amplitude=sloshing?Math.min(px(UiTokens.WEEK_WATER_SLOSH_DP)*cell.waveAmplitudeFactor*waterAmplitude,room*.5f):0;
+        float baseline=waterBounds.bottom-height*level;
+        waterClip.reset();waterClip.addRoundRect(waterBounds,radius,radius,Path.Direction.CW);
+        waterFill.reset();waterSurface.reset();
+        for(int i=0;i<=24;i++){
+            float u=i/24f,x=waterBounds.left+width*u;
+            float y=baseline+still*(float)Math.sin(u*Math.PI*2)+amplitude*(float)Math.sin(u*Math.PI*2+waterPhase+cell.wavePhaseOffset);
+            if(i==0){waterFill.moveTo(x,y);waterSurface.moveTo(x,y);}else{waterFill.lineTo(x,y);waterSurface.lineTo(x,y);}
+        }
+        waterFill.lineTo(waterBounds.right,waterBounds.bottom);waterFill.lineTo(waterBounds.left,waterBounds.bottom);waterFill.close();
+        int clipped=canvas.save();canvas.clipPath(waterClip);canvas.drawPath(waterFill,waterPaint);
+        waterLine.setColor(waterAccent);waterLine.setAlpha(night?20:15);canvas.drawPath(waterSurface,waterLine);canvas.restoreToCount(clipped);
+    }
+    private boolean hasWater(String date){Integer calories=calorieDays.get(date);return calorieGoal>0&&calories!=null&&calories>0;}
+    private boolean canMoveWater(){return waterActive&&calorieGoal>0&&ownsRoot()&&isShown()&&getWindowVisibility()==VISIBLE&&ValueAnimator.areAnimatorsEnabled();}
+    private void startWaterMotion(String from,String to,int weekday){
+        if(!canMoveWater()||!hasWater(to)){stopWaterMotion();return;}
+        // Capture the displayed phase/amplitude so rapid taps do not reset the surface.
+        boolean sameTarget=to.equals(waterDate);
+        float phase=sameTarget?waterPhase:0,amplitude=sameTarget?waterAmplitude:0;
+        final float frequency=UiTokens.weekWaterFrequency(weekday);
+        cancelWaterAnimator();waterFromDate=from;waterDate=to;waterPhase=phase;waterAmplitude=amplitude;
+        final ValueAnimator animator=ValueAnimator.ofFloat(0,1);waterAnimator=animator;
+        animator.setDuration(UiTokens.WEEK_WATER_SLOSH_MS);animator.setInterpolator(new android.view.animation.LinearInterpolator());
+        animator.addUpdateListener(value->{
+            if(waterAnimator!=animator)return;
+            if(!canMoveWater()){stopWaterMotion();return;}
+            float t=(float)value.getAnimatedValue(),remaining=1-t;
+            waterPhase=phase+t*(float)(Math.PI*3)*frequency;
+            waterAmplitude=Math.min(1f,amplitude*remaining*remaining+1.6f*(float)Math.sin(Math.PI*t)*remaining);
+            invalidate();
+        });
+        animator.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator animation){if(waterAnimator==animator){waterAnimator=null;waterAmplitude=0;waterPhase=0;invalidate();}}});animator.start();
+    }
+    private void cancelWaterAnimator(){ValueAnimator previous=waterAnimator;waterAnimator=null;if(previous!=null)previous.cancel();}
+    private void stopWaterMotion(){cancelWaterAnimator();waterAmplitude=0;waterPhase=0;waterDate=waterFromDate=null;invalidate();}
     private void drawMarker(Canvas canvas,LinearLayout row,float x,float y,int width,int height,float opacity){
         if(width<=0||height<=0||opacity<=0)return;float left=row.getLeft()+row.getTranslationX()+x,top=row.getTop()+y;
         if(left+width<=0||left>=getWidth())return;
         dayMarker.setBounds(0,0,width,height);dayMarker.setAlpha(Math.round(255*opacity));int saved=canvas.save();canvas.translate(left,top);dayMarker.draw(canvas);canvas.restoreToCount(saved);dayMarker.setAlpha(255);
         if(opacity>=.5f)selectionBounds.set(left,top,left+width,top+height);
     }
-    @Override protected void onSizeChanged(int w,int h,int oldw,int oldh){super.onSizeChanged(w,h,oldw,oldh);if(w!=oldw){stopAnimation();offset=0;}positionPages();}
+    @Override protected void onSizeChanged(int w,int h,int oldw,int oldh){super.onSizeChanged(w,h,oldw,oldh);if(w!=oldw||h!=oldh)stopWaterMotion();if(w!=oldw){stopAnimation();offset=0;}positionPages();}
     private void commit(int direction){start.add(Calendar.DATE,direction*7);rebuild();if(listener!=null&&ownsRoot())listener.onWeek(weekStart());sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED);}
     private boolean ownsRoot(){return rootActive&&TodayDayPager.isLiveHierarchy(this);}
     void setRootActive(boolean active){
@@ -172,6 +289,7 @@ public final class TodayWeekStrip extends FrameLayout {
         rootActive=active;if(!active)pauseRootMotion();else resumeRootMotion();
     }
     private void pauseRootMotion(){
+        stopWaterMotion();
         boolean running=spring.isRunning();rootResumePending|=running||dragging;
         if(running)rootResumeVelocity=spring.velocity();
         stopAnimation();releaseTracker();dragging=false;cancelled=true;pointerId=-1;
@@ -200,8 +318,8 @@ public final class TodayWeekStrip extends FrameLayout {
     }
     private void instant(int direction){stopAnimation();offset=0;commit(direction);positionPages();}
     private void releaseTracker(){if(velocityTracker!=null){velocityTracker.recycle();velocityTracker=null;}}
-    @Override protected void onDetachedFromWindow(){rootResumePending=false;rootResumeVelocity=0;stopAnimation();releaseTracker();dragging=false;pointerId=-1;offset=0;positionPages();super.onDetachedFromWindow();}
-    @Override protected void onWindowVisibilityChanged(int visibility){super.onWindowVisibilityChanged(visibility);if(visibility!=VISIBLE&&spring!=null){rootResumePending=false;rootResumeVelocity=0;stopAnimation();releaseTracker();dragging=false;pointerId=-1;offset=0;positionPages();}}
+    @Override protected void onDetachedFromWindow(){stopWaterMotion();rootResumePending=false;rootResumeVelocity=0;stopAnimation();releaseTracker();dragging=false;pointerId=-1;offset=0;positionPages();super.onDetachedFromWindow();}
+    @Override protected void onWindowVisibilityChanged(int visibility){super.onWindowVisibilityChanged(visibility);if(visibility!=VISIBLE&&spring!=null){stopWaterMotion();rootResumePending=false;rootResumeVelocity=0;stopAnimation();releaseTracker();dragging=false;pointerId=-1;offset=0;positionPages();}}
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info){super.onInitializeAccessibilityNodeInfo(info);info.setScrollable(true);info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD);}
     @Override public boolean performAccessibilityAction(int action,Bundle args){
         if(!rootActive)return false;

@@ -1,17 +1,17 @@
 {
-    "versionCode":  184,
-    "versionName":  "0.6.0",
-    "apkUrl":  "https://github.com/CYNIC-CREEP/Eat_record/releases/download/v0.6.0/EatRecord-0.6.0.apk",
-    "apkPath":  "/lanzou/Myapp/eat record/0.6.0/apk/EatRecord-0.6.0.apk",
-    "sha256":  "1753a9754d06b5e29b850f0f8b1080a05ea01e3051ebd91d032509e76e9b0eed",
-    "apkSize":  121162865,
-    "notes":  [
-                  "• 统一餐纸与顶部日历联动，优化连续日期、主页面切换与底栏反馈",
-                  "• 记录本封面可打开和合拢，完善连续翻页、纸边与图片实时显示",
-                  "• 餐次直接输入，短文字上下居中且保持左对齐，长文字可滚动",
-                  "• 餐图通过自己的视觉API识别；保留本地抠图，移除实验性本机营养识别",
-                  "• API Key默认隐藏并可删除，凭据和授权不进入导出与云同步",
-                  "• 优化设置分类与返回，修复夜间顶栏灰影、图片返回闪烁及后台恢复跳图",
-                  "• 备份流式写入，恢复先校验再提交，失败回滚并支持中断恢复"
-              ]
+    "versionCode": 193,
+    "versionName": "0.6.1",
+    "apkUrl": "https://github.com/CYNIC-CREEP/Eat_record/releases/download/v0.6.1/EatRecord-0.6.1.apk",
+    "apkPath": "/lanzou/Myapp/eat record/0.6.1/apk/EatRecord-0.6.1.apk",
+    "sha256": "e308ab640f7a8ac718ab66526bfe1da7bee01c2bc66d2080c1c22bb9246750c7",
+    "apkSize": 121191537,
+    "notes": [
+        "• 默认新增只列三餐，夜宵可在餐次管理中开启，保留历史加餐记录",
+        "• 今日用力上滑进入已开启的营养师，优化底栏切页和添加按钮过渡",
+        "• 我页月亮／太阳切换日夜主题，正圆扩散配合轻柔边缘和连续图标变化",
+        "• 修整贴纸新增撤销、重做和轮廓开关，优化图片圆角与工具栏间距",
+        "• 周历淡色水位显示每日热量进度，历史水位可见，目标在原弹窗内编辑",
+        "• 记录本热量同步识别值并优先使用手填，收藏星标采用更鲜明的主题色",
+        "• 删除首页多余提示，删除API Key二次确认后同步清空地址和模型配置"
+    ]
 }

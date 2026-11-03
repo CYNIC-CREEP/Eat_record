@@ -13,6 +13,10 @@ const code = args.get("--code");
 const version = args.get("--version");
 const url = args.get("--url");
 
+if (!/^\d+\.\d+\.\d+$/.test(version ?? "")) {
+  throw new Error("Only stable releases may be published; Beta/prerelease upload is disabled.");
+}
+
 if (!apk || !existsSync(apk)) {
   throw new Error(`APK file does not exist: ${apk ?? ""}`);
 }

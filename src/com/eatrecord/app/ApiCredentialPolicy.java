@@ -22,7 +22,9 @@ public final class ApiCredentialPolicy {
     }
 
     public static void remove(JSONObject profile) throws JSONException {
-        profile.remove("apiKey");
+        for (String key : new String[]{"apiKey", "apiEndpoint", "apiModel", "apiModelMode", "apiModels",
+                "apiModelImageInputs", "apiModelImageInputsEndpoint", "apiModelDisplayNames",
+                "apiModelDisplayNamesEndpoint", "apiVisionSupported"}) profile.remove(key);
         for (String key : new String[]{"apiEnabled", "foodAutoAnalyze", "foodPhotoConsent",
                 "calorieRecognition", "aiAnalysisEnabled", "aiAutoAnalysis", "aiVisionEnabled",
                 "aiRecordAccess", "aiChatMemory"}) profile.put(key, false);
@@ -51,9 +53,14 @@ public final class ApiCredentialPolicy {
 
     public static Snapshot capture(JSONObject profile) { return new Snapshot(profile); }
 
-    public static boolean current(Snapshot started, JSONObject profile) {
-        return started != null && configured(profile) && started.generation == generation(profile)
+    /** Also covers a saved configuration that is currently disabled. */
+    public static boolean sameAuthority(Snapshot started, JSONObject profile) {
+        return started != null && profile != null && started.generation == generation(profile)
                 && started.matchesRequest(profile.optString("apiKey"), profile.optString("apiEndpoint"),
                         profile.optString("apiModel"));
+    }
+
+    public static boolean current(Snapshot started, JSONObject profile) {
+        return configured(profile) && sameAuthority(started, profile);
     }
 }

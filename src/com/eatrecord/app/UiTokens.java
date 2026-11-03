@@ -21,6 +21,16 @@ public final class UiTokens {
     public static final int PAGE_SHIFT_DP = 16;
     public static final int SOFT_PAGE_SWAP_MS = 360;
     public static final int PAGE_FLOW_MS = 480;
+    public static final int WEEK_WATER_SLOSH_MS = PAGE_FLOW_MS * 2;
+    public static final float WEEK_WATER_STATIC_DP = .5f;
+    public static final float WEEK_WATER_SLOSH_DP = 1.25f;
+    // Monday..Sunday: stable, restrained differences; idle water keeps one shape.
+    private static final float[] WEEK_WATER_AMPLITUDE={1f,.96f,1.06f,.98f,1.08f,.94f,1.02f};
+    private static final float[] WEEK_WATER_FREQUENCY={1f,1.03f,.98f,1.04f,.97f,1.01f,.99f};
+    private static final float[] WEEK_WATER_PHASE={-.12f,.08f,-.04f,.14f,-.09f,.03f,.11f};
+    static float weekWaterAmplitude(int weekday){return WEEK_WATER_AMPLITUDE[Math.floorMod(weekday,7)];}
+    static float weekWaterFrequency(int weekday){return WEEK_WATER_FREQUENCY[Math.floorMod(weekday,7)];}
+    static float weekWaterPhase(int weekday){return WEEK_WATER_PHASE[Math.floorMod(weekday,7)];}
     public static final int SOFT_PAGE_SHIFT_DP = 16;
     public static final int BOOK_OPEN_MS = 1000;
     public static final int BOOK_CLOSE_MS = 800;

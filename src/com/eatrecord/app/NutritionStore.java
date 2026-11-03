@@ -69,6 +69,33 @@ public final class NutritionStore {
         } catch (JSONException ignored) { }
         return total;
     }
+    /** Read-only meal projection. NaN means unknown, rather than a measured zero. */
+    public static double displayMealCalories(JSONObject day, String key) {
+        JSONObject meal = day == null ? null : day.optJSONObject(key);
+        if (meal == null || meal.optBoolean("skipped")) return Double.NaN;
+        if (day.optBoolean("manualCaloriesOverride") && meal.has("manualCalories")) {
+            double manual = meal.optDouble("manualCalories", Double.NaN);
+            if (Double.isFinite(manual) && manual >= 0) return manual;
+        }
+        JSONArray items = meal.optJSONArray("foodItems");
+        double total = 0; boolean known = false;
+        for (int i = 0; items != null && i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            JSONObject nutrients = item == null ? null : item.optJSONObject("nutrients");
+            if (item == null || !"completed".equals(item.optString("status")) || nutrients == null) continue;
+            double value = nutrients.optDouble("caloriesKcal", Double.NaN);
+            if (Double.isFinite(value) && value >= 0) { total += value; known = true; }
+        }
+        return known ? total : Double.NaN;
+    }
+    public static boolean hasManualMealCalories(JSONObject day) {
+        for (String key : MEALS) {
+            JSONObject meal = day == null ? null : day.optJSONObject(key);
+            if (meal != null && !meal.optBoolean("skipped") && meal.has("manualCalories")
+                    && meal.optDouble("manualCalories", -1) >= 0) return true;
+        }
+        return false;
+    }
     /** Preserve fresh worker results when an older UI snapshot is saved. Photos remain UI-owned. */
     public static void mergeLatest(JSONObject target, JSONObject latest) {
         JSONArray dates = target.names();

@@ -16,6 +16,7 @@ if ($ManifestText -notmatch 'android:versionName="([^"]+)"') {
     throw "android:versionName not found in $ManifestPath"
 }
 $Version = $Matches[1]
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Only stable releases may be published; Beta/prerelease upload is disabled.' }
 if ($ManifestText -notmatch 'android:versionCode="([^"]+)"') {
     throw "android:versionCode not found in $ManifestPath"
 }
