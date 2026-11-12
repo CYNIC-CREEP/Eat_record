@@ -160,7 +160,7 @@ git archive --format=zip --prefix=EatRecord-<versionName>/ --output=dist/EatReco
 
 - 脚本：`scripts/publish-openlist.ps1`；支持BaseUrl、RemoteRoot、ArtifactSuffix、SkipBuild及从OPENLIST_USERNAME/OPENLIST_PASSWORD环境变量读取管理员凭据。只记录变量名，不写真实值或带凭据命令。
 - 旧脚本默认管理端点仍为HTTP，不直接采用。2026-10-29已确认管理HTTPS入口为 `https://pan.freefeng.icu`，管理挂载根 `/lanzou/Myapp/eat record`，用户提供的本机管理凭据可用；应用只读账号base_path为 `/lanzou/Myapp`，其请求路径是 `/eat record`。登录域名相同不代表两类账号路径相同，不在文档/Git写入真实凭据。
-- 该脚本仍保留全工作目录压缩、复用旧notes、删除同名文件/退休字体及上传额外服务文件等旧行为，尚未实现下述安全流程，不能直接作为当前发布入口。最近0.6.1的安全辅助程序／证据位于被Git忽略的build/publish061，0.6.0历史实现位于build/publish060；两者仅属本机产物，新检出环境不能假定存在。不可不审查便复用脚本中的固定版本、暂存／备份名称或缓存路径。0.6.1执行证据见V061_PUBLISH_REPORT.md。
+- 该脚本仍保留全工作目录压缩、复用旧notes、删除同名文件/退休字体及上传额外服务文件等旧行为，尚未实现下述安全流程，不能直接作为当前发布入口。最近0.6.2的执行辅助程序／证据位于被Git忽略的build/publish062，0.6.1和0.6.0历史实现分别位于build/publish061和build/publish060；这些仅属本机产物，新检出环境不能假定存在。不可不审查便复用脚本中的固定版本、暂存／备份名称或缓存路径。0.6.2执行证据见V062_PUBLISH_REPORT.md，0.6.1历史证据见V061_PUBLISH_REPORT.md。
 - 当前流程：明确本版说明和server/update.json，保持dist/update.json字节一致；先上传到不参与版本扫描的临时目录，回下载核对APK/源码及必要文档，再启用正式版本目录。普通包可同时提供正式名和同字节-debug兼容文件名，后者用于目录扫描回退，不能使用QA包。
 - 最后切换共享教程与update.json：新文件先上传并校验，旧文件改名保留，再切换新文件；失败时恢复旧文件。只替换本版必要文档，不删除既有版本、字体或部署无关云服务。
 - 通过应用只读账号验证相对路径的清单与安装包；检查versionCode/versionName、notes、下载路径和实际字节。更新清单可保留旧绝对路径，由AppDownloadClient映射到只读目录，并提供已验证的GitHub附件作为回退。
