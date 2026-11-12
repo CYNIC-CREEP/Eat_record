@@ -1,27 +1,26 @@
 # 当前任务
 
-更新：2026-11-03（Asia/Shanghai），0.6.1/code193已人工验收并完成GitHub、OpenList与应用更新发布。
+更新于2026-11-12，Asia/Shanghai。用户已明确授权0.6.2向GitHub、OpenList及应用更新渠道发布，当前正在执行发布与完整下载校验。
 
-## 当前状态
+## 当前版本与分支
 
-- 用户明确回复“没问题了，上传吧”，本版授权已执行完毕，不自动延续到下一版本。
-- 发布提交8a0d15ded2190f7b6510cbbd4c824d48eca078b7，注释标签v0.6.1指向该提交；main和标签已原子推送。后续收尾仅文档，不移动标签／替换源码包。
-- GitHub正式Release已发布且为latest，非draft／prerelease；OpenList正式目录0.6.1已启用，应用只读清单为0.6.1/code193，server/update.json与dist/update.json一致。
+- 0.6.2/code202，main分支。发布前HEAD为8cc26c5，累计0.6.2源码、测试和交接文件正在整理为发布提交。
+- 发布包为dist/EatRecord-0.6.2.apk，121220209 bytes，SHA256为86d0061e7aded20eb2750aabc5b88f5797efdd6835d2e2c3ba773c9cb3da00cb。
+- server/update.json与dist/update.json已在本地准备为202，远端切换以发布验证结果为准。
 
-## 已完成
+## 已完成与当前进行
 
-- 发布Beta.1–8及最终修订：默认三餐／可选夜宵、纵向营养师及底栏／按钮过渡、正圆日夜切换、修整撤销／重做／轮廓预览、周历淡色水位及内联目标、API配置删除确认、首页提示移除、记录本各餐识别／手填热量实时同步及鲜明收藏色。
-- 使用手机已验收的同一APK，不重新编译；源码ZIP从发布提交git archive生成，排除签名、管理凭据、缓存和用户数据。41个累计文件已明确审查提交，无reset/clean或丢弃前轮工作。
-- GitHub草稿及正式公开下载、OpenList暂存两份APK／源码／文档、正式应用只读下载均按实际字节校验。根教程／清单旧版改名备份保留，不删除旧版本／字体或无关服务。
+液态底栏、根页跟手、通用方案A过渡及细边框修复已交付，构建、完整JVM、版本、签名及验包通过。发布沿用同一安装包字节。
 
-## 最终产物与证据
+正在创建并推送源码提交和标签，随后草稿附件与OpenList暂存文件完整回下载验证，最后切换正式更新清单。
 
-- dist/EatRecord-0.6.1.apk（与-debug.apk同字节），121191537 bytes，SHA256 e308ab640f7a8ac718ab66526bfe1da7bee01c2bc66d2080c1c22bb9246750c7。
-- dist/EatRecord-0.6.1-source.zip，51733432 bytes，SHA256 57d343e92168b6915f2468fb54d7ddbf78a91478b76bea48694495bdb14c8d55。
-- min26/target37、4模型／双ARM8库、依赖／许可／字体、QA隔离、包体预算与原证书v2/v3核对通过。用户免本轮模拟器／自动功能测试，已人工复查；发布不冒充新增功能回归。
-- 应用清单1101 bytes、7条本版说明，SHA256 de35f1a74b3ff18e2280c8700af5c782ed7d2dbb56384d17bc6dc68473cb97de；实际APK与GitHub回退URL均为0.6.1。
-- 详细发布提交／标签、附件、路径和摘要见V061_PUBLISH_REPORT.md；本地证据在忽略的build/publish061。功能交付见V061_DELIVERY_REPORT.md，历史Beta.1–8报告保留。
+## 验收与交接
 
-## 下一步与范围
+- 最终包的Android QA仅编译，交付时ADB无设备，新推广入口与大字体/RTL/短窗口、实际帧率仍待设备视觉验收。用户在获知该状态后授权本次发布。
+- 实现与测试见V062_DELIVERY_REPORT.md，接入范围见V062_BETA8_NAVIGATION_REPORT.md。当前发布证据保存于build/publish062。
+- 原页面状态、业务导航owner与有限字符串视觉来源契约见PROJECT_CONTEXT.md及DECISIONS.md。关闭开关为UiTokens.SETTINGS_CONTAINER_MOTION_ENABLED。
+- 本项目采用Java动态View、JNI与PowerShell，构建使用Python3.11并带-NoUpload。设备检测沿用ADB，QA夹具只用于独立设备。
 
-本次发布完成，等待用户后续任务。未修改旧0.5.26匿名HTTP更新接口，限制见V06_PUBLISH_REPORT.md；未新增付费API、系统备份传输或其他品牌设备验收。
+## 下一步
+
+完成两个发布渠道和应用只读更新入口的字节验证后，更新最终发布报告与本文件。

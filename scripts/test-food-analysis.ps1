@@ -45,6 +45,16 @@ $Cp="$JsonJar;$AndroidJar"
     (Join-Path $Root 'src\com\eatrecord\app\NotebookPageMotion.java') `
     (Join-Path $Root 'tests\NotebookPageMotionTest.java') `
     (Join-Path $Root 'src\com\eatrecord\app\RootPageMotion.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\BottomNavMotion.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\NavLensGeometry.java') `
+    (Join-Path $Root 'tests\TabMotionTest.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\SettingsTransitionMath.java') `
+    (Join-Path $Root 'tests\SettingsTransitionMathTest.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\SettingsContainerMath.java') `
+    (Join-Path $Root 'tests\SettingsContainerMathTest.java') `
+    (Join-Path $Root 'tests\SettingsContainerExperimentTest.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\NavigationTransitionHistory.java') `
+    (Join-Path $Root 'tests\NavigationTransitionHistoryTest.java') `
     (Join-Path $Root 'tests\RootPageMotionTest.java') `
     (Join-Path $Root 'tests\FoodRecordTextTest.java') `
     (Join-Path $Root 'tests\HomeCalendarDatesTest.java') `
@@ -63,6 +73,16 @@ $Cp="$JsonJar;$AndroidJar"
     (Join-Path $Root 'tests\ProfilePrivacyTest.java') `
     (Join-Path $Root 'tests\BackupReliabilityTest.java')
 if($LASTEXITCODE -ne 0){throw 'Food tests compilation failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.TabMotionTest
+if($LASTEXITCODE -ne 0){throw 'Tab motion tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.SettingsTransitionMathTest
+if($LASTEXITCODE -ne 0){throw 'Settings motion tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.SettingsContainerMathTest
+if($LASTEXITCODE -ne 0){throw 'Settings container transform math tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.SettingsContainerExperimentTest
+if($LASTEXITCODE -ne 0){throw 'Settings container A/B experiment tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.NavigationTransitionHistoryTest
+if($LASTEXITCODE -ne 0){throw 'Navigation transition origin tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.FoodAnalysisTest
 if($LASTEXITCODE -ne 0){throw 'Food contract tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.FoodSchedulingTest

@@ -1,17 +1,16 @@
 {
-    "versionCode": 193,
-    "versionName": "0.6.1",
-    "apkUrl": "https://github.com/CYNIC-CREEP/Eat_record/releases/download/v0.6.1/EatRecord-0.6.1.apk",
-    "apkPath": "/lanzou/Myapp/eat record/0.6.1/apk/EatRecord-0.6.1.apk",
-    "sha256": "e308ab640f7a8ac718ab66526bfe1da7bee01c2bc66d2080c1c22bb9246750c7",
-    "apkSize": 121191537,
+    "versionCode": 202,
+    "versionName": "0.6.2",
+    "apkUrl": "https://github.com/CYNIC-CREEP/Eat_record/releases/download/v0.6.2/EatRecord-0.6.2.apk",
+    "apkPath": "/lanzou/Myapp/eat record/0.6.2/apk/EatRecord-0.6.2.apk",
+    "sha256": "86d0061e7aded20eb2750aabc5b88f5797efdd6835d2e2c3ba773c9cb3da00cb",
+    "apkSize": 121220209,
     "notes": [
-        "• 默认新增只列三餐，夜宵可在餐次管理中开启，保留历史加餐记录",
-        "• 今日用力上滑进入已开启的营养师，优化底栏切页和添加按钮过渡",
-        "• 我页月亮／太阳切换日夜主题，正圆扩散配合轻柔边缘和连续图标变化",
-        "• 修整贴纸新增撤销、重做和轮廓开关，优化图片圆角与工具栏间距",
-        "• 周历淡色水位显示每日热量进度，历史水位可见，目标在原弹窗内编辑",
-        "• 记录本热量同步识别值并优先使用手填，收藏星标采用更鲜明的主题色",
-        "• 删除首页多余提示，删除API Key二次确认后同步清空地址和模型配置"
+        "• 优化液态底栏的连续滑动、按压膨胀、主题水滴色与柔和回弹",
+        "• 根页面保持横向跟手滑动，改善快速切换时的动画衔接",
+        "• 设置及适用列表子页面从来源选项展开，返回时收回原入口",
+        "• 协调子页面标题与正文交接，保留原有页面状态和滚动位置",
+        "• 修复夜间设置选项首次进入偏灰、返回变色及转场灰闪",
+        "• 统一容器动画细线边框，修复点击瞬间及返回末端描边加粗"
     ]
 }

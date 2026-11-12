@@ -348,6 +348,9 @@ public class MainActivity extends Activity {
     private FrameLayout content;
     private FrameLayout navHost;
     private View navIndicator;
+    private BottomNavIndicator bottomNavMotion;
+    private BottomNavLens bottomNavLens;
+    private BottomNavBackdrop bottomNavBackdrop;
     private ViewTreeObserver.OnPreDrawListener pendingNavIndicatorLayout,pendingNavClick;
     private long navClickGeneration;
     private int pendingNavTab=-1;
@@ -425,6 +428,8 @@ public class MainActivity extends Activity {
     }};
     private View themeModeButton;
     private PageCrossfade pageCrossfade;
+    private int mealMotionVariant=UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT;
+    private static final String EXTRA_MEAL_MOTION_VARIANT="meal_motion_variant";
     private boolean navPageTransition;
     private long navPageTransitionGeneration;
     private boolean cachedRootReturn,returnWorkExecuting;
@@ -515,6 +520,13 @@ public class MainActivity extends Activity {
     private static int rootIndex(int tab){return tab==0?0:tab==1?1:2;}
     private static int rootTab(int index){return index==2?3:index;}
     private void positionRootIndicator(float position){
+        if(UiTokens.NAV_LIQUID_MOTION_ENABLED){
+            if(rootPagesVisible()&&rootPager.isDragging()&&bottomNavMotion!=null){
+                int left=Math.max(0,Math.min(1,(int)Math.floor(position)));
+                bottomNavMotion.follow(rootTab(left),rootTab(left+1),position-left);
+            }
+            return;
+        }
         if(navPageTransition||!rootPagesVisible()||!rootPager.isInteracting()||navIndicator==null||navIndicator.getWidth()<=0||navBar.getWidth()<=0)return;
         if(!navPeerActive){cancelPendingNavIndicatorLayout();navIndicatorGeneration++;navIndicator.animate().cancel();navPeerActive=true;}
         int left=Math.min(1,(int)Math.floor(position)),right=left+1;float t=Math.max(0,Math.min(1,position-left));
@@ -544,14 +556,17 @@ public class MainActivity extends Activity {
                 if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;currentTab=rootTab(index);
                 inAiAnalysisPage=index==0&&advisorPager!=null&&!advisorPager.atToday();
                 if(navPageTransition){updateNav(false);updateFab();return;}
-                navPeerActive=true;updateNav(false);updateFab();
+                navPeerActive=true;updateNav(UiTokens.NAV_LIQUID_MOTION_ENABLED);updateFab();
             }
             public void onRest(int index){
                 if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;currentTab=rootTab(index);
                 if(index!=0&&advisorPager!=null)advisorPager.resetForRootExit();
                 inAiAnalysisPage=index==0&&advisorPager!=null&&!advisorPager.atToday();
                 if(navPageTransition){updateNav(false);updateFab();return;}
-                navPeerActive=false;navIndicator.setScaleX(1);updateNav(false);updateFab();finishPeerIndicator(effectiveNavTab());
+                navPeerActive=false;
+                if(UiTokens.NAV_LIQUID_MOTION_ENABLED)updateNav(true);
+                else{navIndicator.setScaleX(1);updateNav(false);finishPeerIndicator(effectiveNavTab());}
+                updateFab();
                 if(index==0&&advisorPager!=null)advisorPager.resumeVertical();
                 if(rootPagesDirty){root.removeCallbacks(refreshRootPages);root.postDelayed(refreshRootPages,120);}
             }
@@ -717,6 +732,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        readMealMotionVariant(getIntent());
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         preferSmoothDisplay();
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -752,7 +768,10 @@ public class MainActivity extends Activity {
         setContentView(root);
         installSystemBackCallback();
 
-        content = new FrameLayout(this);
+        content = new FrameLayout(this){
+            @Override public boolean onInterceptTouchEvent(MotionEvent event){return pageCrossfade!=null&&pageCrossfade.blocksIncomingInput()||super.onInterceptTouchEvent(event);}
+            @Override public boolean onTouchEvent(MotionEvent event){return pageCrossfade!=null&&pageCrossfade.blocksIncomingInput()||super.onTouchEvent(event);}
+        };
         content.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
             if((r-l!=or-ol||b-t!=ob-ot)&&navPeerActive) {
                 clearPeerPointer();
@@ -780,6 +799,11 @@ public class MainActivity extends Activity {
         navLp.bottomMargin = navOuterMargin;
         navLp.gravity = Gravity.BOTTOM;
         root.addView(navHost, navLp);
+        bottomNavBackdrop=new BottomNavBackdrop(this,navHost);
+        disableForceDark(bottomNavBackdrop);
+        bottomNavBackdrop.appearance(UiTokens.card(nightDecoration()),UiTokens.line(nightDecoration()),nightDecoration());
+        bottomNavBackdrop.setVisibility(UiTokens.NAV_LIQUID_MOTION_ENABLED?View.VISIBLE:View.GONE);
+        root.addView(bottomNavBackdrop,root.indexOfChild(navHost),new FrameLayout.LayoutParams(1,1));
 
         navIndicator = new View(this);
         navIndicator.setVisibility(View.INVISIBLE);
@@ -791,7 +815,7 @@ public class MainActivity extends Activity {
         navIndicatorLp.bottomMargin = dp(2);
         navHost.addView(navIndicator, navIndicatorLp);
 
-        navBar = new LinearLayout(this);
+        navBar = new BottomNavItems(this);
         disableForceDark(navBar);
         navBar.setOrientation(LinearLayout.HORIZONTAL);
         navBar.setGravity(Gravity.CENTER);
@@ -800,6 +824,28 @@ public class MainActivity extends Activity {
         });
         navHost.addView(navBar, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        navIndicator.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        bottomNavLens=new BottomNavLens(this,navBar,navHost);
+        disableForceDark(bottomNavLens);
+        bottomNavLens.setVisibility(UiTokens.NAV_LIQUID_MOTION_ENABLED?View.VISIBLE:View.GONE);
+        // A root sibling escapes only the nav's existing software-layer clip. The nav and slots do not move.
+        root.addView(bottomNavLens,new FrameLayout.LayoutParams(1,1));
+        navHost.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
+            FrameLayout.LayoutParams lensLp=(FrameLayout.LayoutParams)bottomNavLens.getLayoutParams();
+            int width=r-l+dp(32),height=b-t+dp(32),left=l-dp(16),top=t-dp(24);
+            if(lensLp.width!=width||lensLp.height!=height||lensLp.leftMargin!=left||lensLp.topMargin!=top){
+                lensLp.width=width;lensLp.height=height;lensLp.leftMargin=left;lensLp.topMargin=top;
+                lensLp.gravity=Gravity.TOP|Gravity.LEFT;bottomNavLens.setLayoutParams(lensLp);
+            }
+            FrameLayout.LayoutParams paperLp=(FrameLayout.LayoutParams)bottomNavBackdrop.getLayoutParams();
+            int paperWidth=r-l+dp(40),paperHeight=b-t+dp(40),paperLeft=l-dp(20),paperTop=t-dp(24);
+            if(paperLp.width!=paperWidth||paperLp.height!=paperHeight||paperLp.leftMargin!=paperLeft||paperLp.topMargin!=paperTop){
+                paperLp.width=paperWidth;paperLp.height=paperHeight;paperLp.leftMargin=paperLeft;paperLp.topMargin=paperTop;
+                paperLp.gravity=Gravity.TOP|Gravity.LEFT;bottomNavBackdrop.setLayoutParams(paperLp);
+            }
+        });
+        bottomNavMotion=new BottomNavIndicator(navIndicator,navBar,navHost,bottomNavLens,
+                value->((PaperNavLayout)navHost).setSwell(value));
 
         fab = new TextView(this);
         disableForceDark(fab);
@@ -1015,10 +1061,19 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        readMealMotionVariant(intent);
         if (handleMealReminderIntent(intent)) {
             return;
         }
         handleIncomingShare(intent);
+    }
+
+    /** Activity-local visual experiment selection, consumed without changing route or preferences. */
+    private void readMealMotionVariant(Intent intent){
+        if(intent==null||!intent.hasExtra(EXTRA_MEAL_MOTION_VARIANT))return;
+        mealMotionVariant=SettingsContainerMath.variant(intent.getIntExtra(EXTRA_MEAL_MOTION_VARIANT,UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT));
+        intent.removeExtra(EXTRA_MEAL_MOTION_VARIANT);
+        if(pageCrossfade!=null)pageCrossfade.setMealContainerVariant(mealMotionVariant);
     }
 
     private boolean handleMealReminderIntent(Intent intent) {
@@ -1337,8 +1392,21 @@ public class MainActivity extends Activity {
             item.setGravity(Gravity.CENTER);
             item.setPadding(dp(6), dp(3), dp(6), dp(2));
             item.setClickable(true);
+            item.setFocusable(true);
+            item.setContentDescription(TAB_TITLES[index]);
+            item.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
+                if(UiTokens.NAV_LIQUID_MOTION_ENABLED&&(l!=ol||t!=ot||r!=or||b!=ob))updateNavIndicator(false);
+            });
             item.setOnTouchListener((v,event)->{
                 int action=event.getActionMasked();
+                if(UiTokens.NAV_LIQUID_MOTION_ENABLED&&bottomNavMotion!=null){
+                    // The lens and its backdrop own feedback; the clickable slot never scales or dims.
+                    v.animate().cancel();v.setScaleX(1);v.setScaleY(1);v.setAlpha(1);
+                    if(action==MotionEvent.ACTION_DOWN&&v.isEnabled())bottomNavMotion.press();
+                    else if(action==MotionEvent.ACTION_UP)bottomNavMotion.release(false);
+                    else if(action==MotionEvent.ACTION_CANCEL||action==MotionEvent.ACTION_POINTER_DOWN)bottomNavMotion.release(true);
+                    return false;
+                }
                 if(action==MotionEvent.ACTION_DOWN){v.animate().cancel();v.setScaleX(.97f);v.setScaleY(.97f);v.setAlpha(.72f);}
                 else if(action==MotionEvent.ACTION_UP||action==MotionEvent.ACTION_CANCEL)v.animate().scaleX(1).scaleY(1).alpha(1).setDuration(160).setInterpolator(UiTokens.motionEaseOut()).start();
                 return false;
@@ -1378,7 +1446,7 @@ public class MainActivity extends Activity {
         cancelPendingNavClick();
         if(rootPagesVisible()){showTab(tab,true);return;}
         final long generation=navClickGeneration;pendingNavTab=tab;
-        View pressed=findNavItem(tab);if(pressed!=null){pressed.animate().cancel();pressed.setAlpha(.72f);pressed.setScaleX(.97f);pressed.setScaleY(.97f);}
+        View pressed=findNavItem(tab);if(pressed!=null){pressed.animate().cancel();pressed.setAlpha(UiTokens.NAV_LIQUID_MOTION_ENABLED?1:.72f);pressed.setScaleX(UiTokens.NAV_LIQUID_MOTION_ENABLED?1:.97f);pressed.setScaleY(UiTokens.NAV_LIQUID_MOTION_ENABLED?1:.97f);}
         pendingNavClick=new ViewTreeObserver.OnPreDrawListener(){
             public boolean onPreDraw(){
                 if(navHost.getViewTreeObserver().isAlive())navHost.getViewTreeObserver().removeOnPreDrawListener(this);
@@ -1396,6 +1464,7 @@ public class MainActivity extends Activity {
             Object tag = item.getTag();
             int tabIndex = tag instanceof Integer ? ((Integer) tag).intValue() : i;
             boolean active = tabIndex == effectiveNavTab();
+            item.setSelected(active);
             item.setBackground(null);
             if(item.getChildCount()==2&&item.getChildAt(0) instanceof TabIconView&&item.getChildAt(1) instanceof TextView){
                 ((TabIconView)item.getChildAt(0)).setIconColor(active?accent:Color.rgb(150,150,150));
@@ -1443,13 +1512,13 @@ public class MainActivity extends Activity {
     private void requestNavIndicator(final int tab,final boolean animated) {
         cancelPendingNavIndicatorLayout();
         final long generation=++navIndicatorGeneration;
-        if(navHost==null||navBar==null||navIndicator==null||navPeerActive)return;
+        if(navHost==null||navBar==null||navIndicator==null||navPeerActive&&!UiTokens.NAV_LIQUID_MOTION_ENABLED)return;
         if(placeNavIndicator(tab,animated))return;
         // Slot widths are zero during onCreate. Wait for both the slots and
         // the resized indicator before allowing its first visible frame.
         pendingNavIndicatorLayout=new ViewTreeObserver.OnPreDrawListener(){
             @Override public boolean onPreDraw(){
-                if(pendingNavIndicatorLayout!=this||generation!=navIndicatorGeneration||navPeerActive){
+                if(pendingNavIndicatorLayout!=this||generation!=navIndicatorGeneration||navPeerActive&&!UiTokens.NAV_LIQUID_MOTION_ENABLED){
                     if(navHost.getViewTreeObserver().isAlive())navHost.getViewTreeObserver().removeOnPreDrawListener(this);
                     if(pendingNavIndicatorLayout==this)pendingNavIndicatorLayout=null;
                     return true;
@@ -1470,11 +1539,22 @@ public class MainActivity extends Activity {
             navIndicator.setVisibility(View.INVISIBLE);return false;
         }
         int width=Math.max(dp(74),target.getWidth()-dp(6));
+        if(UiTokens.NAV_LIQUID_MOTION_ENABLED&&bottomNavMotion!=null){
+            // Fix a measured base only at initialization; subsequent frames use transforms.
+            if(navIndicator.getWidth()<=dp(1)){
+                ViewGroup.LayoutParams base=navIndicator.getLayoutParams();base.width=width;navIndicator.setLayoutParams(base);
+                navIndicator.setVisibility(View.INVISIBLE);return false;
+            }
+            navIndicator.setBackground(round(accentSoft,dp(26),0,0));
+            bottomNavLens.appearance(accentSoft,UiTokens.navLensTint(),accent,themedTextColor(Color.rgb(32,32,32)),UiTokens.line(nightDecoration()),nightDecoration());
+            return bottomNavMotion.select(tab,animated);
+        }
         ViewGroup.LayoutParams lp=navIndicator.getLayoutParams();
         if(lp.width!=width){lp.width=width;navIndicator.setLayoutParams(lp);}
         if(navIndicator.getWidth()!=width){navIndicator.setVisibility(View.INVISIBLE);return false;}
         float x=target.getLeft()+(target.getWidth()-width)*.5f;
         navIndicator.setBackground(round(accentSoft,dp(26),0,0));
+        navIndicator.setAlpha(1);
         navIndicator.animate().cancel();navIndicator.setScaleX(1);navIndicator.setVisibility(View.VISIBLE);
         if(animated)navIndicator.animate().translationX(x).setDuration(300)
                 .setInterpolator(new android.view.animation.DecelerateInterpolator(1.65f)).start();
@@ -1747,8 +1827,66 @@ public class MainActivity extends Activity {
         smoothContentSwap(renderAction,direction,gentle,null);
     }
     private void smoothContentSwap(final Runnable renderAction, final float direction,boolean gentle,PageCrossfade.ProgressListener progress) {
+        runContentSwap(renderAction,direction,gentle,progress,false);
+    }
+    private void smoothSettingsSwap(final Runnable renderAction,final float direction){
+        boolean ordinary=currentTab==3&&!inBookDetail&&!inPhotoViewer&&!inStickerGalleryPage&&!inAiAnalysisPage
+                &&!inCloudSyncPage&&!inRecycleBinPage&&!inFavoriteRecordsPage&&!inApiOfficialSitesPage;
+        runContentSwap(renderAction,direction,false,null,UiTokens.SETTINGS_MOTION_ENABLED&&ordinary);
+    }
+    private boolean duplicateSettingsPush(boolean accepted){return accepted&&pageCrossfade!=null&&pageCrossfade.settingsActive();}
+    private final java.util.Map<String,Integer> settingsScrollPositions=new java.util.HashMap<>();
+    private final NavigationTransitionHistory navigationTransitions=new NavigationTransitionHistory();
+    private View navigationSource;
+    private void withNavigationSource(View source,Runnable click){
+        View previous=navigationSource;navigationSource=source;
+        try{click.run();}finally{navigationSource=previous;}
+    }
+    private String taggedNavigationRoute(View view){
+        Object key=view.getTag(R.id.navigation_route);
+        if(key instanceof String)return (String)key;
+        if(view instanceof ViewGroup){
+            ViewGroup group=(ViewGroup)view;
+            for(int i=0;i<group.getChildCount();i++){
+                String child=taggedNavigationRoute(group.getChildAt(i));if(child!=null)return child;
+            }
+        }
+        return null;
+    }
+
+    /** Presentation-only scroll memory; route identity remains in the existing flags. */
+    private String settingsSurfaceKey(){
+        if(rootPagesVisible())return currentTab==3?"me":currentTab==1?"footprints":advisorVisible()?"advisor":"today";
+        String tagged=taggedNavigationRoute(content);if(tagged!=null)return tagged;
+        if(inCloudSyncPage)return "cloud-sync";
+        if(inRecycleBinPage)return "recycle-bin";
+        if(inFavoriteRecordsPage)return "favorites";
+        if(inStickerGalleryPage)return "food-gallery";
+        if(content.findViewWithTag("ai_chat_archive")!=null)return "chat-archive";
+        if(inAiAnalysisPage)return "advisor";
+        if(inApiOfficialSitesPage)return "api-sites";
+        if(inThemeSettingsPage)return "theme";
+        if(inProfileSettingsPage)return "profile";
+        if(inFontSourcesPage)return "font-sources";
+        if(inAboutSoftwarePage)return "about";
+        if(inUpdateLogPage)return "update-log";
+        if(inDataSecurityPage)return "data-security";
+        if(inSmartAssistantPage)return "assistant:"+smartAssistantSection;
+        if(inInterfaceLayoutPage)return "notebook-layout";
+        if(inMealManagementPage)return "meal-management";
+        if(inMoreSettingsPage)return "reminders";
+        if(inHintManagerPage)return "meal-hints";
+        if(inVibrationPage)return "vibration";
+        if(inStickerSettingsPage)return "photo-settings";
+        if(inNotebookSettingsPage)return "notebook-settings";
+        return "preferences";
+    }
+    private void runContentSwap(final Runnable renderAction,final float direction,boolean gentle,PageCrossfade.ProgressListener progress,boolean settings){
+        runContentSwap(renderAction,direction,gentle,progress,settings,false,null);
+    }
+    private void runContentSwap(final Runnable renderAction,final float direction,boolean gentle,PageCrossfade.ProgressListener progress,boolean settings,boolean mealContainer,View source){
         photoViewerGeneration++;
-        if(progress==null&&direction<0&&afterReturnFeedback(()->smoothContentSwap(renderAction,direction,gentle,progress)))return;
+        if(progress==null&&direction<0&&afterReturnFeedback(()->runContentSwap(renderAction,direction,gentle,progress,settings,mealContainer,source)))return;
         cancelReturnFeedback();
         cancelPendingBookClose();if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();cancelThemeModeTransition();
         cancelPendingNavClick();if(rootPagesVisible()){preservePendingHomeReturn();rootPager.freeze();}
@@ -1757,14 +1895,40 @@ public class MainActivity extends Activity {
             finishPeerIndicator(effectiveNavTab());
         }
         if(isPreferencesRootVisible())preferencesScrollY=currentContentScrollY();
+        final String fromSurface=settingsSurfaceKey();
+        final View clicked=direction>0?navigationSource:null;
+        final String sourceTag=clicked!=null&&clicked.getTag() instanceof String?(String)clicked.getTag():null;
+        final NavigationTransitionHistory.Entry previousEntry=direction<0?navigationTransitions.get(fromSurface):null;
+        final boolean containerNavigation=UiTokens.SETTINGS_CONTAINER_MOTION_ENABLED&&progress==null&&!gentle
+                &&!inBookDetail&&!inPhotoViewer&&!(direction>0&&"favorites".equals(fromSurface))
+                &&(direction>0?sourceTag!=null:previousEntry!=null);
+        final boolean rememberScroll=settings||containerNavigation&&!rootPagesVisible();
+        final NavigationTransitionHistory.Entry[] acceptedEntry={null};
         if(pageCrossfade==null)pageCrossfade=new PageCrossfade(content);
+        pageCrossfade.setMealContainerVariant(mealMotionVariant);
         pageCrossfade.setPaperColor(UiTokens.paper(nightDecoration()));
         pageCrossfade.setPaperBackground(root.getBackground());
-        pageCrossfade.run(()->{
+        if(rememberScroll)settingsScrollPositions.put(fromSurface,currentContentScrollY());
+        Runnable commit=()->{
             boolean previous=suppressEntryAnimation,previousReturn=cachedRootReturn;
             suppressEntryAnimation=true;cachedRootReturn=direction<0;
-            try{renderAction.run();}finally{suppressEntryAnimation=previous;cachedRootReturn=previousReturn;}
-        },direction,gentle,progress);
+            try{
+                renderAction.run();
+                String acceptedSurface=settingsSurfaceKey();
+                if(!inBookDetail&&!inPhotoViewer){
+                    if(containerNavigation){
+                        acceptedEntry[0]=direction>0?navigationTransitions.record(fromSurface,acceptedSurface,sourceTag)
+                                :navigationTransitions.resolve(fromSurface,acceptedSurface);
+                    }else if(direction>0&&!fromSurface.equals(acceptedSurface))navigationTransitions.forget(acceptedSurface);
+                }
+                if(rememberScroll&&direction<0){Integer y=settingsScrollPositions.get(acceptedSurface);if(y!=null)restoreScrollPosition(currentPageScroll(),y);}
+            }finally{suppressEntryAnimation=previous;cachedRootReturn=previousReturn;}
+        };
+        if(containerNavigation){
+            String requestedKey=direction>0?fromSurface+"\n"+sourceTag:previousEntry.key();
+            pageCrossfade.runContainer(commit,direction,clicked,requestedKey,()->acceptedEntry[0]);
+        }else if(mealContainer)pageCrossfade.runMealContainer(commit,direction,source);
+        else if(settings)pageCrossfade.runSettings(commit,direction);else pageCrossfade.run(commit,direction,gentle,progress);
     }
     private void softContentSwap(final Runnable renderAction) { smoothContentSwap(renderAction,1f); }
 
@@ -1883,8 +2047,9 @@ public class MainActivity extends Activity {
             return false;
         }
         if(inInterfaceLayoutPage){closeInterfaceLayoutPage();return true;}
+        if(inMealManagementPage){closeMealManagementPage();return true;}
         if (inSmartAssistantPage && !smartAssistantSection.isEmpty()) {
-            smoothContentSwap(() -> renderSmartAssistantPage(), -1f);
+            smoothSettingsSwap(() -> renderSmartAssistantPage(), -1f);
             return true;
         }
         if (inSmartAssistantPage) {
@@ -1906,7 +2071,7 @@ public class MainActivity extends Activity {
                 || inCloudSyncPage || inRecycleBinPage
                 || inInterfaceLayoutPage || inMoreSettingsPage || inMealManagementPage || inSmartAssistantPage) {
             content.animate().cancel();
-            smoothContentSwap(new Runnable() {
+            smoothSettingsSwap(new Runnable() {
                 @Override
                 public void run() {
                     clearPreferencesSubPageFlags();
@@ -1955,7 +2120,7 @@ public class MainActivity extends Activity {
         playTabFeedback();
         resumePreferencesOnMe = false;
         resumeAboutAfterUpdateLog = false;
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 clearPreferencesSubPageFlags();
@@ -2046,7 +2211,7 @@ public class MainActivity extends Activity {
         LinearLayout header = row(Gravity.CENTER_VERTICAL);
         TextView brand = label("一蔬一饭", 26, UiTokens.ink(nightDecoration()), true);
         brand.setContentDescription("一蔬一饭，点击打开美食栏"); brand.setTag("food_gallery_entry");
-        brand.setOnClickListener(v -> openStickerGalleryPage());
+        brand.setOnClickListener(v -> withNavigationSource(v,()->openStickerGalleryPage()));
         header.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
         TextView weekly = label("周报 ↗", 14, UiTokens.ink(nightDecoration()), true);
         weekly.setGravity(Gravity.CENTER); weekly.setMinHeight(dp(48)); weekly.setMinWidth(dp(72));
@@ -2290,6 +2455,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"food-gallery");
         scroll.addView(page);
         host.addView(scroll, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -2413,12 +2579,13 @@ public class MainActivity extends Activity {
             back.setOnClickListener(v->closeAiAnalysisPage());header.addView(back,new LinearLayout.LayoutParams(dp(52),dp(52)));
         }
         TextView title = label("营养师", 34, Color.rgb(28, 28, 30), true);
+        title.setTag("advisor_history_entry");
         title.setClickable(true);
         attachPressAnimation(title);
         title.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                openAiChatArchivePage();
+                withNavigationSource(v,()->openAiChatArchivePage());
             }
         });
         header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -2517,6 +2684,7 @@ public class MainActivity extends Activity {
         ScrollView scroll = pageScroll();
         scroll.setTag("ai_chat_archive");
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"chat-archive");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -2589,6 +2757,7 @@ public class MainActivity extends Activity {
         ScrollView scroll = pageScroll();
         scroll.setTag("ai_chat_read_only");
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"chat-read-only:"+date);
         scroll.addView(page);
         content.addView(scroll);
 
@@ -4673,7 +4842,7 @@ public class MainActivity extends Activity {
         TextView favorites=label("收藏",15,accent,true);favorites.setTag("footprints_favorites");
         favorites.setMinHeight(dp(48));favorites.setGravity(Gravity.CENTER);favorites.setPadding(dp(16),0,dp(12),0);
         favorites.setContentDescription("查看收藏记录");attachPressAnimation(favorites);
-        favorites.setOnClickListener(v->openFavoriteRecordsPage(true));
+        favorites.setOnClickListener(v->withNavigationSource(v,()->openFavoriteRecordsPage(true)));
         top.addView(favorites,new LinearLayout.LayoutParams(-2,dp(48)));
         installStickyHeader(host, scroll, page, top);
 
@@ -6455,7 +6624,7 @@ public class MainActivity extends Activity {
             }
         }));
         View assistantEntry=settingRow("智能助手", "调用 API · 餐图识别 · 营养师", "@smart", accent,
-                v -> smoothContentSwap(() -> renderSmartAssistantPage(), 1f));
+                v -> {if(!duplicateSettingsPush(inSmartAssistantPage&&smartAssistantSection.isEmpty()))smoothSettingsSwap(() -> renderSmartAssistantPage(), 1f);});
         assistantEntry.setTag("me_smart_assistant");
         page.addView(assistantEntry);
         page.addView(settingRow("其他设置", "提醒、记录本与照片查看", "@personalize", Color.rgb(232, 136, 67), new View.OnClickListener() {
@@ -6498,8 +6667,9 @@ public class MainActivity extends Activity {
     }
 
     private void openPreferencesPage() {
+        if(duplicateSettingsPush(isPreferencesRootVisible()))return;
         preferencesScrollY = 0;
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderPreferencesPage();
@@ -6508,7 +6678,8 @@ public class MainActivity extends Activity {
     }
 
     private void openThemeSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inThemeSettingsPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderThemeSettingsPage();
@@ -6517,7 +6688,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeThemeSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 inThemeSettingsPage = false;
@@ -6527,7 +6698,8 @@ public class MainActivity extends Activity {
     }
 
     private void openProfileSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inProfileSettingsPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderProfileSettingsPage();
@@ -6536,7 +6708,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeProfileSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 inProfileSettingsPage = false;
@@ -6546,7 +6718,8 @@ public class MainActivity extends Activity {
     }
 
     private void openAboutSoftwarePage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inAboutSoftwarePage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderAboutSoftwarePage();
@@ -6555,7 +6728,8 @@ public class MainActivity extends Activity {
     }
 
     private void openFontSourcesPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inFontSourcesPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderFontSourcesPage();
@@ -6564,7 +6738,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeFontSourcesPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 inFontSourcesPage = false;
@@ -6574,7 +6748,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeAboutSoftwarePage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 inAboutSoftwarePage = false;
@@ -6599,6 +6773,7 @@ public class MainActivity extends Activity {
         disableForceDark(host);
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"about");
         scroll.addView(page);
         host.addView(scroll, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -6682,6 +6857,7 @@ public class MainActivity extends Activity {
         disableForceDark(host);
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"font-sources");
         scroll.addView(page);
         host.addView(scroll, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -6754,7 +6930,7 @@ public class MainActivity extends Activity {
     }
 
     private void closePreferencesPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 inPreferencesPage = false;
@@ -6789,7 +6965,8 @@ public class MainActivity extends Activity {
     }
 
     private void openUpdateLogPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inUpdateLogPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderUpdateLogPage();
@@ -6798,7 +6975,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeUpdateLogPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 inUpdateLogPage = false;
@@ -6842,6 +7019,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"update-log");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -6890,14 +7068,25 @@ public class MainActivity extends Activity {
         animateIn(page);
     }
 
-    private void openMealReminderSettingsPage(){smoothContentSwap(()->renderMealReminderSettingsPage(),1f);}
+    private void openMealReminderSettingsPage(){
+        if(duplicateSettingsPush(inMoreSettingsPage))return;smoothSettingsSwap(()->renderMealReminderSettingsPage(),1f);}
 
-    private void openMealManagementPage(){smoothContentSwap(()->renderMealManagementPage(),1f);}
+    private void openMealManagementPage(){openMealManagementPage(content.findViewWithTag("meal_management_entry"));}
+    private void openMealManagementPage(View source){
+        if(duplicateSettingsPush(inMealManagementPage))return;
+        if(UiTokens.SETTINGS_CONTAINER_MOTION_ENABLED&&inPreferencesPage&&!inMealManagementPage&&isPreferencesRootVisible())
+            runContentSwap(()->renderMealManagementPage(),1f,false,null,true,true,source);
+        else smoothSettingsSwap(()->renderMealManagementPage(),1f);
+    }
 
-    private void closeMealManagementPage(){smoothContentSwap(()->renderPreferencesPage(preferencesScrollY),-1f);}
+    private void closeMealManagementPage(){
+        if(UiTokens.SETTINGS_CONTAINER_MOTION_ENABLED)runContentSwap(()->renderPreferencesPage(preferencesScrollY),-1f,false,null,true,true,null);
+        else smoothSettingsSwap(()->renderPreferencesPage(preferencesScrollY),-1f);
+    }
 
     private void openHintManagerPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inHintManagerPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderHintManagerPage();
@@ -6906,7 +7095,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeHintManagerPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderPreferencesPage();
@@ -6915,7 +7104,8 @@ public class MainActivity extends Activity {
     }
 
     private void openVibrationPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inVibrationPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderVibrationPage();
@@ -6924,7 +7114,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeVibrationPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderPreferencesPage();
@@ -6933,7 +7123,8 @@ public class MainActivity extends Activity {
     }
 
     private void openStickerSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inStickerSettingsPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderStickerSettingsPage();
@@ -6942,7 +7133,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeStickerSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderPreferencesPage();
@@ -6971,7 +7162,8 @@ public class MainActivity extends Activity {
     }
 
     private void openNotebookSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inNotebookSettingsPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderNotebookSettingsPage();
@@ -6980,7 +7172,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeNotebookSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderPreferencesPage();
@@ -6990,7 +7182,7 @@ public class MainActivity extends Activity {
 
 
     private void closeMoreSettingsPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderPreferencesPage();
@@ -7001,7 +7193,8 @@ public class MainActivity extends Activity {
 
 
     private void openDataSecurityPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inDataSecurityPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderDataSecurityPage();
@@ -7010,7 +7203,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeDataSecurityPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderCurrent();
@@ -7081,7 +7274,8 @@ public class MainActivity extends Activity {
 
 
     private void openInterfaceLayoutPage() {
-        smoothContentSwap(new Runnable() {
+        if(duplicateSettingsPush(inInterfaceLayoutPage))return;
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderInterfaceLayoutPage();
@@ -7090,7 +7284,7 @@ public class MainActivity extends Activity {
     }
 
     private void closeInterfaceLayoutPage() {
-        smoothContentSwap(new Runnable() {
+        smoothSettingsSwap(new Runnable() {
             @Override
             public void run() {
                 renderNotebookSettingsPage();
@@ -7122,6 +7316,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"preferences");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -7150,7 +7345,7 @@ public class MainActivity extends Activity {
             }
         }));
         page.addView(settingRow("三餐提醒",mealNotificationsEnabled()?"已开启 · "+mealNotificationTime("breakfastNotificationTime","08:00")+" / "+mealNotificationTime("lunchNotificationTime","12:00")+" / "+mealNotificationTime("dinnerNotificationTime","18:30"):"设置早餐、午餐和晚餐提醒", "@reminder",accent,v->openMealReminderSettingsPage()));
-        View meals=settingRow("餐次管理",nightSnackEnabled()?"三餐与夜宵 · 夜宵已开启":"三餐与夜宵 · 夜宵未开启","@dining",accent,v->openMealManagementPage());
+        View meals=settingRow("餐次管理",nightSnackEnabled()?"三餐与夜宵 · 夜宵已开启":"三餐与夜宵 · 夜宵未开启","@dining",accent,v->openMealManagementPage(v));
         meals.setTag("meal_management_entry");page.addView(meals);
         section(page, "照片与文案");
 
@@ -7199,7 +7394,8 @@ public class MainActivity extends Activity {
         updateFab();
         content.removeAllViews();
         ScrollView scroll=pageScroll();
-        LinearLayout page=basePage();page.setTag("meal_management_page");
+        LinearLayout page=basePage();
+        page.setTag(R.id.navigation_route,"meal-management");page.setTag("meal_management_page");
         scroll.addView(page);content.addView(scroll);
 
         LinearLayout top=row(Gravity.CENTER_VERTICAL);
@@ -7234,6 +7430,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"notebook-layout");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -7404,6 +7601,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"vibration");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -7466,6 +7664,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"photo-settings");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -7525,6 +7724,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"notebook-settings");
         page.setTag("notebook_settings_page");
         scroll.addView(page);
         content.addView(scroll);
@@ -7618,6 +7818,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"data-security");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -7698,6 +7899,7 @@ public class MainActivity extends Activity {
 
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"favorites");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -7869,6 +8071,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"cloud-sync");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -7940,6 +8143,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"recycle-bin");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -8404,6 +8608,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"assistant:"+sectionKey);
         boolean food = "food".equals(sectionKey), nutritionist = "nutritionist".equals(sectionKey);
         boolean child = food || nutritionist;
         page.setTag(food ? "food_recognition_settings_page" : nutritionist ? "nutritionist_settings_page" : "smart_assistant_page");
@@ -8417,7 +8622,7 @@ public class MainActivity extends Activity {
         attachPressAnimation(back);
         back.setContentDescription(child ? "返回智能助手" : "返回我");
         back.setOnClickListener(v -> {
-            if (child) smoothContentSwap(() -> renderSmartAssistantPage(), -1f);
+            if (child) smoothSettingsSwap(() -> renderSmartAssistantPage(), -1f);
             else returnToMeRoot();
         });
         top.addView(back, new LinearLayout.LayoutParams(dp(52), dp(52)));
@@ -8457,6 +8662,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"reminders");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -8505,9 +8711,9 @@ public class MainActivity extends Activity {
             }
         }));
         page.addView(settingRow("餐图识别", recognitionSummary(), "@spark", accent,
-                v -> smoothContentSwap(() -> renderFoodRecognitionSettingsPage(), 1f)));
+                v -> {if(!duplicateSettingsPush(inSmartAssistantPage&&"food".equals(smartAssistantSection)))smoothSettingsSwap(() -> renderFoodRecognitionSettingsPage(), 1f);}));
         page.addView(settingRow("营养师", aiAnalysisEnabled() ? "已开启 · 饮食分析与问答" : "饮食分析、记录读取与记忆", "@doll", accent,
-                v -> smoothContentSwap(() -> renderNutritionistSettingsPage(), 1f)));
+                v -> {if(!duplicateSettingsPush(inSmartAssistantPage&&"nutritionist".equals(smartAssistantSection)))smoothSettingsSwap(() -> renderNutritionistSettingsPage(), 1f);}));
     }
 
     private void addFoodRecognitionSettings(LinearLayout page) {
@@ -9538,6 +9744,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"meal-hints");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -9618,6 +9825,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"hint-section:"+kind+":"+key);
         scroll.addView(page);
         content.addView(scroll);
 
@@ -9921,6 +10129,7 @@ public class MainActivity extends Activity {
 
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"api-sites");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -10213,7 +10422,7 @@ public class MainActivity extends Activity {
         row.setFocusable(true);
         row.setContentDescription(title+(subtitle==null||subtitle.isEmpty()?"":"，"+subtitle));
         attachPressAnimation(row);
-        row.setOnClickListener(click);
+        row.setOnClickListener(click==null?null:v->withNavigationSource(v,()->click.onClick(v)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.bottomMargin = dp(spaceByLayout(12, 10, 8));
         row.setLayoutParams(lp);
@@ -10539,14 +10748,20 @@ public class MainActivity extends Activity {
                         dp(5), dp(5), Shader.TileMode.CLAMP));
                 navHost.setRenderEffect(RenderEffect.createBlurEffect(
                         dp(4), dp(4), Shader.TileMode.CLAMP));
+                if(bottomNavLens!=null)bottomNavLens.setRenderEffect(RenderEffect.createBlurEffect(dp(4),dp(4),Shader.TileMode.CLAMP));
+                if(bottomNavBackdrop!=null)bottomNavBackdrop.setRenderEffect(RenderEffect.createBlurEffect(dp(4),dp(4),Shader.TileMode.CLAMP));
             } else {
                 content.setRenderEffect(null);
                 navHost.setRenderEffect(null);
+                if(bottomNavLens!=null)bottomNavLens.setRenderEffect(null);
+                if(bottomNavBackdrop!=null)bottomNavBackdrop.setRenderEffect(null);
             }
         } catch (Throwable ignored) {
             try {
                 content.setRenderEffect(null);
                 navHost.setRenderEffect(null);
+                if(bottomNavLens!=null)bottomNavLens.setRenderEffect(null);
+                if(bottomNavBackdrop!=null)bottomNavBackdrop.setRenderEffect(null);
             } catch (Throwable ignoredAgain) {
             }
         }
@@ -11291,6 +11506,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"theme");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -11380,6 +11596,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         ScrollView scroll = pageScroll();
         LinearLayout page = basePage();
+        page.setTag(R.id.navigation_route,"profile");
         scroll.addView(page);
         content.addView(scroll);
 
@@ -18145,6 +18362,7 @@ public class MainActivity extends Activity {
 
     private LinearLayout basePage() {
         LinearLayout page = new LinearLayout(this);
+        page.setTag(R.id.navigation_body,Boolean.TRUE);
         disableForceDark(page);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setClipToPadding(false);
@@ -18166,11 +18384,25 @@ public class MainActivity extends Activity {
         return scroll;
     }
 
+    private void markNavigationHeader(View header){
+        if(!(header instanceof ViewGroup))return;
+        ViewGroup group=(ViewGroup)header;
+        for(int i=0;i<group.getChildCount();i++){
+            View child=group.getChildAt(i);
+            ViewGroup.LayoutParams params=child.getLayoutParams();
+            if(child instanceof TextView&&(params instanceof LinearLayout.LayoutParams&&((LinearLayout.LayoutParams)params).weight>0
+                    ||"food_gallery_title".equals(child.getTag())||"footprints_title".equals(child.getTag()))){
+                child.setTag(R.id.navigation_header_title,Boolean.TRUE);return;
+            }
+        }
+    }
+
     private StickyGlassHeader installStickyHeader(FrameLayout host, ScrollView scroll,
                                                     LinearLayout page, View header) {
         if (host == null || scroll == null || page == null || header == null) {
             return null;
         }
+        markNavigationHeader(header);
         int height = dp(UiTokens.HEADER_CORE);
         int fadeHeight = dp(UiTokens.HEADER_FADE);
         if(nightDecoration()){
@@ -18206,6 +18438,7 @@ public class MainActivity extends Activity {
         if (host == null || source == null || header == null) {
             return null;
         }
+        markNavigationHeader(header);
         int height = dp(UiTokens.HEADER_CORE);
         int fadeHeight = dp(UiTokens.HEADER_FADE);
         StickyGlassHeader glass = new StickyGlassHeader(this);
@@ -20633,13 +20866,23 @@ public class MainActivity extends Activity {
 
     private class PaperNavLayout extends FrameLayout {
         private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);private final RectF rect=new RectF();
+        private float swell;
         PaperNavLayout(Context context){super(context);setWillNotDraw(false);setLayerType(View.LAYER_TYPE_SOFTWARE,null);}
-        void refreshPaper(){invalidate();}
+        void refreshPaper(){if(bottomNavBackdrop!=null)bottomNavBackdrop.appearance(UiTokens.card(nightDecoration()),UiTokens.line(nightDecoration()),nightDecoration());invalidate();}
+        void setSwell(float value){
+            float next=Math.max(0,Math.min(1,value));
+            if(next!=swell){swell=next;if(bottomNavBackdrop!=null)bottomNavBackdrop.swell(next);
+                if(bottomNavBackdrop==null||bottomNavBackdrop.getWidth()<=1)invalidate();}
+        }
         @Override protected void onDraw(Canvas canvas){
-            super.onDraw(canvas);float inset=dp(6);rect.set(inset,inset,getWidth()-inset,getHeight()-inset);float radius=rect.height()/2f;
+            super.onDraw(canvas);
+            if(UiTokens.NAV_LIQUID_MOTION_ENABLED&&bottomNavBackdrop!=null&&bottomNavBackdrop.getWidth()>1)return;
+            float inset=dp(6);rect.set(inset,inset,getWidth()-inset,getHeight()-inset);float radius=rect.height()/2f;
+            int saved=canvas.save();canvas.scale(NavLensGeometry.barScaleX(swell),NavLensGeometry.barScaleY(swell),rect.centerX(),rect.centerY());
             paint.setStyle(Paint.Style.FILL);paint.setColor(UiTokens.card(nightDecoration()));
-            paint.setShadowLayer(dp(5),0,0,nightDecoration()?Color.argb(70,0,0,0):Color.argb(36,72,60,48));canvas.drawRoundRect(rect,radius,radius,paint);paint.clearShadowLayer();
+            paint.setShadowLayer(dp(5)*(1+.15f*swell),0,0,nightDecoration()?Color.argb(70+Math.round(14*swell),0,0,0):Color.argb(36+Math.round(8*swell),72,60,48));canvas.drawRoundRect(rect,radius,radius,paint);paint.clearShadowLayer();
             paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(dp(1));paint.setColor(UiTokens.line(nightDecoration()));canvas.drawRoundRect(rect,radius,radius,paint);paint.setStyle(Paint.Style.FILL);
+            canvas.restoreToCount(saved);
         }
     }
 

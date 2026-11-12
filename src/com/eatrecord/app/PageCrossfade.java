@@ -11,6 +11,7 @@ final class PageCrossfade {
     interface ProgressListener { void onStart(); void onProgress(float movement); void onEnd(); }
     private ProgressListener progressListener;
     private final ViewGroup host;
+    private final SettingsContainerTransform container;
     private Slide image;
     private ValueAnimator animator;
     private int paperColor=UiTokens.paper(false);
@@ -18,7 +19,7 @@ final class PageCrossfade {
     private ViewTreeObserver.OnPreDrawListener pending;
     private final ArrayList<View> incoming=new ArrayList<>();
     private final ArrayList<IncomingSurface> incomingSurfaces=new ArrayList<>();
-    PageCrossfade(ViewGroup host){this.host=host;host.addOnLayoutChangeListener((view,l,t,r,b,ol,ot,or,ob)->{
+    PageCrossfade(ViewGroup host){this.host=host;container=new SettingsContainerTransform(host);host.addOnLayoutChangeListener((view,l,t,r,b,ol,ot,or,ob)->{
         if(image!=null&&(image.width!=r-l||image.height!=b-t))clear();
     });}
     void run(Runnable render,float direction){run(render,direction,false);}
@@ -27,6 +28,16 @@ final class PageCrossfade {
     boolean retains(View view){return image!=null&&image.outgoing.contains(view);}
     void run(Runnable render,float direction,boolean gentle){run(render,direction,gentle,null);}
     void run(Runnable render,float direction,boolean gentle,ProgressListener progress){
+        run(render,direction,gentle,progress,false);
+    }
+    void runSettings(Runnable render,float direction){run(render,direction,false,null,true);}
+    void runMealContainer(Runnable render,float direction,View source){clearSlide();container.run(render,direction>=0,source,paperColor,paperBackground);}
+    void runContainer(Runnable render,float direction,View source,String requestedKey,
+            java.util.function.Supplier<NavigationTransitionHistory.Entry> acceptedEntry){
+        clearSlide();container.runNavigation(render,direction>=0,source,paperColor,paperBackground,requestedKey,acceptedEntry);
+    }
+    void setMealContainerVariant(int variant){container.setVariant(variant);}
+    private void run(Runnable render,float direction,boolean gentle,ProgressListener progress,boolean settings){
         boolean animate=ValueAnimator.areAnimatorsEnabled()&&host.isAttachedToWindow()
                 &&host.getWidth()>0&&host.getHeight()>0;
         boolean laidOut=image!=null;
@@ -52,7 +63,7 @@ final class PageCrossfade {
         clear();progressListener=progress;if(progressListener!=null)progressListener.onProgress(0);
         host.animate().cancel();host.setAlpha(1);host.setTranslationX(0);host.setTranslationY(0);host.setScaleX(1);host.setScaleY(1);
         if(animate&&laidOut){
-            image=new Slide(interrupted,direction>=0,paperColor,paperBackground);
+            image=new Slide(interrupted,direction>=0,paperColor,paperBackground,settings);
             if(interrupted==null&&host.getChildCount()==1){
                 // Retain the real page and give its transparent root a complete
                 // paper surface while it travels alongside the arriving page.
@@ -82,6 +93,7 @@ final class PageCrossfade {
             for(int i=0;i<host.getChildCount();i++){
                 View child=host.getChildAt(i);child.animate().cancel();child.setAlpha(1);incoming.add(child);
                 IncomingSurface surface=new IncomingSurface(child,image);incomingSurfaces.add(surface);surface.install();
+                if(image.settings){surface.blockInput(true);image.collectHeaders(child,image.incomingHeaders);}
             }
         }catch(OutOfMemoryError|RuntimeException unavailable){clear();return;}
         position(0);
@@ -96,14 +108,18 @@ final class PageCrossfade {
             if(!replaced&&!sized){host.requestLayout();host.invalidate();return false;}
             if(host.getViewTreeObserver().isAlive())host.getViewTreeObserver().removeOnPreDrawListener(this);pending=null;
             if(replaced){clear();return true;}
-            current.prepareLayers(incoming);
-            position(current.progress);
-            startAnimator(current);return true;
+            if(current.settings)current.awaitFirstWindowDraw();
+            else{
+                current.prepareLayers(incoming);
+                position(current.progress);
+                startAnimator(current);
+            }
+            return true;
         }};host.getViewTreeObserver().addOnPreDrawListener(pending);host.invalidate();
     }
     private void startAnimator(final Slide current){
         animator=ValueAnimator.ofFloat(0,1);animator.setDuration(current.durationMs);animator.setInterpolator(new android.view.animation.LinearInterpolator());
-        animator.addUpdateListener(a->{if(image==current)position((Float)a.getAnimatedValue());});
+        animator.addUpdateListener(a->{if(image==current){if(current.settings&&!ValueAnimator.areAnimatorsEnabled())clear();else position((Float)a.getAnimatedValue());}});
         animator.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){if(image==current)clear();}});animator.start();
     }
     private Bitmap capturePresentation(){
@@ -145,14 +161,22 @@ final class PageCrossfade {
             // Native disappearing children draw above incoming roots. Move the
             // opaque pages by the same full span so their edges meet instead of
             // blending two moving sets of text in the same pixels.
-            child.setAlpha(image.alphas.get(i));
+            child.setAlpha(image.alphas.get(i)*(image.settings?SettingsTransitionMath.outgoingAlpha(progress):1));
         }
-        for(View child:incoming){child.setTranslationX(direction*travel*(1-movement));child.setAlpha(1);}
+        for(View child:incoming){child.setTranslationX(direction*travel*(1-movement));child.setAlpha(image.settings?SettingsTransitionMath.incomingAlpha(progress):1);}
+        if(image.settings){
+            for(HeaderState header:image.outgoingHeaders)header.apply(SettingsTransitionMath.outgoingHeader(progress));
+            for(HeaderState header:image.incomingHeaders)header.apply(SettingsTransitionMath.incomingHeader(progress));
+        }
+        if(image.settings)for(IncomingSurface surface:incomingSurfaces)if(incoming.contains(surface.view))surface.blockInput(blocksIncomingInput());
         // A freshly created incoming page starts outside the viewport. Re-record
         // this parent as it enters, even when only RenderNode translations change.
         host.invalidate();
     }
     void clear(){
+        container.clear();clearSlide();
+    }
+    private void clearSlide(){
         removePending();
         if(animator!=null){ValueAnimator previous=animator;animator=null;previous.removeAllUpdateListeners();previous.removeAllListeners();previous.cancel();}
         for(View child:incoming){child.setTranslationX(0);child.setAlpha(1);}incoming.clear();
@@ -167,24 +191,79 @@ final class PageCrossfade {
     private void removePending(){
         if(pending!=null){if(host.getViewTreeObserver().isAlive())host.getViewTreeObserver().removeOnPreDrawListener(pending);pending=null;}
     }
-    boolean active(){return image!=null;}
+    boolean active(){return image!=null||container.active();}
+    boolean settingsActive(){return image!=null&&image.settings||container.active();}
+    boolean blocksIncomingInput(){return container.blocksInput()||image!=null&&image.settings&&image.progress<.20f;}
+    private static final class HeaderState {
+        final View view;final float alpha;
+        HeaderState(View view){this.view=view;alpha=view.getAlpha();}
+        void apply(float factor){view.setAlpha(alpha*factor);}
+        void restore(){view.setAlpha(alpha);}
+    }
     private final class Slide {
-        Bitmap bitmap;final boolean forward;float progress;final float travel=host.getWidth();
+        Bitmap bitmap;final boolean forward,settings;float progress;final float travel;
         final int durationMs;
         final TimeInterpolator positionEase;
         final int color,width=host.getWidth(),height=host.getHeight();final Drawable background;
         final ArrayList<View> outgoing=new ArrayList<>();
         final ArrayList<Float> origins=new ArrayList<>(),alphas=new ArrayList<>();
+        final ArrayList<Integer> accessibility=new ArrayList<>(),focusPolicies=new ArrayList<>();
+        final ArrayList<HeaderState> outgoingHeaders=new ArrayList<>(),incomingHeaders=new ArrayList<>();
         final ArrayList<View> layerViews=new ArrayList<>();
-        boolean layersPrepared;
-        Slide(Bitmap bitmap,boolean forward,int color,Drawable background){
-            this.bitmap=bitmap;this.forward=forward;this.color=color;this.background=background;
-            durationMs=UiTokens.PAGE_FLOW_MS;positionEase=UiTokens.motionEasePage();
+        boolean layersPrepared,firstDrawQueued;
+        ViewTreeObserver firstDrawObserver;
+        ViewTreeObserver.OnDrawListener firstDrawListener;
+        Runnable afterFirstDraw;
+        Slide(Bitmap bitmap,boolean forward,int color,Drawable background,boolean settings){
+            this.bitmap=bitmap;this.forward=settings&&host.getLayoutDirection()==View.LAYOUT_DIRECTION_RTL?!forward:forward;this.color=color;this.background=background;this.settings=settings;
+            travel=host.getWidth()*(settings?SettingsTransitionMath.TRAVEL:1);
+            durationMs=settings?SettingsTransitionMath.DURATION_MS:UiTokens.PAGE_FLOW_MS;positionEase=settings?SettingsTransitionMath::ease:UiTokens.motionEasePage();
         }
         void adopt(View child){
             child.animate().cancel();outgoing.add(child);origins.add(child.getTranslationX());alphas.add(child.getAlpha());
+            accessibility.add(child.getImportantForAccessibility());focusPolicies.add(child instanceof ViewGroup?((ViewGroup)child).getDescendantFocusability():0);
+            if(settings){child.clearFocus();child.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);if(child instanceof ViewGroup)((ViewGroup)child).setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);}
+            if(settings)collectHeaders(child,outgoingHeaders);
+        }
+        void collectHeaders(View view,ArrayList<HeaderState> target){
+            // Reuse the existing header marker; no business View duplication or layout changes.
+            if("sticky_paper_header".equals(view.getTag())){target.add(new HeaderState(view));return;}
+            if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++)collectHeaders(group.getChildAt(i),target);}
         }
         void retain(View child){adopt(child);host.startViewTransition(child);}
+        void awaitFirstWindowDraw(){
+            if(image!=this||afterFirstDraw!=null||layersPrepared)return;
+            // The retained outgoing sheet is still opaque above these roots.
+            // Draw the accepted incoming Views once before creating their caches.
+            for(View child:incoming)child.setAlpha(1);
+            for(HeaderState header:incomingHeaders)header.apply(1);
+            afterFirstDraw=new Runnable(){public void run(){
+                if(image!=Slide.this||afterFirstDraw!=this)return;
+                cancelFirstWindowDraw();
+                boolean replaced=incoming.isEmpty()||incoming.size()!=host.getChildCount();
+                for(View child:incoming)replaced|=child.getParent()!=host||child.getWidth()<=0||child.getHeight()<=0;
+                if(replaced||!host.isAttachedToWindow()||host.getWidth()!=width||host.getHeight()!=height
+                        ||!ValueAnimator.areAnimatorsEnabled()){clear();return;}
+                prepareLayers(incoming);
+                if(image!=Slide.this)return;
+                position(0);
+                startAnimator(Slide.this);
+            }};
+            firstDrawObserver=host.getViewTreeObserver();
+            firstDrawListener=()->{
+                if(image!=this||afterFirstDraw==null||firstDrawQueued)return;
+                firstDrawQueued=true;
+                host.postOnAnimation(afterFirstDraw);
+            };
+            firstDrawObserver.addOnDrawListener(firstDrawListener);
+            host.invalidate();
+        }
+        void cancelFirstWindowDraw(){
+            if(afterFirstDraw!=null)host.removeCallbacks(afterFirstDraw);
+            if(firstDrawObserver!=null&&firstDrawListener!=null&&firstDrawObserver.isAlive())
+                firstDrawObserver.removeOnDrawListener(firstDrawListener);
+            afterFirstDraw=null;firstDrawListener=null;firstDrawObserver=null;
+        }
         void prepareLayers(ArrayList<View> arriving){
             if(layersPrepared)return;layersPrepared=true;
             // Settings and root sheets are dense with text, ruled paper and media.
@@ -210,34 +289,45 @@ final class PageCrossfade {
             }
         }
         void release(){
+            cancelFirstWindowDraw();
+            for(HeaderState header:outgoingHeaders)header.restore();for(HeaderState header:incomingHeaders)header.restore();outgoingHeaders.clear();incomingHeaders.clear();
             for(int i=0;i<outgoing.size();i++){
                 View child=outgoing.get(i);child.setTranslationX(origins.get(i));child.setAlpha(alphas.get(i));
+                if(settings){child.setImportantForAccessibility(accessibility.get(i));if(child instanceof ViewGroup)((ViewGroup)child).setDescendantFocusability(focusPolicies.get(i));}
             }
             for(View child:layerViews)child.setLayerType(View.LAYER_TYPE_NONE,null);
             layerViews.clear();
             for(View child:outgoing)host.endViewTransition(child);
-            outgoing.clear();origins.clear();alphas.clear();if(bitmap!=null&&!bitmap.isRecycled())bitmap.recycle();
+            outgoing.clear();origins.clear();alphas.clear();accessibility.clear();focusPolicies.clear();if(bitmap!=null&&!bitmap.isRecycled())bitmap.recycle();
         }
     }
     /** A temporary opaque surface belongs to the existing root View; no reparenting. */
     private final class IncomingSurface {
         final View view;final Drawable original;final Drawable.Callback originalCallback;
         final int left,top,right,bottom;final PaperSurface surface;
+        final int accessibility,focusPolicy;private boolean inputBlocked;
         IncomingSurface(View view,Slide slide){
             this.view=view;original=view.getBackground();originalCallback=original==null?null:original.getCallback();
             left=view.getPaddingLeft();top=view.getPaddingTop();right=view.getPaddingRight();bottom=view.getPaddingBottom();
             surface=new PaperSurface(view,slide,original,originalCallback);
+            accessibility=view.getImportantForAccessibility();focusPolicy=view instanceof ViewGroup?((ViewGroup)view).getDescendantFocusability():0;
         }
         void install(){
             view.setBackground(surface);view.setPadding(left,top,right,bottom);surface.attachOriginal();
         }
         void restore(){
+            blockInput(false);
             boolean owns=view.getBackground()==surface;surface.releaseOriginal(owns);
             if(owns){
                 int l=view.getPaddingLeft(),t=view.getPaddingTop(),r=view.getPaddingRight(),b=view.getPaddingBottom();
                 view.setBackground(original);view.setPadding(l,t,r,b);
                 if(original!=null)original.setCallback(originalCallback);
             }
+        }
+        void blockInput(boolean blocked){
+            if(inputBlocked==blocked)return;inputBlocked=blocked;
+            view.setImportantForAccessibility(blocked?View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS:accessibility);
+            if(view instanceof ViewGroup)((ViewGroup)view).setDescendantFocusability(blocked?ViewGroup.FOCUS_BLOCK_DESCENDANTS:focusPolicy);
         }
     }
     private final class PaperSurface extends Drawable implements Drawable.Callback {

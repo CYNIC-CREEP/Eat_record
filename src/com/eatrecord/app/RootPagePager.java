@@ -5,6 +5,7 @@ import android.content.Context;
 import android.view.View;
 import android.view.MotionEvent;
 import android.view.ViewParent;
+import android.view.ViewGroup;
 import android.widget.FrameLayout;
 
 /** Three retained root sheets. Input frames only update render transforms, never create pages. */
@@ -18,6 +19,7 @@ final class RootPagePager extends FrameLayout {
     private final Listener listener;
     private final RootPageMotion motion;
     private final GestureSpring gestureSpring,tapSpring;
+    private final int[] focusPolicies=new int[3];
     private boolean frozen,homeOwned,ownershipKnown;
     RootPagePager(Context context,View[] pages,int selected,Listener listener){
         super(context);this.pages=pages;this.listener=listener;motion=new RootPageMotion(selected);
@@ -34,14 +36,19 @@ final class RootPagePager extends FrameLayout {
         };
         gestureSpring=new GestureSpring(updates,UiTokens.GESTURE_RESPONSE_SECONDS);
         tapSpring=new GestureSpring(updates,UiTokens.NAV_TAP_RESPONSE_SECONDS);
-        for(View page:pages)addView(page,new LayoutParams(-1,-1));positionPages();
+        for(int i=0;i<pages.length;i++){
+            if(pages[i] instanceof ViewGroup)focusPolicies[i]=((ViewGroup)pages[i]).getDescendantFocusability();
+            addView(pages[i],new LayoutParams(-1,-1));
+        }
+        positionPages();
     }
     View page(int index){return pages[Math.max(0,Math.min(2,index))];}
     View selectedPage(){return page(motion.target());}
     float position(){return motion.position();}
     int target(){return motion.target();}
-    boolean isInteracting(){return motion.isDragging()||gestureSpring.isRunning()||tapSpring.isRunning();}
+    boolean isInteracting(){return motion.isDragging()||isAnimating();}
     boolean isAnimating(){return gestureSpring.isRunning()||tapSpring.isRunning();}
+    boolean isDragging(){return motion.isDragging();}
     boolean isFrozen(){return frozen;}
     boolean ownsView(View view){
         if(frozen||isInteracting())return false;
@@ -59,6 +66,7 @@ final class RootPagePager extends FrameLayout {
     }
     void select(int index,boolean animated){
         cancelSprings();motion.select(index);frozen=false;
+        for(int i=0;i<pages.length;i++)if(i!=motion.target())pages[i].clearFocus();
         if(listener!=null)listener.onTarget(motion.target());
         if(!animated){motion.finish();positionPages();if(listener!=null)listener.onRest(motion.target());}
         else start(true,0);
@@ -70,7 +78,7 @@ final class RootPagePager extends FrameLayout {
     private void start(boolean tap,float velocity){
         cancelSprings();
         if(frozen)return;
-        if(!ValueAnimator.areAnimatorsEnabled()||!isAttachedToWindow()||getWidth()<=0){motion.finish();positionPages();if(listener!=null)listener.onRest(motion.target());return;}
+        if(!UiTokens.ROOT_TAB_SLIDE_ANIMATIONS_ENABLED||!ValueAnimator.areAnimatorsEnabled()||!isAttachedToWindow()||getWidth()<=0){motion.finish();positionPages();if(listener!=null)listener.onRest(motion.target());return;}
         GestureSpring spring=tap?tapSpring:gestureSpring;
         spring.start(motion.position()*getWidth(),motion.target()*getWidth(),velocity*getWidth());positionPages();
     }
@@ -80,9 +88,12 @@ final class RootPagePager extends FrameLayout {
         setTag(logical==0?"main_peer_today":logical==1?"main_peer_footprints":"main_peer_me");
         for(int i=0;i<pages.length;i++){
             View page=pages[i];float x=(i-value)*getWidth();
-            page.setTranslationX(x);page.setTranslationY(0);page.setAlpha(1);
+            boolean active=!frozen&&!isInteracting()&&i==logical;
+            page.setTranslationX(x);page.setTranslationY(0);page.setScaleX(1);page.setScaleY(1);
+            page.setAlpha(1);
             page.setVisibility(Math.abs(i-value)<1.001f?View.VISIBLE:View.INVISIBLE);
-            page.setImportantForAccessibility(!isInteracting()&&i==Math.round(value)?View.IMPORTANT_FOR_ACCESSIBILITY_AUTO:View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            page.setImportantForAccessibility(active?View.IMPORTANT_FOR_ACCESSIBILITY_AUTO:View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            if(page instanceof ViewGroup)((ViewGroup)page).setDescendantFocusability(active?focusPolicies[i]:ViewGroup.FOCUS_BLOCK_DESCENDANTS);
         }
         updateOwnership();if(listener!=null)listener.onProgress(value);invalidate();
     }
@@ -101,7 +112,7 @@ final class RootPagePager extends FrameLayout {
     }
     @Override protected void onSizeChanged(int w,int h,int ow,int oh){
         super.onSizeChanged(w,h,ow,oh);
-        if(ow>0&&(w!=ow||h!=oh)){cancelSprings();motion.reset(motion.target());if(listener!=null)listener.onRest(motion.target());}
+        if(ow>0&&(w!=ow||h!=oh)){cancelSprings();motion.reset(motion.target());positionPages();if(listener!=null)listener.onRest(motion.target());}
     }
     @Override protected void onDetachedFromWindow(){freeze();super.onDetachedFromWindow();}
 }

@@ -1,0 +1,5 @@
+<resources>
+    <item name="navigation_header_title" type="id" />
+    <item name="navigation_body" type="id" />
+    <item name="navigation_route" type="id" />
+</resources>

@@ -5573,6 +5573,900 @@ public final class UpgradeSmoke extends Instrumentation {
         if(requests.get()!=0||!before.equals(prefs.getString(NutritionStore.DAYS,"{}"))||PrivateProfileStore.read(c).optInt("dailyCalorieGoal")!=1000)throw new Exception("Historical water fix changed data, goal or network authority");
         Bundle result=new Bundle();result.putString("stream","PASS 0.6.1-beta.8: real seven-day calorie projection with historical label dimming, water/outline pixels independent of label opacity, six nonempty days visible in fresh HWUI frames and empty day unfilled, single-target wave/reduced-motion cleanup, natural-month stability/future guards/year and root/gesture regressions. Diary/manual calories and goal unchanged; synthetic fixtures, HTTP(S)="+requests.get()+".\n");finish(Activity.RESULT_OK,result);
     }
+    private void tabRestV062(MainActivity screen,int tab)throws Exception {
+        RootPagePager pager=(RootPagePager)field(screen,"rootPager");int selected=tab==3?2:tab;
+        if(pager.target()!=selected||(int)field(screen,"currentTab")!=tab||pager.isInteracting())throw new Exception("Tab target/rest mismatch");
+        for(int i=0;i<3;i++){
+            View page=pager.page(i);
+            if(Math.abs(page.getTranslationX()-(i-selected)*pager.getWidth())>1||page.getTranslationY()!=0||page.getAlpha()!=1||page.getScaleX()!=1||page.getScaleY()!=1)throw new Exception("Original horizontal root geometry not restored");
+            if(i!=selected&&page.getImportantForAccessibility()!=View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)throw new Exception("Outgoing root retained semantics");
+        }
+        View item=(View)invoke(screen,"findNavItem",new Class[]{int.class},tab),pill=(View)field(screen,"navIndicator");ViewGroup bar=(ViewGroup)field(screen,"navBar");
+        if(Math.abs(pill.getLeft()+pill.getTranslationX()+pill.getWidth()*.5f-(bar.getLeft()+item.getLeft()+item.getWidth()*.5f))>1||Math.abs(pill.getScaleY()-1)>.002||Math.abs(pill.getTranslationY())>.01)throw new Exception("Lens not at original steady geometry");
+    }
+    /** Isolated QA only: never run this fixture writer on the daily phone. */
+    private void revisionV062(Context c,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(c);java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        String date=new SimpleDateFormat("yyyy-MM-dd",Locale.CHINA).format(new Date());
+        String before=new JSONObject().put(date,new JSONObject().put("favorite",true).put("breakfast",new JSONObject().put("text","保留的动画回归早餐"))).toString();
+        JSONObject profile=new JSONObject().put("nightMode","true".equals(args.getString("night"))).put("decoration","green").put("bookFont","xiaolai").put("font",100)
+                .put("foodRecognitionOnboardingSeen",true).put("seenAnnouncementVersion",c.getPackageManager().getPackageInfo(c.getPackageName(),0).versionName).put("apiEnabled",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false);
+        prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).putString(NutritionStore.DAYS,before).commit();
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();
+        RootPagePager pager=(RootPagePager)field(screen,"rootPager");View[] identity={pager.page(0),pager.page(1),pager.page(2)};
+        String name=args.getString("name","v062b1-liquid");
+        for(int tab:new int[]{1,0,3,1,0}){
+            uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},tab)).performClick());
+            Thread.sleep(55);
+            uiAssert(()->{for(int i=0;i<3;i++){View page=pager.page(i);if(page.getAlpha()!=1||Math.abs(page.getTranslationX()-(i-pager.position())*pager.getWidth())>1)throw new Exception("Root slide has fade or competing position owner");}});
+            Thread.sleep(1900);uiAssert(()->tabRestV062(screen,tab));
+        }
+        // A real retained host stays at the exact held position until another MOVE or UP.
+        uiAssert(()->{pager.grab();pager.drag(-pager.getWidth()*.44f);});
+        float held=pager.position();Thread.sleep(300);
+        uiAssert(()->{
+            if(Math.abs(pager.position()-held)>.0001f||pager.isAnimating())throw new Exception("Held drag auto-advanced before UP");
+            pager.drag(-pager.getWidth()*.2f);if(Math.abs(pager.position()-.2f)>.0001f)throw new Exception("Reverse MOVE not 1:1");
+        });screenshot(name+"-held-reverse");
+        uiAssert(()->pager.release(0,true));Thread.sleep(1900);uiAssert(()->tabRestV062(screen,0));
+        if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+            View item=(View)invoke(screen,"findNavItem",new Class[]{int.class},0);long now=android.os.SystemClock.uptimeMillis();
+            uiAssert(()->{MotionEvent e=MotionEvent.obtain(now,now,MotionEvent.ACTION_DOWN,item.getWidth()/2,item.getHeight()/2,0);item.dispatchTouchEvent(e);e.recycle();});
+            Thread.sleep(450);
+            uiAssert(()->{
+                BottomNavIndicator lens=(BottomNavIndicator)field(screen,"bottomNavMotion");
+                if(lens.geometry.growth<screen.getResources().getDisplayMetrics().density*12||lens.geometry.contentScale>1.05f)throw new Exception("Lens does not dominate subtle glyph feedback");
+                if(item.getScaleX()!=1||item.getScaleY()!=1||(float)ownField(field(screen,"navHost"),"swell")<.7f)throw new Exception("Whole-bar drawing feedback missing or slot transformed");
+                View backdrop=(View)field(screen,"bottomNavBackdrop");
+                if(backdrop.isClickable()||backdrop.getWidth()<=((View)field(screen,"navHost")).getWidth())throw new Exception("Expanded background lacks independent noninteractive drawing room");
+                if(((View)field(screen,"bottomNavLens")).isClickable())throw new Exception("Visual lens added click handling");
+            });screenshot(name+"-held-lens");
+            uiAssert(()->{MotionEvent e=MotionEvent.obtain(now,now+500,MotionEvent.ACTION_CANCEL,item.getWidth()/2,item.getHeight()/2,0);item.dispatchTouchEvent(e);e.recycle();});
+        }
+        for(int tab:new int[]{3,1,0,1,0}){uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},tab)).performClick());Thread.sleep(45);}
+        Thread.sleep(1900);uiAssert(()->tabRestV062(screen,0));
+        for(int i=0;i<3;i++)if(pager.page(i)!=identity[i])throw new Exception("Tab slide recreated root page");
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}"))||requests.get()!=0)throw new Exception("Animation changed diary or requested network");
+        Bundle result=new Bundle();result.putString("stream","PASS revised 0.6.2-beta.1: original horizontal geometry, held/reverse/cancel root drag, retained pages, measured press expansion and content scale, noninteractive lens, rapid retarget, unchanged fixture and HTTP(S)=0. Isolated QA only; not visual acceptance.\n");finish(Activity.RESULT_OK,result);
+    }
+    /** Isolated-fixture render adapter: exactly one existing page render, no entry animator. */
+    private void renderContainerPageV062b3(MainActivity screen,boolean meal){
+        try{
+            boolean previous=(Boolean)field(screen,"suppressEntryAnimation");
+            setMainField(screen,"suppressEntryAnimation",true);
+            try{invoke(screen,meal?"renderMealManagementPage":"renderPreferencesPage",new Class[]{});}
+            finally{setMainField(screen,"suppressEntryAnimation",previous);}
+        }catch(Exception error){throw new RuntimeException(error);}
+    }
+    private float containerRevealV062b3(Object session,RectF content)throws Exception {
+        RectF bounds=(RectF)ownField(session,"bounds");View layer=(View)ownField(session,"layer");
+        return SettingsContainerMath.contentReveal(bounds.left,bounds.top,bounds.right,bounds.bottom,
+                (Float)ownField(session,"currentRadius"),content.left,content.top,content.right,content.bottom,
+                layer.getResources().getDisplayMetrics().density*8);
+    }
+    private float containerIdentityV062b3(Object session)throws Exception {
+        Object content=ownField(session,"content"),header=ownField(content,"header");
+        return SettingsContainerMath.identity((Float)ownField(session,"expansion"),
+                containerRevealV062b3(session,(RectF)ownField(header,"ink")),
+                containerRevealV062b3(session,(RectF)ownField(content,"body")));
+    }
+    private RectF positionContainerSourceV062b3(Object session)throws Exception {
+        Object layer=ownField(session,"layer");
+        java.lang.reflect.Method position=layer.getClass().getDeclaredMethod("positionSource",session.getClass());
+        position.setAccessible(true);position.invoke(layer,session);
+        return new RectF((RectF)ownField(session,"sourceDestination"));
+    }
+    private void containerSourceCaptureFailureV062b3(Object owner,View source)throws Exception {
+        android.graphics.drawable.GradientDrawable background=new android.graphics.drawable.GradientDrawable();
+        background.setColor(Color.RED);background.setAlpha(73);
+        View failing=new View(source.getContext()){
+            @Override public void draw(Canvas canvas){
+                if(android.os.Build.VERSION.SDK_INT>=29&&isForceDarkAllowed())
+                    throw new AssertionError("Source capture did not disable force-dark treatment");
+                throw new IllegalStateException("qa-source-draw");
+            }
+        };
+        failing.setBackground(background);failing.layout(0,0,120,80);
+        if(android.os.Build.VERSION.SDK_INT>=29)failing.setForceDarkAllowed(true);
+        java.lang.reflect.Method capture=owner.getClass().getDeclaredMethod("captureView",View.class);
+        capture.setAccessible(true);boolean failed=false;
+        try{capture.invoke(owner,failing);}
+        catch(java.lang.reflect.InvocationTargetException error){
+            if(!(error.getCause() instanceof IllegalStateException))throw error;
+            failed=true;
+        }
+        if(!failed||failing.getBackground()!=background||background.getAlpha()!=73)
+            throw new Exception("Source capture failure did not restore its real Drawable alpha");
+        if(android.os.Build.VERSION.SDK_INT>=29&&!failing.isForceDarkAllowed())
+            throw new Exception("Source capture failure did not restore its force-dark flag");
+    }
+    /** Actual renderer oracle: outside parent survives; inside parent is occluded; content stays put. */
+    private void containerPixelsV062b3(Object session)throws Exception {
+        java.lang.reflect.Method update=session.getClass().getDeclaredMethod("update",float.class);update.setAccessible(true);update.invoke(session,.5f);
+        View layer=(View)ownField(session,"layer");Bitmap parent=(Bitmap)ownField(session,"parent"),page=(Bitmap)ownField(session,"page");
+        Object content=ownField(session,"content"),header=ownField(content,"header");
+        RectF headerInk=(RectF)ownField(header,"ink"),headerRegion=(RectF)ownField(header,"region"),bodyInk=(RectF)ownField(content,"body");
+        RectF bounds=(RectF)ownField(session,"bounds");int width=parent.getWidth(),height=parent.getHeight(),x=width/2,outsideY=height-8,insideY=Math.round(bounds.centerY());
+        if(outsideY<=bounds.bottom+4)throw new Exception("Pixel probe lacks a static outside-container footer point");
+        int size=9,left=x-size/2,headerY=(int)Math.ceil(headerInk.top)+4,bodyY=(int)Math.ceil(Math.max(bodyInk.top,headerRegion.bottom))+4;
+        if(headerY+size>=headerInk.bottom||bodyY+size>=bodyInk.bottom)throw new Exception("Pixel fixture lacks whole measured header/body marker bands");
+        int[] headerPixels=new int[size*size],bodyPixels=new int[size*size],headerMark=new int[size*size],bodyMark=new int[size*size];
+        page.getPixels(headerPixels,0,size,left,headerY,size,size);page.getPixels(bodyPixels,0,size,left,bodyY,size,size);
+        java.util.Arrays.fill(headerMark,Color.MAGENTA);java.util.Arrays.fill(bodyMark,Color.CYAN);
+        int originalOutside=parent.getPixel(x,outsideY),originalInside=parent.getPixel(x,insideY);Bitmap frame=null;
+        try{
+            page.setPixels(headerMark,0,size,left,headerY,size,size);page.setPixels(bodyMark,0,size,left,bodyY,size,size);
+            frame=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(frame);
+            // Compose the original root Paper beneath the noninteractive visual owner.
+            android.graphics.drawable.Drawable paper=(android.graphics.drawable.Drawable)ownField(session,"paper");
+            if(paper!=null)paper.draw(canvas);else canvas.drawColor((Integer)ownField(session,"color"));
+            parent.setPixel(x,outsideY,Color.RED);parent.setPixel(x,insideY,Color.RED);layer.draw(canvas);
+            int firstOutside=frame.getPixel(x,outsideY),firstInside=frame.getPixel(x,insideY);
+            if(firstOutside!=Color.RED)throw new Exception("Static parent reference was faded or lost outside the opaque outline");
+            float identity=containerIdentityV062b3(session);
+            float targetAlpha=SettingsContainerMath.targetAlpha(identity);
+            float sourceAlpha=SettingsContainerMath.rowAlpha(identity);
+            if(sourceAlpha*targetAlpha>.000001f)throw new Exception("Source label and target identity are both readable");
+            if(targetAlpha==0){
+                if(frame.getPixel(x,headerY+size/2)==Color.MAGENTA||frame.getPixel(x,bodyY+size/2)==Color.CYAN)
+                    throw new Exception("Header/body bypassed the shared complete-band identity gate");
+            }else if(targetAlpha==1){
+                if(frame.getPixel(x,headerY+size/2)!=Color.MAGENTA||frame.getPixel(x,bodyY+size/2)!=Color.CYAN)
+                    throw new Exception("Shared target identity is displaced from its final native coordinates");
+            }
+            parent.setPixel(x,outsideY,Color.GREEN);parent.setPixel(x,insideY,Color.GREEN);frame.eraseColor(Color.TRANSPARENT);
+            if(paper!=null)paper.draw(canvas);else canvas.drawColor((Integer)ownField(session,"color"));layer.draw(canvas);
+            if(frame.getPixel(x,outsideY)!=Color.GREEN)throw new Exception("Parent outside the shrinking outline is not continuously restored");
+            if(frame.getPixel(x,insideY)!=firstInside)throw new Exception("Opaque moving container lets the inside parent sentinel show through");
+            if(Color.alpha(firstInside)!=255)throw new Exception("Moving container is a translucent ghost rather than opaque visual geometry");
+            update.invoke(session,.97f);frame.eraseColor(Color.TRANSPARENT);
+            if(paper!=null)paper.draw(canvas);else canvas.drawColor((Integer)ownField(session,"color"));layer.draw(canvas);
+            if(containerRevealV062b3(session,headerInk)!=1||containerRevealV062b3(session,bodyInk)!=1
+                    ||SettingsContainerMath.targetAlpha(containerIdentityV062b3(session))!=1)
+                throw new Exception("Near-full geometry did not admit the shared measured identity");
+            if(frame.getPixel(x,headerY+size/2)!=Color.MAGENTA||frame.getPixel(x,bodyY+size/2)!=Color.CYAN)throw new Exception("Header/body markers do not settle at their unchanged final coordinates");
+        }finally{
+            parent.setPixel(x,outsideY,originalOutside);parent.setPixel(x,insideY,originalInside);
+            page.setPixels(headerPixels,0,size,left,headerY,size,size);page.setPixels(bodyPixels,0,size,left,bodyY,size,size);
+            if(frame!=null)frame.recycle();
+        }
+    }
+    private void containerOwnerV062b3(MainActivity screen)throws Exception {
+        final PageCrossfade[] flow={null};final Object[] session={null};
+        final android.animation.ValueAnimator[] oldClock={null};final View[] identity={null};
+        final RectF[] measured={null},sourceBeforeReverse={null};
+        final Bitmap[][] textures={null};final int[] renders={0};final float[] reverseCorner={0};
+        final Object[] contentIdentity={null};final float[][] titleBaselineIdentity={null};
+        uiAssert(()->{
+            flow[0]=(PageCrossfade)field(screen,"pageCrossfade");flow[0].clear();
+            if(UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT!=SettingsContainerMath.FULL_A
+                    ||(int)field(screen,"mealMotionVariant")!=UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT)
+                throw new Exception("The accepted meal pilot does not default to A");
+            SettingsContainerTransform fresh=new SettingsContainerTransform(new FrameLayout(screen));
+            if((int)ownField(fresh,"selectedVariant")!=UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT)
+                throw new Exception("A new container owner defaults to another visual mode");
+            fresh.clear();
+            ViewGroup unchangedHost=(ViewGroup)field(screen,"content");View unchangedParent=unchangedHost.getChildAt(0);
+            Intent ordinaryIntent=new Intent(Intent.ACTION_MAIN);
+            invoke(screen,"onNewIntent",new Class[]{Intent.class},ordinaryIntent);
+            if((int)field(screen,"mealMotionVariant")!=UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT
+                    ||(int)ownField(ownField(flow[0],"container"),"selectedVariant")!=UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT
+                    ||unchangedHost.getChildAt(0)!=unchangedParent)
+                throw new Exception("An ordinary intent changed the default visual mode or business page");
+            // The retained geometry oracle explicitly selects its historical baseline.
+            flow[0].setMealContainerVariant(SettingsContainerMath.BASELINE);
+            ViewGroup host=(ViewGroup)field(screen,"content");View row=host.findViewWithTag("meal_management_entry");
+            if(row==null||row.getWidth()<=0||row.getHeight()<=0)throw new Exception("Container pilot lacks measured full-row anchor");
+            Matrix matrix=new Matrix();row.transformMatrixToGlobal(matrix);host.transformMatrixToLocal(matrix);
+            measured[0]=new RectF(0,0,row.getWidth(),row.getHeight());matrix.mapRect(measured[0]);
+            Object owner=ownField(flow[0],"container");containerSourceCaptureFailureV062b3(owner,row);
+            android.graphics.drawable.Drawable sourceBackground=row.getBackground();
+            int sourceBackgroundAlpha=sourceBackground==null?255:sourceBackground.getAlpha();
+            int sourceBackgroundColor=sourceBackground instanceof android.graphics.drawable.GradientDrawable
+                    &&((android.graphics.drawable.GradientDrawable)sourceBackground).getColor()!=null
+                    ?((android.graphics.drawable.GradientDrawable)sourceBackground).getColor().getDefaultColor():0;
+            // One real existing render supplies the same measured meal/header metadata as production.
+            flow[0].runMealContainer(()->{renders[0]++;renderContainerPageV062b3(screen,true);},1,row);identity[0]=host.getChildAt(0);
+            if(row.getBackground()!=sourceBackground||sourceBackground!=null&&sourceBackground.getAlpha()!=sourceBackgroundAlpha)
+                throw new Exception("Source capture replaced the real row background or left its alpha hidden");
+            if(sourceBackground instanceof android.graphics.drawable.GradientDrawable
+                    &&((android.graphics.drawable.GradientDrawable)sourceBackground).getColor()!=null
+                    &&((android.graphics.drawable.GradientDrawable)sourceBackground).getColor().getDefaultColor()!=sourceBackgroundColor)
+                throw new Exception("Visual outline clone changed the original row color");
+            if(renders[0]!=1)throw new Exception("Container repeated its render callback");
+            if(ownField(flow[0],"image")!=null)throw new Exception("Container stacked a Slide owner");
+            if(!android.animation.ValueAnimator.areAnimatorsEnabled()){
+                if(flow[0].active())throw new Exception("Animation zero retained a container session");invoke(screen,"closeMealManagementPage",new Class[]{});identity[0]=host.getChildAt(0);return;
+            }
+            if(!flow[0].active()||!flow[0].blocksIncomingInput())throw new Exception("Container does not own pending input");
+        });
+        if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+            waitForIdleSync();Thread.sleep(30);
+            uiAssert(()->{
+                Object owner=ownField(flow[0],"container");session[0]=ownField(owner,"current");
+                if(session[0]==null||!Boolean.TRUE.equals(ownField(session[0],"ready")))throw new Exception("Valid container anchor unexpectedly downgraded");
+                android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(session[0],"animator");
+                if(clock==null||clock.getDuration()!=SettingsContainerMath.DURATION_MS)throw new Exception("Container uses the wrong clock");
+                clock.pause();oldClock[0]=clock;contentIdentity[0]=ownField(session[0],"content");if(contentIdentity[0]==null)throw new Exception("Meal texture lacks measured content metadata");
+                RectF start=(RectF)ownField(session[0],"start"),end=(RectF)ownField(session[0],"end");
+                if(Math.abs(start.left-measured[0].left)>1||Math.abs(start.top-measured[0].top)>1||Math.abs(start.right-measured[0].right)>1||Math.abs(start.bottom-measured[0].bottom)>1)throw new Exception("Container source differs from actual row bounds");
+                ViewGroup host=(ViewGroup)field(screen,"content");
+                if(end.left!=0||end.top!=0||end.right!=host.getWidth()||end.bottom!=host.getHeight())throw new Exception("Container destination ignores actual host bounds");
+                Object source=ownField(session[0],"source");
+                RectF sourceTitle=(RectF)ownField(source,"title"),sourceInk=(RectF)ownField(source,"ink");
+                float[] sourceBaseline=(float[])ownField(source,"baseline");
+                titleBaselineIdentity[0]=(float[])ownField(contentIdentity[0],"titleBaseline");
+                RectF targetHeaderInk=(RectF)ownField(ownField(contentIdentity[0],"header"),"ink");
+                if(sourceTitle.isEmpty()||sourceInk.isEmpty()||!sourceInk.contains(sourceTitle)
+                        ||sourceBaseline.length!=2||!sourceTitle.contains(sourceBaseline[0],sourceBaseline[1]))
+                    throw new Exception("Source title/ink/baseline were not measured in the row's local visual coordinates");
+                if(titleBaselineIdentity[0].length!=2||!targetHeaderInk.contains(titleBaselineIdentity[0][0],titleBaselineIdentity[0][1]))
+                    throw new Exception("Target baseline is not measured in final page coordinates");
+                Bitmap sourceTexture=(Bitmap)ownField(session[0],"row");
+                if(Color.alpha(sourceTexture.getPixel(sourceTexture.getWidth()-2,sourceTexture.getHeight()/2))!=0
+                        ||Color.alpha(sourceTexture.getPixel(sourceTexture.getWidth()/2,sourceTexture.getHeight()-2))!=0)
+                    throw new Exception("Source content texture still contains a second opaque pill background");
+                float previousWidth=start.width(),previousHeight=start.height(),previousRadius=(Float)ownField(session[0],"radius");
+                boolean sourceMoved=false;
+                for(float progress:new float[]{0,.10f,.25f,.50f,.75f,.99f}){
+                    int time=Math.round(SettingsContainerMath.DURATION_MS*progress);clock.setCurrentPlayTime(time);float e=SettingsContainerMath.ease(time/(float)SettingsContainerMath.DURATION_MS);
+                    RectF bounds=(RectF)ownField(session[0],"bounds");
+                    float[] actual={bounds.left,bounds.top,bounds.right,bounds.bottom},a={start.left,start.top,start.right,start.bottom},b={end.left,end.top,end.right,end.bottom};
+                    for(int edge=0;edge<4;edge++){
+                        float edgeProgress=SettingsContainerMath.edgeProgress(e,edge);
+                        if(Math.abs(actual[edge]-SettingsContainerMath.lerp(a[edge],b[edge],edgeProgress))>1)
+                            throw new Exception("Container edge does not follow its shared phased geometry");
+                    }
+                    float radius=(Float)ownField(session[0],"currentRadius");
+                    if(bounds.width()<previousWidth-.01f||bounds.height()<previousHeight-.01f||radius<0||radius>previousRadius+.01f)throw new Exception("Container dimensions/corner do not expand smoothly");
+                    float sharedIdentity=containerIdentityV062b3(session[0]);
+                    float targetAlpha=SettingsContainerMath.targetAlpha(sharedIdentity),rowAlpha=SettingsContainerMath.rowAlpha(sharedIdentity);
+                    if(SettingsContainerMath.parentAlpha(e)!=1)throw new Exception("Static parent presentation loses opacity outside the outline");
+                    if(targetAlpha*rowAlpha>.000001f)throw new Exception("Source caption and target title are simultaneously readable");
+                    if(targetAlpha==0&&rowAlpha==0&&Math.abs(sharedIdentity-.4f)>.00001f)
+                        throw new Exception("Identity exchange contains a sustained blank interval");
+                    Object parentHeader=ownField(session[0],"parentHeader");
+                    if(parentHeader!=null){
+                        RectF parentInk=(RectF)ownField(parentHeader,"ink");
+                        float oldTitle=SettingsContainerMath.parentHeaderAlpha(bounds.top,parentInk.top,parentInk.bottom)*rowAlpha;
+                        if(targetAlpha>0&&oldTitle>0)throw new Exception("Old parent title competes with new header/body identity");
+                    }
+                    RectF sourcePose=positionContainerSourceV062b3(session[0]);
+                    if(progress==0&&(Math.abs(sourcePose.left-start.left)>1||Math.abs(sourcePose.top-start.top)>1))
+                        throw new Exception("Source visual does not begin at the measured full-row origin");
+                    if(Math.abs(sourcePose.top-start.top)>2||Math.abs(sourcePose.left-start.left)>2)sourceMoved=true;
+                    if(e>=.65f&&(Math.abs(sourcePose.left+sourceBaseline[0]-titleBaselineIdentity[0][0])>1
+                            ||Math.abs(sourcePose.top+sourceBaseline[1]-titleBaselineIdentity[0][1])>1))
+                        throw new Exception("Source-only title travel does not settle at the measured target baseline");
+                    if(SettingsContainerMath.pageOffsetY(bounds.top,end.top)!=0)throw new Exception("Target content drifts with the moving outline");
+                    if(ownField(session[0],"content")!=contentIdentity[0])throw new Exception("Moving frame replaced measured content identity");
+                    previousWidth=bounds.width();previousHeight=bounds.height();previousRadius=radius;
+                    if(host.getChildAt(0)!=identity[0]||renders[0]!=1)throw new Exception("Container frame recreated business content");
+                    if(identity[0].getTranslationX()!=0||identity[0].getTranslationY()!=0||identity[0].getScaleX()!=1||identity[0].getScaleY()!=1)throw new Exception("Container transformed the whole live page");
+                    if(identity[0].getAlpha()!=0||identity[0].getImportantForAccessibility()!=View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS||!flow[0].blocksIncomingInput())throw new Exception("Hidden real page still receives interaction");
+                }
+                if(!sourceMoved)throw new Exception("Source label stayed detached at its original pill while the container expanded");
+                containerPixelsV062b3(session[0]);
+                clock.setCurrentPlayTime(Math.round(SettingsContainerMath.DURATION_MS*.18f));
+                RectF current=new RectF((RectF)ownField(session[0],"bounds"));
+                float corner=(Float)ownField(session[0],"currentRadius");
+                sourceBeforeReverse[0]=positionContainerSourceV062b3(session[0]);
+                flow[0].runMealContainer(()->{renders[0]++;renderContainerPageV062b3(screen,false);},-1,null);identity[0]=host.getChildAt(0);
+                if(renders[0]!=2)throw new Exception("Reverse container repeated its render callback");
+                measured[0]=current; // Reversal must start from what was presented, not a stored endpoint.
+                reverseCorner[0]=corner;
+            });
+            waitForIdleSync();Thread.sleep(30);
+            uiAssert(()->{
+                Object owner=ownField(flow[0],"container"),current=ownField(owner,"current");
+                if(current==null||!Boolean.TRUE.equals(ownField(current,"ready")))throw new Exception("Reverse container unexpectedly downgraded");
+                if(ownField(current,"content")!=contentIdentity[0]
+                        ||ownField(ownField(current,"content"),"titleBaseline")!=titleBaselineIdentity[0])
+                    throw new Exception("Reverse lost title/band metadata paired with its reused page texture");
+                android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(current,"animator");clock.pause();clock.setCurrentPlayTime(0);
+                RectF bounds=(RectF)ownField(current,"bounds");
+                if(Math.abs(bounds.left-measured[0].left)>1||Math.abs(bounds.top-measured[0].top)>1||Math.abs(bounds.right-measured[0].right)>1||Math.abs(bounds.bottom-measured[0].bottom)>1||Math.abs((Float)ownField(current,"currentRadius")-reverseCorner[0])>.01f)throw new Exception("Reverse geometry jumped to an endpoint");
+                RectF fromSource=(RectF)ownField(current,"fromSource"),sourcePose=positionContainerSourceV062b3(current);
+                RectF before=sourceBeforeReverse[0];
+                if(fromSource==null||Math.abs(fromSource.left-before.left)>.01f||Math.abs(fromSource.top-before.top)>.01f
+                        ||Math.abs(fromSource.right-before.right)>.01f||Math.abs(fromSource.bottom-before.bottom)>.01f
+                        ||Math.abs(sourcePose.left-before.left)>.01f||Math.abs(sourcePose.top-before.top)>.01f
+                        ||Math.abs(sourcePose.right-before.right)>.01f||Math.abs(sourcePose.bottom-before.bottom)>.01f)
+                    throw new Exception("Reverse source-only pose jumped away from its currently presented position");
+                oldClock[0].end();if(ownField(owner,"current")!=current)throw new Exception("Stale clock cleared the new container owner");
+                textures[0]=new Bitmap[]{(Bitmap)ownField(current,"parent"),(Bitmap)ownField(current,"row"),(Bitmap)ownField(current,"page")};View removedLayer=(View)ownField(current,"layer");
+                Bitmap fillPixel=(Bitmap)ownField(removedLayer,"fillPixel"),paperPixel=(Bitmap)ownField(removedLayer,"paperPixel");
+                if(fillPixel==null||fillPixel.isRecycled()||paperPixel==null||paperPixel.isRecycled()||paperPixel==fillPixel
+                        ||paperPixel.getPixel(0,0)!=(Integer)ownField(current,"color"))
+                    throw new Exception("Active morph has no independent owned paper and card pixels");
+                flow[0].clear();
+                if(flow[0].active()||flow[0].blocksIncomingInput()||identity[0].getAlpha()!=1||identity[0].getImportantForAccessibility()==View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)throw new Exception("Container clear left a ghost/input gate");
+                if(ownField(owner,"current")!=null||removedLayer.getParent()!=null)throw new Exception("Container clear left its overlay attached");
+                if(!fillPixel.isRecycled()||!paperPixel.isRecycled())throw new Exception("Released overlay retained its paper or card pixel");
+                Bitmap clearedPixel=Bitmap.createBitmap(1,1,Bitmap.Config.ARGB_8888);
+                try{removedLayer.draw(new Canvas(clearedPixel));if(clearedPixel.getPixel(0,0)!=Color.TRANSPARENT)throw new Exception("Released layer still draws an opaque/transparent input mask");}finally{clearedPixel.recycle();}
+                for(Bitmap texture:textures[0])if(texture==null||!texture.isRecycled())throw new Exception("Container clear retained a private snapshot");
+                if(renders[0]!=2)throw new Exception("Clear or old end callback rendered business content");
+            });
+        }
+        uiAssert(()->{
+            flow[0].runMealContainer(()->renders[0]++,1,null);
+            if(flow[0].active()||renders[0]!=(android.animation.ValueAnimator.areAnimatorsEnabled()?3:2))throw new Exception("Missing source fallback is not a single safe render");
+            invoke(screen,"openMealManagementPage",new Class[]{});
+            if(!Boolean.TRUE.equals(field(screen,"inMealManagementPage"))||ownField(flow[0],"image")!=null)throw new Exception("Actual meal entry did not use the scoped container route");
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()&&!flow[0].active())throw new Exception("Actual meal entry has no container owner");
+            flow[0].clear();invoke(screen,"closeMealManagementPage",new Class[]{});
+        });waitForIdleSync();Thread.sleep(60);
+        uiAssert(()->{
+            if(Boolean.TRUE.equals(field(screen,"inMealManagementPage"))||!Boolean.TRUE.equals(invoke(screen,"isPreferencesRootVisible",new Class[]{})))throw new Exception("Actual meal pop changed more than one route");
+            if(ownField(flow[0],"image")!=null)throw new Exception("Actual meal pop fell back to the 450ms Slide");
+            flow[0].clear();
+            flow[0].setMealContainerVariant(UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT);
+        });
+    }
+    /** Wait for the real source draw and bounded preparation, then freeze the existing clock. */
+    private void waitContainerClockV062b6(PageCrossfade flow)throws Exception {
+        long deadline=android.os.SystemClock.uptimeMillis()+2000;
+        final boolean[] started={false};
+        do{
+            uiAssert(()->{
+                Object session=ownField(ownField(flow,"container"),"current");
+                if(session==null)throw new Exception("Measured container preparation unexpectedly fell back");
+                if(!Boolean.TRUE.equals(ownField(session,"ready")))return;
+                android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(session,"animator");
+                if(clock==null||!clock.isStarted())return;
+                clock.pause();started[0]=true;
+            });
+            if(started[0])return;
+            waitForIdleSync();Thread.sleep(5);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        throw new Exception("Container did not finish its bounded preparation and draw its source frame");
+    }
+    /** Isolated preparation/cancellation oracle; decoded phone frames own color acceptance. */
+    private void containerPreparationV062b6(MainActivity screen)throws Exception {
+        if(!android.animation.ValueAnimator.areAnimatorsEnabled())return;
+        uiAssert(()->{
+            PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");flow.clear();
+            flow.setMealContainerVariant(SettingsContainerMath.FULL_A);
+            ViewGroup host=(ViewGroup)field(screen,"content");int[] renders={0};
+            View source=host.findViewWithTag("meal_management_entry");
+            flow.runMealContainer(()->{renders[0]++;renderContainerPageV062b3(screen,true);},1,source);
+            Object owner=ownField(flow,"container"),session=ownField(owner,"current");
+            View arriving=host.getChildAt(0);
+            try{
+                int width=host.getWidth(),height=host.getHeight();
+                host.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height,View.MeasureSpec.EXACTLY));
+                host.layout(host.getLeft(),host.getTop(),host.getRight(),host.getBottom());
+                ViewTreeObserver.OnPreDrawListener pending=(ViewTreeObserver.OnPreDrawListener)ownField(session,"pending");
+                if(pending==null)throw new Exception("A skipped its first-draw preparation gate");
+                pending.onPreDraw();
+                View layer=(View)ownField(session,"layer");
+                if(layer==null||Boolean.TRUE.equals(ownField(session,"ready"))||ownField(session,"animator")!=null
+                        ||host.getChildAt(0)!=arriving||arriving.getAlpha()!=1||renders[0]!=1||!flow.blocksIncomingInput()
+                        ||arriving.getImportantForAccessibility()!=View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                        ||((ViewGroup)arriving).getDescendantFocusability()!=ViewGroup.FOCUS_BLOCK_DESCENDANTS)
+                    throw new Exception("Preparation changed the render owner or exposed interactive incoming content");
+                Bitmap fill=(Bitmap)ownField(layer,"fillPixel"),paper=(Bitmap)ownField(layer,"paperPixel");
+                int paperColor=(Integer)ownField(session,"color"),paperGeneration=paper.getGenerationId();
+                if(paper==fill||paper.isRecycled()||paper.getPixel(0,0)!=paperColor)
+                    throw new Exception("Preparation paper does not own an independent, stable theme-color bitmap");
+                Bitmap frame=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);
+                Runnable stale;
+                try{
+                    frame.eraseColor(Color.MAGENTA);layer.draw(new Canvas(frame));
+                    stale=(Runnable)ownField(session,"captureAfterDraw");
+                    if(stale==null)throw new Exception("Preparation did not queue its one bounded capture");
+                    layer.draw(new Canvas(frame));
+                    if(ownField(layer,"paperPixel")!=paper||paper.getGenerationId()!=paperGeneration
+                            ||paper.getPixel(0,0)!=paperColor)
+                        throw new Exception("Preparation rewrote the submitted paper texture while drawing its card");
+                    if(ownField(session,"captureAfterDraw")!=stale)
+                        throw new Exception("Preparation queued competing capture callbacks");
+                    for(int row=0;row<=8;row++)for(int col=0;col<=8;col++){
+                        int color=frame.getPixel(Math.min(width-1,col*width/8),Math.min(height-1,row*height/8));
+                        if(Color.alpha(color)!=255||color==Color.MAGENTA)
+                            throw new Exception("Preparation has a transparent gap over the real incoming page");
+                    }
+                }finally{frame.recycle();}
+                Bitmap parent=(Bitmap)ownField(session,"parent"),row=(Bitmap)ownField(session,"row");
+                flow.clear();
+                if(!parent.isRecycled()||!row.isRecycled()||!fill.isRecycled()||!paper.isRecycled()
+                        ||ownField(session,"captureAfterDraw")!=null||arriving.getAlpha()!=1||flow.active()
+                        ||arriving.getImportantForAccessibility()==View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)
+                    throw new Exception("Preparation clear retained textures, callback or incoming input restrictions");
+                flow.runMealContainer(()->{renders[0]++;renderContainerPageV062b3(screen,false);},-1,null);
+                Object successor=ownField(owner,"current");View returning=host.getChildAt(0);
+                stale.run();
+                if(successor==null||ownField(owner,"current")!=successor||host.getChildAt(0)!=returning
+                        ||renders[0]!=2||Boolean.TRUE.equals(field(screen,"inMealManagementPage")))
+                    throw new Exception("Stale prepared capture changed its successor or repeated navigation");
+            }finally{
+                flow.clear();flow.setMealContainerVariant(UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT);
+            }
+        });
+    }
+    /** Isolated A/B contracts use the real route render once per accepted request. */
+    private void containerExperimentsV062b4(MainActivity screen)throws Exception {
+        for(int selected:new int[]{SettingsContainerMath.FULL_A,SettingsContainerMath.LOCAL_B}){
+            final int mode=selected;
+            final PageCrossfade[] flow={null};
+            final Object[] session={null},pageMetadata={null};
+            final Bitmap[] pageTexture={null};
+            final View[] arriving={null};
+            final RectF[] reverseBounds={null},reverseSource={null};
+            final android.animation.ValueAnimator[] stale={null};
+            final int[] renders={0};
+            final android.graphics.drawable.Drawable[] originalPaper={null};
+            final int[] poisonPaperDraws={0};
+            try{
+            uiAssert(()->{
+                flow[0]=(PageCrossfade)field(screen,"pageCrossfade");
+                flow[0].clear();
+                if(mode==SettingsContainerMath.FULL_A){
+                    originalPaper[0]=(android.graphics.drawable.Drawable)ownField(flow[0],"paperBackground");
+                    flow[0].setPaperBackground(new android.graphics.drawable.Drawable(){
+                        @Override public void draw(Canvas canvas){poisonPaperDraws[0]++;canvas.drawColor(Color.MAGENTA);}
+                        @Override public void setAlpha(int alpha){}
+                        @Override public void setColorFilter(android.graphics.ColorFilter filter){}
+                        @Override public int getOpacity(){return android.graphics.PixelFormat.OPAQUE;}
+                    });
+                }
+                ViewGroup host=(ViewGroup)field(screen,"content");
+                View parent=host.getChildAt(0);
+                Intent selection=new Intent(Intent.ACTION_MAIN).putExtra("meal_motion_variant",mode);
+                invoke(screen,"onNewIntent",new Class[]{Intent.class},selection);
+                if(selection.hasExtra("meal_motion_variant")||(int)field(screen,"mealMotionVariant")!=mode)
+                    throw new Exception("Visual experiment intent was not consumed into the Activity-local mode");
+                if(host.getChildAt(0)!=parent||!Boolean.TRUE.equals(invoke(screen,"isPreferencesRootVisible",new Class[]{})))
+                    throw new Exception("Selecting a visual mode changed the business page");
+                View row=host.findViewWithTag("meal_management_entry");
+                flow[0].runMealContainer(()->{renders[0]++;renderContainerPageV062b3(screen,true);},1,row);
+                arriving[0]=host.getChildAt(0);
+                if(renders[0]!=1||ownField(flow[0],"image")!=null)
+                    throw new Exception("A/B push repeated render or stacked another visual owner");
+                if(!android.animation.ValueAnimator.areAnimatorsEnabled()){
+                    if(flow[0].active())throw new Exception("Zero-duration A/B push retained presentation resources");
+                    flow[0].runMealContainer(()->{renders[0]++;renderContainerPageV062b3(screen,false);},-1,null);
+                    if(flow[0].active()||renders[0]!=2)throw new Exception("Zero-duration A/B return changed render count");
+                }
+            });
+            if(!android.animation.ValueAnimator.areAnimatorsEnabled())continue;
+            waitContainerClockV062b6(flow[0]);
+            uiAssert(()->{
+                Object owner=ownField(flow[0],"container");
+                session[0]=ownField(owner,"current");
+                if(session[0]==null||!Boolean.TRUE.equals(ownField(session[0],"ready")))
+                    throw new Exception("Measured A/B route unexpectedly fell back");
+                if((int)ownField(session[0],"variant")!=mode)throw new Exception("Session did not capture the selected visual mode");
+                if(mode==SettingsContainerMath.FULL_A&&ownField(ownField(session[0],"layer"),"cachedPaper")!=null)
+                    throw new Exception("A recorded another Paper instead of using the real root background");
+                android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(session[0],"animator");
+                clock.pause();stale[0]=clock;
+                if(clock.getDuration()!=SettingsContainerMath.duration(mode))throw new Exception("A/B duration differs from its visual contract");
+                RectF start=(RectF)ownField(session[0],"start"),viewport=(RectF)ownField(session[0],"end");
+                RectF local=(RectF)ownField(session[0],"localEnd");
+                if(mode==SettingsContainerMath.LOCAL_B){
+                    float density=screen.getResources().getDisplayMetrics().density;
+                    float horizontal=Math.min(8*density,Math.min(start.left,viewport.right-start.right));
+                    float vertical=Math.min(24*density,Math.min(start.top,viewport.bottom-start.bottom));
+                    if(Math.abs(local.left-(start.left-horizontal))>.1f||Math.abs(local.right-(start.right+horizontal))>.1f
+                            ||Math.abs(local.top-(start.top-vertical))>.1f||Math.abs(local.bottom-(start.bottom+vertical))>.1f)
+                        throw new Exception("B local shape does not use measured symmetric growth and available space");
+                    if(local.equals(viewport))throw new Exception("B replaced the full viewport endpoint with the local card");
+                }
+                for(float fraction:new float[]{0,.25f,.5f,.75f,.97f}){
+                    int time=Math.round(clock.getDuration()*fraction);clock.setCurrentPlayTime(time);
+                    float value=mode==SettingsContainerMath.LOCAL_B?fraction:SettingsContainerMath.ease(fraction);
+                    if(Math.abs((float)ownField(session[0],"expansion")-value)>.002f)
+                        throw new Exception("A/B clock uses the wrong timing coordinate");
+                    RectF bounds=(RectF)ownField(session[0],"bounds");
+                    float[] a={start.left,start.top,start.right,start.bottom};
+                    float[] b=mode==SettingsContainerMath.LOCAL_B?new float[]{local.left,local.top,local.right,local.bottom}
+                            :new float[]{viewport.left,viewport.top,viewport.right,viewport.bottom};
+                    float[] actual={bounds.left,bounds.top,bounds.right,bounds.bottom};
+                    for(int edge=0;edge<4;edge++){
+                        float progress=mode==SettingsContainerMath.LOCAL_B?SettingsContainerMath.localProgress(value)
+                                :SettingsContainerMath.edgeProgress(value,edge,mode);
+                        if(Math.abs(actual[edge]-SettingsContainerMath.lerp(a[edge],b[edge],progress))>1)
+                            throw new Exception("A/B geometry changed route layout or used an unmeasured endpoint");
+                    }
+                    if(mode==SettingsContainerMath.FULL_A){
+                        Object content=ownField(session[0],"content");
+                        float safe=Math.min(containerRevealV062b3(session[0],(RectF)ownField(ownField(content,"header"),"ink")),
+                                containerRevealV062b3(session[0],(RectF)ownField(content,"body")));
+                        float target=SettingsContainerMath.aTargetAlpha(value,safe),source=SettingsContainerMath.aSourceAlpha(value);
+                        if(target*source>.000001f||target>safe+.000001f)
+                            throw new Exception("A title/body identity conflicts with source text or safe clipping");
+                    }else if(SettingsContainerMath.localOldAlpha(value)*SettingsContainerMath.localTargetAlpha(value)>.000001f){
+                        throw new Exception("B source and destination identities coexist during handoff");
+                    }
+                    ViewGroup host=(ViewGroup)field(screen,"content");
+                    if(host.getChildAt(0)!=arriving[0]||renders[0]!=1||arriving[0].getAlpha()!=0
+                            ||arriving[0].getTranslationX()!=0||arriving[0].getTranslationY()!=0
+                            ||arriving[0].getScaleX()!=1||arriving[0].getScaleY()!=1||!flow[0].blocksIncomingInput())
+                        throw new Exception("A/B visual frame recreated/transformed business content or lost its input policy");
+                }
+                clock.setCurrentPlayTime(Math.round(clock.getDuration()*.28f));
+                View layer=(View)ownField(session[0],"layer");
+                Bitmap frame=Bitmap.createBitmap((int)viewport.width(),(int)viewport.height(),Bitmap.Config.ARGB_8888);
+                try{layer.draw(new Canvas(frame));}finally{frame.recycle();}
+                reverseBounds[0]=new RectF((RectF)ownField(session[0],"bounds"));
+                reverseSource[0]=new RectF((RectF)ownField(session[0],"sourceDestination"));
+                if(mode==SettingsContainerMath.LOCAL_B&&!reverseSource[0].equals(start))
+                    throw new Exception("B source contents drift away from the original row");
+                pageMetadata[0]=ownField(session[0],"content");pageTexture[0]=(Bitmap)ownField(session[0],"page");
+                flow[0].runMealContainer(()->{renders[0]++;renderContainerPageV062b3(screen,false);},-1,null);
+                arriving[0]=((ViewGroup)field(screen,"content")).getChildAt(0);
+                if(renders[0]!=2)throw new Exception("A/B reverse repeated the navigation render");
+            });
+            waitContainerClockV062b6(flow[0]);
+            uiAssert(()->{
+                Object owner=ownField(flow[0],"container"),current=ownField(owner,"current");
+                if(current==null||!Boolean.TRUE.equals(ownField(current,"ready")))throw new Exception("A/B reverse lost its session");
+                android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(current,"animator");
+                clock.pause();clock.setCurrentPlayTime(0);
+                RectF bounds=(RectF)ownField(current,"bounds"),source=(RectF)ownField(current,"fromSource");
+                if(!bounds.equals(reverseBounds[0])||source==null||!source.equals(reverseSource[0])
+                        ||ownField(current,"content")!=pageMetadata[0]||ownField(current,"page")!=pageTexture[0])
+                    throw new Exception("A/B reverse jumped or lost the texture's measured metadata");
+                stale[0].end();if(ownField(owner,"current")!=current)throw new Exception("Old A/B completion cleared its successor");
+                Bitmap[] textures={(Bitmap)ownField(current,"parent"),(Bitmap)ownField(current,"row"),(Bitmap)ownField(current,"page")};
+                View removed=(View)ownField(current,"layer");
+                Bitmap fill=(Bitmap)ownField(removed,"fillPixel"),paper=(Bitmap)ownField(removed,"paperPixel");
+                if(paper==fill||paper.getPixel(0,0)!=(Integer)ownField(current,"color"))
+                    throw new Exception("A/B frame reused the paper bitmap as its changing card fill");
+                flow[0].clear();
+                if(flow[0].active()||flow[0].blocksIncomingInput()||removed.getParent()!=null||arriving[0].getAlpha()!=1)
+                    throw new Exception("A/B clear left a ghost presentation or input gate");
+                for(Bitmap texture:textures)if(!texture.isRecycled())throw new Exception("A/B clear retained a page texture");
+                if(!fill.isRecycled()||!paper.isRecycled()||renders[0]!=2||Boolean.TRUE.equals(field(screen,"inMealManagementPage")))
+                    throw new Exception("A/B cleanup changed route ownership or retained its fill texture");
+            });
+            }finally{
+                if(mode==SettingsContainerMath.FULL_A){
+                    uiAssert(()->{
+                        if(flow[0]!=null){flow[0].clear();flow[0].setPaperBackground(originalPaper[0]);}
+                        if(poisonPaperDraws[0]!=0)
+                            throw new Exception("A replayed the transition Paper during construction, drawing or cleanup");
+                    });
+                }
+            }
+        }
+        uiAssert(()->{
+            ViewGroup host=(ViewGroup)field(screen,"content");View parent=host.getChildAt(0);
+            Intent selection=new Intent(Intent.ACTION_MAIN).putExtra("meal_motion_variant",UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT);
+            invoke(screen,"onNewIntent",new Class[]{Intent.class},selection);
+            if((int)field(screen,"mealMotionVariant")!=UiTokens.SETTINGS_CONTAINER_EXPERIMENT_DEFAULT||host.getChildAt(0)!=parent)
+                throw new Exception("Restoring the accepted default changed the current business page");
+        });
+    }
+    private void awaitSettingsClockV062b7(MainActivity screen,Object previous)throws Exception {
+        boolean[] ready={false};long deadline=android.os.SystemClock.uptimeMillis()+2000;
+        do{
+            uiAssert(()->{
+                PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");
+                Object image=flow==null?null:ownField(flow,"image");
+                android.animation.ValueAnimator clock=flow==null?null:(android.animation.ValueAnimator)ownField(flow,"animator");
+                if(image==null||image==previous||clock==null||!clock.isStarted())return;
+                clock.pause();ready[0]=true;
+            });
+            if(ready[0])return;
+            Thread.sleep(16);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        throw new Exception("Settings clock did not start after its first window draw");
+    }
+    private void settingsPreparationV062b7(MainActivity screen)throws Exception {
+        if(!android.animation.ValueAnimator.areAnimatorsEnabled())return;
+        uiAssert(()->{
+            FrameLayout host=new FrameLayout(screen);ViewGroup root=(ViewGroup)field(screen,"root");
+            PageCrossfade flow=new PageCrossfade(host);int[] renders={0};
+            View old=new View(screen);old.setBackgroundColor(Color.RED);host.addView(old,new FrameLayout.LayoutParams(-1,-1));
+            root.addView(host,new ViewGroup.LayoutParams(200,200));
+            try{
+                host.measure(View.MeasureSpec.makeMeasureSpec(200,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(200,View.MeasureSpec.EXACTLY));host.layout(0,0,200,200);
+                flow.runSettings(()->{renders[0]++;View next=new View(screen);next.setBackgroundColor(Color.BLUE);host.addView(next,new FrameLayout.LayoutParams(-1,-1));},1);
+                host.measure(View.MeasureSpec.makeMeasureSpec(200,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(200,View.MeasureSpec.EXACTLY));host.layout(0,0,200,200);
+                android.view.ViewTreeObserver.OnPreDrawListener pending=(android.view.ViewTreeObserver.OnPreDrawListener)ownField(flow,"pending");
+                if(pending==null)throw new Exception("Settings preparation has no measured preDraw owner");
+                pending.onPreDraw();Object prepared=ownField(flow,"image");View next=host.getChildAt(0);
+                if(renders[0]!=1||prepared==null||Boolean.TRUE.equals(ownField(prepared,"layersPrepared"))
+                        ||next.getLayerType()!=View.LAYER_TYPE_NONE||next.getAlpha()!=1||!flow.blocksIncomingInput()
+                        ||next.getImportantForAccessibility()!=View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)
+                    throw new Exception("Settings first draw changed render, cache or input ownership");
+                if(old.getTranslationX()!=0||old.getAlpha()!=1||old.getWidth()!=host.getWidth()||old.getHeight()!=host.getHeight()
+                        ||old.getBackground()==null||old.getBackground().getOpacity()!=android.graphics.PixelFormat.OPAQUE)
+                    throw new Exception("Old settings sheet does not fully cover the visible preparation frame");
+                android.view.ViewTreeObserver.OnDrawListener drawn=(android.view.ViewTreeObserver.OnDrawListener)ownField(prepared,"firstDrawListener");
+                Runnable capture=(Runnable)ownField(prepared,"afterFirstDraw");
+                if(drawn==null||capture==null)throw new Exception("Settings preparation lacks its one-draw callback");
+                drawn.onDraw();drawn.onDraw();
+                if(!Boolean.TRUE.equals(ownField(prepared,"firstDrawQueued"))||ownField(prepared,"afterFirstDraw")!=capture
+                        ||Boolean.TRUE.equals(ownField(prepared,"layersPrepared")))
+                    throw new Exception("Settings cached during draw or replaced its queued callback");
+                flow.clear();
+                if(ownField(prepared,"firstDrawListener")!=null||ownField(prepared,"afterFirstDraw")!=null
+                        ||flow.active()||next.getAlpha()!=1||next.getLayerType()!=View.LAYER_TYPE_NONE
+                        ||next.getImportantForAccessibility()==View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)
+                    throw new Exception("Canceled first draw retained callbacks, layers or input gates");
+                flow.runSettings(()->{renders[0]++;View successor=new View(screen);successor.setBackgroundColor(Color.GREEN);host.addView(successor,new FrameLayout.LayoutParams(-1,-1));},-1);
+                Object current=ownField(flow,"image");capture.run();drawn.onDraw();
+                if(ownField(flow,"image")!=current||renders[0]!=2)
+                    throw new Exception("Old first-draw callback affected the successor settings owner");
+            }finally{flow.clear();root.removeView(host);}
+        });
+    }
+    /** Sample the real window before any software-render oracle can warm the sheet. */
+    private int presentedSettingCardV062b7(MainActivity screen,String title,String name)throws Exception {
+        final int[] point=new int[2];
+        uiAssert(()->{
+            View row=setting((View)field(screen,"content"),title);
+            if(row==null||!row.isShown()||row.getWidth()<=0||row.getHeight()<=0)
+                throw new Exception("No visible setting card for native color check: "+title);
+            Rect bounds=screenRect(row);
+            point[0]=Math.round(bounds.exactCenterX());
+            point[1]=bounds.top+Math.min(PaperComponents.dp(screen,8),bounds.height()/4);
+        });
+        Bitmap presented=getUiAutomation().takeScreenshot();
+        if(presented==null)throw new Exception("Native card screenshot unavailable: "+title);
+        try{
+            if(point[0]<0||point[1]<0||point[0]>=presented.getWidth()||point[1]>=presented.getHeight())
+                throw new Exception("Native card sample is outside the display");
+            int color=presented.getPixel(point[0],point[1]);
+            nearColorV31(UiTokens.card(true),color,4,"Night setting card differs from the warm-dark theme: "+title);
+            saveFrameV24(presented,name);return color;
+        }finally{presented.recycle();}
+    }
+    private void settingsNightCardsV062b7(MainActivity screen)throws Exception {
+        final boolean[] night={false};
+        uiAssert(()->night[0]=Boolean.TRUE.equals(invoke(screen,"nightDecoration",new Class[]{})));
+        int me=night[0]?presentedSettingCardV062b7(screen,"其他设置","v062b7-night-me"):0;
+        uiAssert(()->invoke(screen,"openPreferencesPage",new Class[]{}));settleV15();
+        if(!night[0])return;
+        int first=presentedSettingCardV062b7(screen,"震动","v062b7-night-other-first");
+        nearColorV31(me,first,4,"Opening Other settings changed the night card style");
+        uiAssert(()->invoke(screen,"openMealManagementPage",new Class[]{}));settleV15();
+        uiAssert(()->invoke(screen,"closeMealManagementPage",new Class[]{}));settleV15();
+        int returned=presentedSettingCardV062b7(screen,"震动","v062b7-night-other-return");
+        nearColorV31(first,returned,4,"Returning from Meal management changed the night card style");
+    }
+    private void revisionV062b3(Context c,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(c);java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        String before=new JSONObject().put("2000-03-08",new JSONObject().put("breakfast",new JSONObject().put("text","保留的设置回归记录"))).toString();
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false).put("foodRecognitionOnboardingSeen",true)
+                .put("nightMode","true".equals(args.getString("night"))).put("seenAnnouncementVersion",c.getPackageManager().getPackageInfo(c.getPackageName(),0).versionName);
+        prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit();
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();
+        uiAssert(()->invoke(screen,"showTab",new Class[]{int.class,boolean.class},3,false));settleV15();
+        settingsNightCardsV062b7(screen);
+        settingsPreparationV062b7(screen);
+        final android.animation.ValueAnimator[] stale={null};
+        final Object[] previous={null};
+        uiAssert(()->{
+            invoke(screen,"openVibrationPage",new Class[]{});
+            PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");
+            if(!android.animation.ValueAnimator.areAnimatorsEnabled()){if(flow.active())throw new Exception("Reduced animation retained scene");invoke(screen,"closeVibrationPage",new Class[]{});return;}
+        });waitForIdleSync();
+        if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+            awaitSettingsClockV062b7(screen,null);
+            uiAssert(()->{
+                PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");Object image=ownField(flow,"image");previous[0]=image;
+                android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(flow,"animator");if(clock==null||clock.getDuration()!=450)throw new Exception("Settings clock not 450ms");clock.pause();clock.setCurrentPlayTime(90);stale[0]=clock;
+                ViewGroup host=(ViewGroup)field(screen,"content");float width=host.getWidth();
+                if(Math.abs((float)ownField(image,"travel")-width*.25f)>1)throw new Exception("Settings traveled a full screen");
+                java.util.ArrayList<View> incoming=(java.util.ArrayList<View>)ownField(flow,"incoming");java.util.ArrayList<View> outgoing=(java.util.ArrayList<View>)ownField(image,"outgoing");
+                View next=incoming.get(0),old=outgoing.get(0);
+                java.util.ArrayList<View> cached=(java.util.ArrayList<View>)ownField(image,"layerViews");
+                if(!Boolean.TRUE.equals(ownField(image,"firstDrawQueued"))||ownField(image,"firstDrawListener")!=null
+                        ||ownField(image,"afterFirstDraw")!=null||!Boolean.TRUE.equals(ownField(image,"layersPrepared")))
+                    throw new Exception("Settings animation started before its normal drawing and cache preparation completed");
+                if(cached.contains(next)&&next.getLayerType()!=View.LAYER_TYPE_HARDWARE)
+                    throw new Exception("Prepared incoming settings cache lost its hardware layer");
+                if(cached.contains(old)&&old.getLayerType()!=View.LAYER_TYPE_HARDWARE)
+                    throw new Exception("Retained outgoing sheet lost its prepared hardware layer");
+                if(Math.abs(next.getTranslationX()-SettingsTransitionMath.incomingX(width,.2f,true,false))>1||Math.abs(old.getTranslationX()-SettingsTransitionMath.outgoingX(width,.2f,true,false))>1)throw new Exception("Pages do not share quarter-width timeline");
+                if(Math.abs(next.getAlpha()-SettingsTransitionMath.incomingAlpha(.2f))>.001||Math.abs(old.getAlpha()-SettingsTransitionMath.outgoingAlpha(.2f))>.001)throw new Exception("Content channel differs from raw progress gates");
+                if(old.getImportantForAccessibility()!=View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)throw new Exception("Outgoing settings still accessible");
+                View oldHeader=old.findViewWithTag("sticky_paper_header");if(oldHeader!=null&&oldHeader.getAlpha()!=0)throw new Exception("Old header overlaps new title at handoff");
+                invoke(screen,"openVibrationPage",new Class[]{});if(ownField(flow,"image")!=image)throw new Exception("Repeated accepted push rebuilt page");
+                clock.setCurrentPlayTime(0);if(!flow.blocksIncomingInput())throw new Exception("Invisible new root remains clickable");
+                clock.setCurrentPlayTime(110);invoke(screen,"closeVibrationPage",new Class[]{});
+            });waitForIdleSync();awaitSettingsClockV062b7(screen,previous[0]);
+            uiAssert(()->{
+                PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");Object current=ownField(flow,"image");stale[0].end();
+                if(ownField(flow,"image")!=current||Boolean.TRUE.equals(field(screen,"inVibrationPage")))throw new Exception("Old completion changed target/visual session");
+                android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(flow,"animator");if(clock!=null){clock.pause();clock.setCurrentPlayTime(225);clock.end();}
+                if(flow.active())throw new Exception("Completed settings retained scene");
+                ViewGroup host=(ViewGroup)field(screen,"content");for(int i=0;i<host.getChildCount();i++)if(host.getChildAt(i).getTranslationX()!=0||host.getChildAt(i).getAlpha()!=1)throw new Exception("Settings leaves a ghost transform");
+            });
+        }
+        settleV15();containerOwnerV062b3(screen);
+        settleV15();containerPreparationV062b6(screen);
+        settleV15();containerExperimentsV062b4(screen);
+        settleV15();uiAssert(()->invoke(screen,"handleBackNavigation",new Class[]{}));settleV15();
+        uiAssert(()->{
+            if(Boolean.TRUE.equals(field(screen,"inPreferencesPage"))||(int)field(screen,"currentTab")!=3)throw new Exception("System return changed wrong page");
+            RootPagePager pager=(RootPagePager)field(screen,"rootPager");for(int i=0;i<3;i++)if(Math.abs(pager.page(i).getTranslationX()-(i-pager.target())*pager.getWidth())>1||pager.page(i).getAlpha()!=1)throw new Exception("Settings changed root Tab presentation");
+        });
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}"))||requests.get()!=0)throw new Exception("Settings animation touched diary/network");
+        Bundle result=new Bundle();result.putString("stream","PASS settings motion: non-pilot 450ms/quarter-width host and alpha/input gates, scoped meal container four-edge/corner geometry, one render per request, reverse/stale-clock/clear and texture release, actual meal entry without Slide, single return and unchanged root geometry/diary; HTTP(S)=0. Isolated synthetic QA only; not visual acceptance.\n");finish(Activity.RESULT_OK,result);
+    }
+    private NavigationTransitionHistory navigationHistoryV062b8(MainActivity screen)throws Exception {
+        return (NavigationTransitionHistory)field(screen,"navigationTransitions");
+    }
+    private void assertNavigationEntryV062b8(MainActivity screen,String child,String parent,String sourceTag)throws Exception {
+        String accepted=(String)invoke(screen,"settingsSurfaceKey",new Class[]{});
+        if(!child.equals(accepted))throw new Exception("Business route differs from the accepted child: "+accepted);
+        NavigationTransitionHistory.Entry entry=navigationHistoryV062b8(screen).get(child);
+        if(entry==null||!parent.equals(entry.parent)||!sourceTag.equals(entry.sourceTag))
+            throw new Exception("Click source was not recorded against its actual parent/child: "+child);
+        for(java.lang.reflect.Field value:entry.getClass().getDeclaredFields())
+            if(value.getType()!=String.class)throw new Exception("Presentation origin retained non-identity state");
+        if(field(screen,"navigationSource")!=null)throw new Exception("Click source escaped its synchronous callback");
+    }
+    private void navigationOutlineWidthV062(Object session)throws Exception {
+        Object source=ownField(session,"source");
+        android.graphics.drawable.GradientDrawable original=
+                (android.graphics.drawable.GradientDrawable)ownField(source,"outline");
+        if(original==null)return;
+        android.graphics.drawable.GradientDrawable outline=(android.graphics.drawable.GradientDrawable)
+                original.getConstantState().newDrawable().mutate();
+        View layer=(View)ownField(session,"layer");
+        int expected=PaperComponents.dp(layer.getContext(),1);
+        int size=Math.max(64,expected*16);
+        Bitmap bitmap=Bitmap.createBitmap(size,size,Bitmap.Config.ARGB_8888);
+        try{
+            outline.setBounds(0,0,size,size);outline.setCornerRadius(0);outline.setAlpha(255);
+            outline.draw(new Canvas(bitmap));
+            int painted=0;
+            for(int y=0;y<size/2;y++)if(Color.alpha(bitmap.getPixel(size/2,y))>=128)painted++;
+            if(Math.abs(painted-expected)>1)
+                throw new Exception("Container outline changed the ordinary 1dp stroke: "+painted+" vs "+expected);
+        }finally{bitmap.recycle();}
+    }
+    private void finishNavigationMotionV062b8(MainActivity screen,NavigationTransitionHistory.Entry expected)throws Exception {
+        final PageCrossfade[] flow={null};final View[] arriving={null};final boolean[] shouldAnimate={false};
+        uiAssert(()->{
+            flow[0]=(PageCrossfade)field(screen,"pageCrossfade");
+            if(flow[0]==null)throw new Exception("Accepted child has no presentation owner");
+            if(ownField(flow[0],"image")!=null)throw new Exception("Generic container stacked the old Slide");
+            ViewGroup host=(ViewGroup)field(screen,"content");arriving[0]=host.getChildAt(0);
+            shouldAnimate[0]=android.animation.ValueAnimator.areAnimatorsEnabled()
+                    &&(long)host.getWidth()*host.getHeight()*8<=32L*1024*1024;
+            if(!shouldAnimate[0]&&flow[0].active())throw new Exception("Reduced/budget fallback retained a container");
+        });
+        if(shouldAnimate[0]){
+            waitContainerClockV062b6(flow[0]);
+            uiAssert(()->{
+                Object session=ownField(ownField(flow[0],"container"),"current");
+                if(!Boolean.TRUE.equals(ownField(session,"navigation"))
+                        ||(int)ownField(session,"variant")!=SettingsContainerMath.FULL_A)
+                    throw new Exception("Registered click did not use generic A");
+                NavigationTransitionHistory.Entry actual=(NavigationTransitionHistory.Entry)ownField(session,"entry");
+                if(actual==null||!actual.identity().equals(expected.identity()))
+                    throw new Exception("Visual session disagrees with the accepted navigation identity");
+                navigationOutlineWidthV062(session);
+                Object content=ownField(session,"content");
+                if(content==null||((List<?>)ownField(content,"lines")).isEmpty())
+                    throw new Exception("Generic long-page metadata lost its visible complete text rows");
+                android.animation.ValueAnimator clock=(android.animation.ValueAnimator)ownField(session,"animator");
+                if(clock.getDuration()>SettingsContainerMath.duration(SettingsContainerMath.FULL_A))
+                    throw new Exception("Generic A changed the verified duration");
+                ViewGroup host=(ViewGroup)field(screen,"content");
+                for(float progress:new float[]{.25f,.5f,.75f}){
+                    clock.setCurrentPlayTime(Math.round(clock.getDuration()*progress));
+                    if(host.getChildAt(0)!=arriving[0]||arriving[0].getAlpha()!=0
+                            ||arriving[0].getTranslationX()!=0||arriving[0].getTranslationY()!=0
+                            ||arriving[0].getScaleX()!=1||arriving[0].getScaleY()!=1)
+                        throw new Exception("Generic visual motion rebuilt or transformed the real child");
+                }
+                clock.end();
+                if(flow[0].active())throw new Exception("Generic A end retained presentation resources");
+            });
+        }
+        settleV15();settingsRestV31(screen);
+    }
+    private void clickNavigationV062b8(MainActivity screen,String title,String tag,String child)throws Exception {
+        final String[] parent={null},sourceTag={null};
+        uiAssert(()->{
+            ViewGroup host=(ViewGroup)field(screen,"content");View row=tag==null?setting(host,title):host.findViewWithTag(tag);
+            if(row==null)throw new Exception("Missing real click-origin option: "+title);
+            row.requestRectangleOnScreen(new Rect(0,0,row.getWidth(),row.getHeight()),true);
+        });
+        waitForIdleSync();Thread.sleep(30);
+        uiAssert(()->{
+            ViewGroup host=(ViewGroup)field(screen,"content");View row=tag==null?setting(host,title):host.findViewWithTag(tag);
+            parent[0]=(String)invoke(screen,"settingsSurfaceKey",new Class[]{});
+            sourceTag[0]=(String)row.getTag();
+            if(!row.performClick())throw new Exception("Original option did not accept click: "+title);
+            assertNavigationEntryV062b8(screen,child,parent[0],sourceTag[0]);
+        });
+        finishNavigationMotionV062b8(screen,new NavigationTransitionHistory.Entry(parent[0],child,sourceTag[0]));
+    }
+    private void returnNavigationV062b8(MainActivity screen,String method,String acceptedParent)throws Exception {
+        final NavigationTransitionHistory.Entry[] entry={null};
+        uiAssert(()->{
+            String child=(String)invoke(screen,"settingsSurfaceKey",new Class[]{});
+            entry[0]=navigationHistoryV062b8(screen).resolve(child,acceptedParent);
+            if(entry[0]==null)throw new Exception("Missing expected presentation ancestor for "+child);
+            invoke(screen,method,new Class[]{});
+        });
+        finishNavigationMotionV062b8(screen,entry[0]);
+        uiAssert(()->{
+            if(!acceptedParent.equals(invoke(screen,"settingsSurfaceKey",new Class[]{})))
+                throw new Exception("Visual return changed the business parent's identity");
+        });
+    }
+    private void renderNavigationFixtureV062b8(MainActivity screen,String method){
+        try{
+            boolean previous=(Boolean)field(screen,"suppressEntryAnimation");
+            setMainField(screen,"suppressEntryAnimation",true);
+            try{invoke(screen,method,new Class[]{});}finally{setMainField(screen,"suppressEntryAnimation",previous);}
+        }catch(Exception error){throw new RuntimeException(error);}
+    }
+    private void navigationCrossEntryV062b8(MainActivity screen)throws Exception {
+        if(!android.animation.ValueAnimator.areAnimatorsEnabled())return;
+        final PageCrossfade[] flow={null};final int[] renders={0};
+        final NavigationTransitionHistory.Entry first=new NavigationTransitionHistory.Entry("preferences","vibration","setting_row_震动");
+        uiAssert(()->{
+            flow[0]=(PageCrossfade)field(screen,"pageCrossfade");flow[0].clear();
+            View source=((ViewGroup)field(screen,"content")).findViewWithTag(first.sourceTag);
+            flow[0].runContainer(()->{renders[0]++;renderNavigationFixtureV062b8(screen,"renderVibrationPage");},1,source,first.key(),()->first);
+        });
+        waitContainerClockV062b6(flow[0]);
+        uiAssert(()->{
+            Object owner=ownField(flow[0],"container"),old=ownField(owner,"current");
+            android.animation.ValueAnimator stale=(android.animation.ValueAnimator)ownField(old,"animator");stale.setCurrentPlayTime(180);
+            Bitmap[] snapshots={(Bitmap)ownField(old,"parent"),(Bitmap)ownField(old,"row"),(Bitmap)ownField(old,"page")};
+            NavigationTransitionHistory.Entry next=new NavigationTransitionHistory.Entry("vibration","meal-management","different-entry");
+            flow[0].runContainer(()->{renders[0]++;renderNavigationFixtureV062b8(screen,"renderMealManagementPage");},1,null,next.key(),()->next);
+            ViewGroup host=(ViewGroup)field(screen,"content");View accepted=host.getChildAt(0);
+            if(renders[0]!=2||flow[0].active()||!Boolean.TRUE.equals(field(screen,"inMealManagementPage")))
+                throw new Exception("Cross-entry interruption reused old page content or repeated render");
+            stale.end();
+            if(host.getChildAt(0)!=accepted||renders[0]!=2||flow[0].active())
+                throw new Exception("Old generic completion overwrote the accepted new child");
+            for(Bitmap snapshot:snapshots)if(!snapshot.isRecycled())
+                throw new Exception("Cross-entry safe fallback leaked the old visual textures");
+        });
+        settleV15();settingsRestV31(screen);
+    }
+    /** Fixture writer for an independent QA device; ordinary package delivery never runs this. */
+    private void revisionV062b8(Context c,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(c);java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        String before=new JSONObject().put("2000-03-08",new JSONObject().put("favorite",true)
+                .put("breakfast",new JSONObject().put("text","通用导航保留记录"))).toString();
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false)
+                .put("foodRecognitionOnboardingSeen",true).put("nightMode","true".equals(args.getString("night")))
+                .put("seenAnnouncementVersion",c.getPackageManager().getPackageInfo(c.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit())
+            throw new Exception("Cannot prepare isolated generic navigation fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();rootTabV33(screen,3);
+        clickNavigationV062b8(screen,"其他设置",null,"preferences");
+        clickNavigationV062b8(screen,"震动",null,"vibration");returnNavigationV062b8(screen,"handleBackNavigation","preferences");
+        clickNavigationV062b8(screen,"餐次管理","meal_management_entry","meal-management");returnNavigationV062b8(screen,"closeMealManagementPage","preferences");
+        clickNavigationV062b8(screen,"未用餐文案",null,"meal-hints");
+        clickNavigationV062b8(screen,"缺席一次",null,"hint-section:skip:one");returnNavigationV062b8(screen,"closeHintSectionPage","meal-hints");
+        clickNavigationV062b8(screen,"缺席一次",null,"hint-section:skip:one");returnNavigationV062b8(screen,"handleBackNavigation","preferences");
+        returnNavigationV062b8(screen,"handleBackNavigation","me");
+        clickNavigationV062b8(screen,"关于该软件",null,"about");
+        clickNavigationV062b8(screen,"字体来源",null,"font-sources");
+        uiAssert(()->{
+            if(!Boolean.TRUE.equals(field(screen,"inAboutSoftwarePage"))||!Boolean.TRUE.equals(field(screen,"inFontSourcesPage")))
+                throw new Exception("Font-source visual identity changed the existing shared About business flags");
+        });
+        returnNavigationV062b8(screen,"closeFontSourcesPage","about");
+        returnNavigationV062b8(screen,"closeAboutSoftwarePage","me");
+        clickNavigationV062b8(screen,"数据与安全",null,"data-security");
+        clickNavigationV062b8(screen,"收藏记录",null,"favorites");returnNavigationV062b8(screen,"closeFavoriteRecordsPage","data-security");
+        returnNavigationV062b8(screen,"handleBackNavigation","me");
+        rootTabV33(screen,1);clickNavigationV062b8(screen,"收藏","footprints_favorites","favorites");
+        returnNavigationV062b8(screen,"closeFavoriteRecordsPage","footprints");
+        rootTabV33(screen,3);clickNavigationV062b8(screen,"其他设置",null,"preferences");navigationCrossEntryV062b8(screen);
+        uiAssert(()->assertRenderPure(screen,prefs,before));
+        if(requests.get()!=0)throw new Exception("Generic navigation made a service request");
+        Bundle result=new Bundle();result.putString("stream","PASS generic A navigation fixture: real click origins, accepted route/Entry identities, long-page text metadata, nested and skipped parents, alternate Favorites origins, cross-entry fallback and stale completion, visual cleanup and unchanged fixture; HTTP(S)=0. Isolated QA only; not visual acceptance.\n");finish(Activity.RESULT_OK,result);
+    }
     @Override public void onStart(){
         Bundle result=new Bundle();
         try{
@@ -5582,6 +6476,9 @@ public final class UpgradeSmoke extends Instrumentation {
             // override that new fixture or permit a real service request.
             if(!c.getSharedPreferences(PrivateProfileStore.PRIVATE_PREFS,0).edit().clear().commit())throw new Exception("Cannot reset isolated QA private settings fixture");
             if(args!=null&&Arrays.asList("offline-v22","prepare-offline-v22","download-online-v22").contains(args.getString("scenario")))throw new IllegalArgumentException("Retired recognition QA scenario");
+            if(args!=null&&"revision-v062".equals(args.getString("scenario"))){revisionV062(c,p);return;}
+            if(args!=null&&"revision-v062b3".equals(args.getString("scenario"))){revisionV062b3(c,p);return;}
+            if(args!=null&&"revision-v062b8".equals(args.getString("scenario"))){revisionV062b8(c,p);return;}
             if(args!=null&&"revision-v061b8".equals(args.getString("scenario"))){revisionV061b8(c,p);return;}
             if(args!=null&&"revision-v061b7".equals(args.getString("scenario"))){revisionV061b7(c,p);return;}
             if(args!=null&&"revision-v061b6".equals(args.getString("scenario"))){revisionV061b6(c,p);return;}

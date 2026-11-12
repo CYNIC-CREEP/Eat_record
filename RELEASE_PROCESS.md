@@ -18,7 +18,7 @@ git diff --check
 
 版本在 `AndroidManifest.xml`：versionCode递增、versionName匹配 `src/com/eatrecord/app/ReleaseNotes.java` 最新条目。未发布Beta与线上正式版清单不同是正常现象，不为“对齐”自动改/上传server/update.json。
 
-0.6.1起每轮修改递增一个beta.N及versionCode，同轮修正/验证不再递增；未经用户明确批准始终交付Beta。更新渠道只推正式版，Beta只本地交付，不替换server/update.json或上传。build.ps1在未带-NoUpload时拒绝预发布版本，OpenList/蓝奏入口也在打包/认证/浏览器操作前拒绝非x.y.z正式版本；这些拦截不代表旧发布流程其余副作用已修复。本地转正式版本号与远端发布分别授权：用户可明确要求先使用正式版本号安装复查，仍须等待人工验收及发布指令后才上传。2026-11-03用户明确要求0.6.1/code193先安装魅族21人工复查，本轮不运行模拟器或自动功能测试，不因此把未测试项目标为通过。0.6.0的发布授权不延续到0.6.1。
+每轮功能修改递增一次Beta及versionCode，同轮修正/验证不再递增；未经用户明确批准始终交付Beta。新版本名称按当前任务确定，不沿用已结束版本的轮次。更新渠道只推正式版，Beta只本地交付，不替换server/update.json或上传。build.ps1在未带-NoUpload时拒绝预发布版本，OpenList/蓝奏入口也在打包/认证/浏览器操作前拒绝非x.y.z正式版本；这些拦截不代表旧发布流程其余副作用已修复。本地转正式版本号与远端发布分别授权：用户可明确要求先使用正式版本号安装复查，仍须等待人工验收及发布指令后才上传。单轮免测试或上传授权不延续到后续版本，也不能把未测试项目标为通过；当前验收范围和实际发布状态见CURRENT_TASK.md及对应发布报告。
 
 构建始终带NoUpload。已验收普通APK可在产品源码未变化、版本/签名/内容及SHA256重新核对后原样发布，避免重编译替换已验收字节；源码或资源变化则重新构建并验证。普通包复制为正式附件名时前后摘要须相同，后缀不改变调试标志或签名。
 
@@ -84,6 +84,13 @@ adb -s <test-serial> shell am instrument -w com.eatrecord.app/.UpgradeSmoke
 QA会改写日记/设置，不在用户日常手机运行，不发布。Android QA同设备串行，不同时启动多个instrumentation。通用回归覆盖真实JNI、草稿重建/SSE合同/确认/取消/手动优先/备份回收；云端结果使用假传输，不算真实服务商验证。
 
 定向入口（完整前提/结果见相应报告及tests/android/UpgradeSmoke.java）：
+
+- `-e scenario revision-v062b8`覆盖通用A入口的真实点击、长页、嵌套/跳层、收藏双来源、字体来源身份及跨入口中断清理。runner写合成夹具，仅独立QA设备。本轮仅使用最终classes编译，新增场景的真机视觉由用户安装普通包验收，见V062_BETA8_NAVIGATION_REPORT.md。
+
+- `-e scenario revision-v062b3`覆盖普通设置450ms/0.25W和餐次容器。历史几何oracle显式选择Baseline，结束恢复UiTokens当前默认。beta.6默认A，追加Poison Paper禁止重放、捕获异常ForceDark恢复、单次完整覆盖准备帧、bounded ready等待、准备中清理与旧回调隔离，以及paperPixel/fillPixel独立和释放断言。runner写合成夹具，仅独立QA设备使用。beta.7增加普通settings首帧后建缓存的准备态/取消断言，以及先取原生截图的Me/首次Other/Meal返回夜间颜色检查，避免软件绘制预热掩盖缺陷。日常魅族21只用普通同证书包和非破坏性ADB检查，QA目前仅编译。最新状态与证据见CURRENT_TASK.md，历史A/B和beta.5见V062_BETA4_AB_REPORT.md与V062_BETA5_FINAL_REPORT.md。
+
+
+- `-e scenario revision-v062`：已按beta.1返修更新为原根页横移、拖动停留／反向／取消、液态镜片按住膨胀与原图文强调、实例保留及日记不变；JVM入口同时运行TabMotionTest与纯几何检查。此runner仍写合成夹具，只能独立QA设备。本次用户只允许ADB真机，故只编译runner，不在日常魅族21执行；普通包获明确授权后以非破坏性UI及录屏检查，脚本每段输入检查应用前台，离开则停止并拒绝证据；魅族长按可能唤起Aicy，不改用户系统开关，优先短按录屏。上一轮Fade／4130项证据仅属历史，不作为返修通过。
 
 - `-e scenario revision-v061b8`：历史日期文字淡化与水位／容器透明度独立，真实七日热量投影、六个非空日及一个空日的实际HWUI像素，单目标／关闭动画，回归自然年月稳定、未来禁选与重建／手势。仅独立QA设备／合成数据；不能仅凭很小的非零软件像素判定历史水位可读。
 - `-e scenario revision-v061b7`：显示月淡化与未来禁选分离、跨月周历更新、weekday微差与略增波幅／单目标／减少动画；营养概览单窗口内联目标、显式保存／取消／清零／校验、最新设置合并和原位显示，短窗大字与实际IME。仅独立QA设备，手机仅普通包展开／取消，不保存测试目标。旧直接反射goal()的新建弹窗QA属于历史契约，不能为它恢复双重弹窗。
@@ -153,7 +160,7 @@ git archive --format=zip --prefix=EatRecord-<versionName>/ --output=dist/EatReco
 
 - 脚本：`scripts/publish-openlist.ps1`；支持BaseUrl、RemoteRoot、ArtifactSuffix、SkipBuild及从OPENLIST_USERNAME/OPENLIST_PASSWORD环境变量读取管理员凭据。只记录变量名，不写真实值或带凭据命令。
 - 旧脚本默认管理端点仍为HTTP，不直接采用。2026-10-29已确认管理HTTPS入口为 `https://pan.freefeng.icu`，管理挂载根 `/lanzou/Myapp/eat record`，用户提供的本机管理凭据可用；应用只读账号base_path为 `/lanzou/Myapp`，其请求路径是 `/eat record`。登录域名相同不代表两类账号路径相同，不在文档/Git写入真实凭据。
-- 该脚本仍保留全工作目录压缩、复用旧notes、删除同名文件/退休字体及上传额外服务文件等旧行为，尚未实现下述安全流程，不能直接作为当前发布入口。0.6.0的辅助程序位于被Git忽略的build/publish060，仅作本机实现与证据，新检出环境不能假定它存在。
+- 该脚本仍保留全工作目录压缩、复用旧notes、删除同名文件/退休字体及上传额外服务文件等旧行为，尚未实现下述安全流程，不能直接作为当前发布入口。最近0.6.1的安全辅助程序／证据位于被Git忽略的build/publish061，0.6.0历史实现位于build/publish060；两者仅属本机产物，新检出环境不能假定存在。不可不审查便复用脚本中的固定版本、暂存／备份名称或缓存路径。0.6.1执行证据见V061_PUBLISH_REPORT.md。
 - 当前流程：明确本版说明和server/update.json，保持dist/update.json字节一致；先上传到不参与版本扫描的临时目录，回下载核对APK/源码及必要文档，再启用正式版本目录。普通包可同时提供正式名和同字节-debug兼容文件名，后者用于目录扫描回退，不能使用QA包。
 - 最后切换共享教程与update.json：新文件先上传并校验，旧文件改名保留，再切换新文件；失败时恢复旧文件。只替换本版必要文档，不删除既有版本、字体或部署无关云服务。
 - 通过应用只读账号验证相对路径的清单与安装包；检查versionCode/versionName、notes、下载路径和实际字节。更新清单可保留旧绝对路径，由AppDownloadClient映射到只读目录，并提供已验证的GitHub附件作为回退。
