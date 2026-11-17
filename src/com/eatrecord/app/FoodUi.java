@@ -10,6 +10,11 @@ import org.json.*;
 import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.lang.ref.WeakReference;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /** New food UI uses the same days_json records and existing navigation. */
 public final class FoodUi {
@@ -18,6 +23,8 @@ public final class FoodUi {
         void saveProfile(); void saveDays(); void reload(); void refresh(); void api();
         /** Merge only the daily target into the latest settings and report durable success. */
         boolean saveDailyGoal(int value);
+        /** Defer rebuilding the underlying page until the detail or its preview yields ownership. */
+        default void mealAssignmentChanged(){ }
         default void recognition(){api();}
         default void recognitionEnabled(boolean enabled){try{profile().put("foodAutoAnalyze",enabled).put("foodPhotoConsent",enabled);saveProfile();refresh();}catch(JSONException ignored){}}
         void preview(String date,String meal,String file);
@@ -40,18 +47,21 @@ public final class FoodUi {
     public AlertDialog details(String date,String meal,JSONObject snapshot){
         host.reload();JSONObject latest=NutritionStore.find(NutritionStore.meal(host.days(),date,meal),snapshot.optString("id"));
         final JSONObject item=latest==null?snapshot:latest;
+        final String[] currentMeal={meal};
         LinearLayout content=new LinearLayout(a);content.setOrientation(1);content.setPadding(dp(22),dp(32),dp(22),dp(32));content.setTag("food_detail");
-        String file=item.optString("cutoutFile");boolean cutout=!file.isEmpty();if(!cutout)file=item.optString("sourcePhoto");
-        Bitmap decoded=NutritionStore.safeName(file)?thumbnail(new File(a.getFilesDir(),file)):null;
-        if(decoded==null&&cutout){decoded=thumbnail(new File(a.getFilesDir(),item.optString("sourcePhoto")));cutout=false;}
-        Bitmap outlined=decoded;
-        if(decoded!=null&&cutout){try{outlined=FoodStickerRenderer.create(a,decoded,Math.max(7,Math.max(decoded.getWidth(),decoded.getHeight())/40));}catch(OutOfMemoryError ignored){}if(outlined!=decoded)decoded.recycle();}
-        Bitmap rotated=FoodStickerRenderer.rotateDisplay(outlined,NutritionStore.displayRotation(item));
-        if(rotated!=outlined&&outlined!=null)outlined.recycle();
-        final Bitmap display=rotated;
-        final ImageView image=new ImageView(a);image.setTag("food_detail_image");image.setScaleType(ImageView.ScaleType.FIT_CENTER);image.setImageBitmap(display);image.setContentDescription(item.optString("dishName","食物贴纸")+"，点击查看原图");
-        if(display!=null)content.addView(image,new LinearLayout.LayoutParams(-1,dp(190)));
-        TextView name=text(DayFoodEntries.prefix(meal)+" · "+item.optString("dishName","食物贴纸"),19,true);name.setGravity(Gravity.CENTER);name.setPadding(0,dp(10),0,dp(8));content.addView(name);
+        FrameLayout media=new FrameLayout(a);media.setTag("food_detail_media");
+        TextView loading=text("正在加载图片…",13,false);loading.setGravity(Gravity.CENTER);loading.setTag("food_detail_loading");
+        final DetailImage image=new DetailImage(a,a.getFilesDir(),item,host.night(),FoodStickerRenderer.style(a),loading);
+        image.setTag("food_detail_image");image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setContentDescription(item.optString("dishName","食物贴纸")+"，点击查看原图");
+        media.addView(image,new FrameLayout.LayoutParams(-1,-1));media.addView(loading,new FrameLayout.LayoutParams(-1,-1));
+        content.addView(media,new LinearLayout.LayoutParams(-1,dp(190)));
+        LinearLayout nameRow=new LinearLayout(a);nameRow.setGravity(Gravity.CENTER);nameRow.setPadding(0,dp(10),0,dp(8));
+        TextView mealPrefix=text(DayFoodEntries.prefix(meal),19,true);mealPrefix.setTag("food_detail_meal");mealPrefix.setGravity(Gravity.CENTER);
+        mealPrefix.setMinHeight(dp(48));mealPrefix.setMinWidth(dp(48));
+        nameRow.addView(mealPrefix,new LinearLayout.LayoutParams(dp(48),-2));
+        TextView name=text("· "+item.optString("dishName","食物贴纸"),19,true);name.setGravity(Gravity.CENTER);
+        name.setMaxWidth(Math.max(dp(60),PaperComponents.dialogWidth(a)-dp(92)));nameRow.addView(name,new LinearLayout.LayoutParams(-2,-2));content.addView(nameRow);
         JSONObject n=item.optJSONObject("nutrients");
         View nutritionEnd=null;
         if(n!=null&&"completed".equals(item.optString("status"))){
@@ -72,21 +82,32 @@ public final class FoodUi {
             TextView reference=text(resultReference(item),11,false);reference.setTag("food_detail_reference");reference.setTextColor(UiTokens.secondary(host.night()));reference.setPadding(0,0,0,dp(16));content.addView(reference);
         }else{TextView pending=text("这张贴纸暂无营养数据，可配置视觉 API 后识别，或手动填写。",13,false);pending.setPadding(0,dp(12),0,dp(12));content.addView(pending);}
         String error=item.optString("error");if(!error.isEmpty())content.addView(text(error,12,false));
-        JSONObject mealRecord=NutritionStore.meal(host.days(),date,meal);
-        if(mealRecord!=null&&!mealRecord.optString("text").trim().isEmpty()){
-            TextView note=text("餐次备注\n"+mealRecord.optString("text"),13,false);note.setTag("food_detail_note");note.setPadding(0,dp(14),0,dp(14));content.addView(note);
-        }
+        TextView note=text("",13,false);note.setTag("food_detail_note");note.setPadding(0,dp(14),0,dp(14));content.addView(note);
+        Runnable updateMealLabel=()->{
+            mealPrefix.setText(DayFoodEntries.prefix(currentMeal[0]));
+            mealPrefix.setContentDescription("餐次"+DayFoodEntries.mealTitle(currentMeal[0])+"，点击切换为"+DayFoodEntries.mealTitle(FoodMealAssignment.nextMeal(currentMeal[0])));
+            JSONObject mealRecord=NutritionStore.meal(host.days(),date,currentMeal[0]);
+            String remark=mealRecord==null?"":mealRecord.optString("text");
+            note.setText("餐次备注\n"+remark);note.setVisibility(remark.trim().isEmpty()?View.GONE:View.VISIBLE);
+        };updateMealLabel.run();
         ScrollView scroll=new CompactDetailScroll(content,nutritionEnd);scroll.setTag("food_detail_scroll");
         scroll.setVerticalScrollBarEnabled(true);scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);scroll.addView(content);
         FrameLayout shell=new FrameLayout(a);shell.setTag("food_detail_shell");shell.addView(scroll,new FrameLayout.LayoutParams(-1,-2));
         AlertDialog dialog=builder().create();dialog.setView(shell,0,0,0,0);
         final boolean[] previewOpening={false};
+        mealPrefix.setEnabled(!item.optString("id").isEmpty());
+        mealPrefix.setOnClickListener(v->{
+            if(!dialog.isShowing()||previewOpening[0]||a.isFinishing()||a.isDestroyed())return;
+            String next=FoodMealAssignment.nextMeal(currentMeal[0]);
+            if(!FoodAnalysisJobService.moveMeal(a,date,currentMeal[0],next,item.optString("id"))){message("餐次未能保存，请重新打开餐食详情后重试");return;}
+            currentMeal[0]=next;host.reload();updateMealLabel.run();host.mealAssignmentChanged();
+        });
         image.setOnClickListener(v->{
             if(previewOpening[0]||a.isFinishing()||a.isDestroyed())return;
             String preview=preferredPreviewFile(a.getFilesDir(),item);
             if(preview.isEmpty()){message("图片文件已不存在，餐食详情已保留");return;}
             previewOpening[0]=true;
-            try{host.previewDetails(date,meal,preview,()->dialog.isShowing()&&!a.isFinishing()&&!a.isDestroyed(),opened->{
+            try{host.previewDetails(date,currentMeal[0],preview,()->dialog.isShowing()&&!a.isFinishing()&&!a.isDestroyed(),opened->{
                 if(!dialog.isShowing())return;
                 previewOpening[0]=false;
                 if(opened)dialog.dismiss();else message("图片暂时无法打开，餐食详情已保留");
@@ -97,8 +118,8 @@ public final class FoodUi {
                 previewOpening[0]=false;message("图片暂时无法打开，餐食详情已保留");
             }
         });
-        TextView edit=PaperComponents.button(a,"修改菜名、份量和营养",host.night(),v->{dialog.dismiss();edit(date,meal,item);});edit.setTag("food_detail_edit");content.addView(edit);
-        TextView more=PaperComponents.button(a,"更多操作",host.night(),v->{dialog.dismiss();actions(date,meal,item);});more.setTag("food_detail_more");
+        TextView edit=PaperComponents.button(a,"修改菜名、份量和营养",host.night(),v->{dialog.dismiss();edit(date,currentMeal[0],item);});edit.setTag("food_detail_edit");content.addView(edit);
+        TextView more=PaperComponents.button(a,"更多操作",host.night(),v->{dialog.dismiss();actions(date,currentMeal[0],item);});more.setTag("food_detail_more");
         int accent=host.detailAccentColor();android.graphics.drawable.GradientDrawable moreBackground=new android.graphics.drawable.GradientDrawable();moreBackground.setColor(accent);moreBackground.setCornerRadius(dp(UiTokens.CONTROL_RADIUS));more.setBackground(moreBackground);
         double luminance=(.2126*linearColor(Color.red(accent))+.7152*linearColor(Color.green(accent))+.0722*linearColor(Color.blue(accent)));
         more.setTextColor(luminance>.32?UiTokens.ink(false):UiTokens.ink(true));
@@ -106,7 +127,73 @@ public final class FoodUi {
         TextView close=text("×",21,false);close.setTag("food_detail_close");close.setGravity(Gravity.CENTER);close.setContentDescription("关闭餐食详情");close.setOnClickListener(v->dialog.dismiss());
         FrameLayout.LayoutParams closeLp=new FrameLayout.LayoutParams(dp(48),dp(48),Gravity.TOP|Gravity.END);closeLp.topMargin=dp(4);closeLp.rightMargin=dp(4);shell.addView(close,closeLp);
         dialog.setCanceledOnTouchOutside(true);
-        dialog.setOnDismissListener(d->{image.setImageDrawable(null);if(display!=null&&!display.isRecycled())display.recycle();});dialog.show();PaperComponents.styleDialog(dialog,host.night());return dialog;
+        dialog.setOnDismissListener(d->image.release());dialog.show();PaperComponents.styleDialog(dialog,host.night());return dialog;
+    }
+    /** Each dialog owns its image. The shared queue retains files and weak targets only. */
+    private static final class DetailImage extends ImageView {
+        private static final android.os.Handler MAIN=new android.os.Handler(android.os.Looper.getMainLooper());
+        private static final ThreadPoolExecutor LOADERS=new ThreadPoolExecutor(1,2,20,TimeUnit.SECONDS,
+                new ArrayBlockingQueue<Runnable>(16),work->{Thread thread=new Thread(work,"food-detail-image");thread.setDaemon(true);return thread;},
+                new ThreadPoolExecutor.AbortPolicy());
+        private final File original,cutout;
+        private final boolean night;
+        private final String border;
+        private final int rotation;
+        private final TextView loading;
+        private Future<?> request;
+        private Bitmap displayed;
+        private int generation;
+        private boolean released;
+        DetailImage(Activity activity,File directory,JSONObject item,boolean night,String border,TextView loading){
+            super(activity);this.night=night;this.border=border;this.loading=loading;
+            String source=item.optString("sourcePhoto"),sticker=item.optString("cutoutFile");
+            original=NutritionStore.safeName(source)?new File(directory,source):null;
+            cutout=NutritionStore.safeName(sticker)?new File(directory,sticker):null;
+            rotation=NutritionStore.displayRotation(item);
+        }
+        @Override protected void onAttachedToWindow(){super.onAttachedToWindow();if(!released)load();}
+        @Override protected void onDetachedFromWindow(){clear();super.onDetachedFromWindow();}
+        @Override protected void onConfigurationChanged(android.content.res.Configuration configuration){
+            super.onConfigurationChanged(configuration);if(isAttachedToWindow()&&!released)load();
+        }
+        private void load(){
+            clear();final int token=generation;
+            loading.setText("正在加载图片…");loading.setVisibility(View.VISIBLE);
+            final WeakReference<DetailImage> target=new WeakReference<>(this);
+            final File source=original,sticker=cutout;final boolean dark=night;final String style=border;final int angle=rotation;
+            try{request=LOADERS.submit(()->{
+                final Bitmap bitmap=prepare(source,sticker,dark,style,angle);
+                if(!MAIN.post(()->{
+                    DetailImage view=target.get();
+                    if(view==null||view.released||!view.isAttachedToWindow()||view.generation!=token){recycle(bitmap);return;}
+                    view.request=null;view.displayed=bitmap;view.setImageBitmap(bitmap);
+                    view.loading.setText(bitmap==null?"图片暂时无法显示":"");view.loading.setVisibility(bitmap==null?View.VISIBLE:View.GONE);
+                }))recycle(bitmap);
+            });}catch(java.util.concurrent.RejectedExecutionException busy){loading.setText("图片加载繁忙，请稍后重新打开");}
+        }
+        private static Bitmap prepare(File source,File sticker,boolean night,String style,int rotation){
+            Bitmap current=null;
+            try{
+                if(Thread.currentThread().isInterrupted())return null;
+                current=sticker==null?null:thumbnail(sticker);boolean outlined=current!=null;
+                if(current==null&&source!=null)current=thumbnail(source);
+                if(current!=null&&outlined&&!Thread.currentThread().isInterrupted()){
+                    Bitmap bordered;
+                    try{bordered=FoodStickerRenderer.create(current,Math.max(7,Math.max(current.getWidth(),current.getHeight())/40),style,night);}
+                    catch(RuntimeException|OutOfMemoryError unavailable){bordered=current;}
+                    if(bordered!=current)recycle(current);current=bordered;
+                }
+                if(Thread.currentThread().isInterrupted()){recycle(current);return null;}
+                Bitmap rotated=FoodStickerRenderer.rotateDisplay(current,rotation);if(rotated!=current)recycle(current);return rotated;
+            }catch(RuntimeException|OutOfMemoryError unavailable){recycle(current);return null;}
+        }
+        void release(){released=true;clear();}
+        private void clear(){
+            generation++;
+            if(request!=null){request.cancel(true);if(request instanceof Runnable)LOADERS.remove((Runnable)request);request=null;}
+            setImageDrawable(null);recycle(displayed);displayed=null;
+        }
+        private static void recycle(Bitmap bitmap){if(bitmap!=null&&!bitmap.isRecycled())bitmap.recycle();}
     }
     /** Select an existing original, then its saved cutout; never escape private media storage. */
     static String preferredPreviewFile(File files,JSONObject item){
@@ -274,18 +361,7 @@ public final class FoodUi {
         }
     }
     public static int displayCalories(JSONObject day){
-        if(day==null)return 0;
-        if(day.optBoolean("manualCaloriesOverride")){
-            // New meal edits replace only that meal; untouched meals remain live AI values.
-            // Legacy whole-day overrides retain their original total until explicitly edited.
-            if(day.optBoolean("manualCaloriesByMeal")){
-                double total=0;for(String key:NutritionStore.MEALS){double value=NutritionStore.displayMealCalories(day,key);if(Double.isFinite(value))total+=value;}return (int)Math.round(total);
-            }
-            if(day.optInt("manualCaloriesTotal")>0)return day.optInt("manualCaloriesTotal");
-            int total=0;for(String k:NutritionStore.MEALS){JSONObject m=day.optJSONObject(k);if(m!=null&&!m.optBoolean("skipped"))total+=Math.max(0,m.optInt("manualCalories"));}return total;
-        }
-        JSONObject totals=NutritionStore.totals(day);
-        return totals.optInt("count")>0?(int)Math.round(totals.optDouble("caloriesKcal")):Math.max(0,day.optInt("calories"));
+        return NutritionStore.displayDayCalories(day);
     }
     private EditText goalInput(){
         // Keep the native focus underline, without the filled capsule used by standalone forms.
@@ -359,7 +435,7 @@ public final class FoodUi {
                     String f=item.optString("cutoutFile");
                     final String output=f.isEmpty()?"food_cutout_manual_"+item.optString("id")+".png":f;
                     CutoutEditor.show(a,new File(a.getFilesDir(),item.optString("sourcePhoto")),new File(a.getFilesDir(),output),item.optJSONArray("cutoutRect"),host.night(),bounds->{
-                        if(!FoodAnalysisJobService.saveCutout(a,date,meal,item.optString("sourcePhoto"),output,bounds))message("记录已变更，贴纸未写入；请重新打开后编辑");
+                        if(!FoodAnalysisJobService.saveCutout(a,date,meal,item.optString("sourcePhoto"),output,bounds,item.optString("id")))message("记录已变更，贴纸未写入；请重新打开后编辑");
                         host.reload();host.refresh();
                     });
                 }else if(which==3){
@@ -369,7 +445,7 @@ public final class FoodUi {
     }
     private void reprocess(String date,String meal,JSONObject item,boolean cutoutOnly){
         String source=item.optString("sourcePhoto");
-        boolean accepted=cutoutOnly?FoodAnalysisJobService.enqueueCutout(a,date,meal,source):FoodAnalysisJobService.enqueueNutrition(a,date,meal,source);
+        boolean accepted=cutoutOnly?FoodAnalysisJobService.enqueueCutout(a,date,meal,source,item.optString("id")):FoodAnalysisJobService.enqueueNutrition(a,date,meal,source,item.optString("id"));
         if(!accepted){message("暂时无法重新处理，请确认原图和记录仍在");return;}
         host.reload();host.refresh();host.processing(date,meal,source);
     }

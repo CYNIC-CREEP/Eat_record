@@ -120,25 +120,44 @@ if ($Qa) {
     if (-not $NoUpload) { throw 'QA builds require -NoUpload' }
 }
 
+$HasCompose = @(Get-ChildItem (Join-Path $ProjectRoot 'src') -Recurse -Filter *.kt).Count -gt 0
+$Compose = $null
+if ($HasCompose) {
+    & python (Join-Path $ProjectRoot 'scripts\build-compose.py') prepare --build-dir $BuildDir --aapt2 $Aapt2
+    Assert-Ok 'Compose dependency preparation'
+    $Compose = Get-Content (Join-Path $BuildDir 'compose-build.json') -Raw | ConvertFrom-Json
+}
+
 & $Aapt2 compile --dir (Join-Path $ProjectRoot "res") -o (Join-Path $CompiledDir "res.zip")
 Assert-Ok "aapt2 compile"
-& $Aapt2 link `
-    -I $AndroidJar `
-    --manifest $BuildManifest `
-    --java $GenDir `
-    --min-sdk-version 26 `
-    --target-sdk-version $TargetSdkVersion `
-    -o (Join-Path $BuildDir "EatRecord.unsigned.apk") `
-    (Join-Path $CompiledDir "res.zip")
+$LinkArgs = @('link', '-I', $AndroidJar, '--manifest', $BuildManifest, '--java', $GenDir,
+    '--min-sdk-version', '26', '--target-sdk-version', [string]$TargetSdkVersion,
+    '-o', (Join-Path $BuildDir 'EatRecord.unsigned.apk'))
+if ($Compose) {
+    $LinkArgs += @('--auto-add-overlay', '--extra-packages', ($Compose.packages -join ':'))
+    foreach ($LibraryResources in $Compose.resources) { $LinkArgs += @('-R', $LibraryResources) }
+}
+$LinkArgs += @('-R', (Join-Path $CompiledDir 'res.zip'))
+& $Aapt2 @LinkArgs
 Assert-Ok "aapt2 link"
 
-$JavaFiles = @((Join-Path $GenDir "com\eatrecord\app\R.java"))
+$GeneratedJava = @(Get-ChildItem $GenDir -Recurse -Filter *.java | Select-Object -ExpandProperty FullName)
+$CompileClasspath = @($AndroidJar, $ClassesDir)
+if ($Compose) {
+    $CompileClasspath += @($Compose.jars)
+    # Resource symbols are available while Kotlin analyzes Java interop references.
+    & javac -encoding UTF-8 --release 8 -cp ($CompileClasspath -join ';') -d $ClassesDir @GeneratedJava
+    Assert-Ok 'AndroidX resource Java compilation'
+    & python (Join-Path $ProjectRoot 'scripts\build-compose.py') compile --build-dir $BuildDir --android-jar $AndroidJar --java (Join-Path $env:JAVA_HOME 'bin\java.exe')
+    Assert-Ok 'Kotlin Compose compilation'
+}
+$JavaFiles = @($GeneratedJava)
 $JavaFiles += Get-ChildItem (Join-Path $ProjectRoot "src\com\eatrecord\app") -Filter *.java |
     Sort-Object Name |
     Select-Object -ExpandProperty FullName
 if ($Qa) { $JavaFiles += (Join-Path $ProjectRoot 'tests\android\UpgradeSmoke.java') }
 
-javac -encoding UTF-8 --release 8 -cp $AndroidJar -d $ClassesDir $JavaFiles
+javac -encoding UTF-8 --release 8 -cp ($CompileClasspath -join ';') -d $ClassesDir $JavaFiles
 Assert-Ok "javac"
 
 $ClassesJar = Join-Path $BuildDir "classes.jar"
@@ -160,7 +179,14 @@ finally {
     $ClassZip.Dispose()
 }
 
-& $D8 --min-api 26 --lib $AndroidJar --output $DexDir $ClassesJar
+$DexInputs = @($ClassesJar)
+if ($Compose) { $DexInputs += @($Compose.jars) }
+if ($Compose) {
+    # Call Java directly because cmd.exe's .bat argument limit is smaller than the dependency classpath.
+    & (Join-Path $env:JAVA_HOME 'bin\java.exe') -Xmx2G -cp (Join-Path $BuildTools.FullName 'lib\d8.jar') com.android.tools.r8.D8 --min-api 26 --lib $AndroidJar --output $DexDir @DexInputs
+} else {
+    & $D8 --min-api 26 --lib $AndroidJar --output $DexDir @DexInputs
+}
 Assert-Ok "d8"
 
 $VisionEntries = @(& (Join-Path $ProjectRoot 'scripts\build-food-vision.ps1') `
@@ -180,7 +206,21 @@ if (Test-Path $AssetRoot) {
 $UnsignedApk = Join-Path $BuildDir "EatRecord.unsigned.apk"
 $Zip = [System.IO.Compression.ZipFile]::Open($UnsignedApk, [System.IO.Compression.ZipArchiveMode]::Update)
 try {
-    Add-ZipFile $Zip (Join-Path $DexDir "classes.dex") "classes.dex" ([System.IO.Compression.CompressionLevel]::Optimal)
+    foreach ($DexFile in Get-ChildItem $DexDir -Filter 'classes*.dex') {
+        Add-ZipFile $Zip $DexFile.FullName $DexFile.Name ([System.IO.Compression.CompressionLevel]::Optimal)
+    }
+    if ($Compose) {
+        $ComposePayload = [System.IO.Compression.ZipFile]::OpenRead($Compose.payload)
+        try {
+            foreach ($Entry in $ComposePayload.Entries) {
+                if ($Zip.GetEntry($Entry.FullName)) { throw "Duplicate Compose payload entry: $($Entry.FullName)" }
+                $TargetEntry = $Zip.CreateEntry($Entry.FullName, [System.IO.Compression.CompressionLevel]::Optimal)
+                $InputStream = $Entry.Open(); $OutputStream = $TargetEntry.Open()
+                try { $InputStream.CopyTo($OutputStream) }
+                finally { $InputStream.Dispose(); $OutputStream.Dispose() }
+            }
+        } finally { $ComposePayload.Dispose() }
+    }
     foreach ($Asset in $ProjectAssets) {
         Add-ZipFile $Zip $Asset.Path $Asset.Entry ([System.IO.Compression.CompressionLevel]::Optimal)
     }

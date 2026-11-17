@@ -10,6 +10,12 @@ $Cp="$JsonJar;$AndroidJar"
 & javac -encoding UTF-8 --release 8 -cp $Cp -d $TestDir `
     (Join-Path $Root 'src\com\eatrecord\app\FoodAnalysisResult.java') `
     (Join-Path $Root 'src\com\eatrecord\app\NutritionStore.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\DiaryProjectionIndex.java') `
+    (Join-Path $Root 'tests\DiaryProjectionIndexTest.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\MealTime.java') `
+    (Join-Path $Root 'tests\MealTimeTest.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\FoodMealAssignment.java') `
+    (Join-Path $Root 'tests\FoodMealAssignmentTest.java') `
     (Join-Path $Root 'src\com\eatrecord\app\FoodAnalysisClient.java') `
     (Join-Path $Root 'src\com\eatrecord\app\FoodRequestCompatibility.java') `
     (Join-Path $Root 'src\com\eatrecord\app\FoodJobPriority.java') `
@@ -27,15 +33,21 @@ $Cp="$JsonJar;$AndroidJar"
     (Join-Path $Root 'tests\RetiredRecognitionCacheTest.java') `
     (Join-Path $Root 'src\com\eatrecord\app\ReminderTimeInput.java') `
     (Join-Path $Root 'src\com\eatrecord\app\ManualMealText.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\ShareImageTransaction.java') `
+    (Join-Path $Root 'tests\ShareImageTransactionTest.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\MealTextSave.java') `
+    (Join-Path $Root 'tests\MealTextSaveTest.java') `
     (Join-Path $Root 'src\com\eatrecord\app\ManualMealPrompts.java') `
     (Join-Path $Root 'src\com\eatrecord\app\CutoutViewport.java') `
     (Join-Path $Root 'src\com\eatrecord\app\FoodImageGeometry.java') `
     (Join-Path $Root 'src\com\eatrecord\app\AppearanceMode.java') `
     (Join-Path $Root 'src\com\eatrecord\app\ApiVisionPolicy.java') `
     (Join-Path $Root 'src\com\eatrecord\app\AppDownloadClient.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\AppUpdateCheck.java') `
     (Join-Path $Root 'src\com\eatrecord\app\UiTokens.java') `
     (Join-Path $Root 'tests\ThemeTokensTest.java') `
     (Join-Path $Root 'tests\AppDownloadClientTest.java') `
+    (Join-Path $Root 'tests\AppUpdateCheckTest.java') `
     (Join-Path $Root 'src\com\eatrecord\app\ApiModelPresentation.java') `
     (Join-Path $Root 'src\com\eatrecord\app\ReleaseNotes.java') `
     (Join-Path $Root 'tests\ReleaseNotesModelTest.java') `
@@ -46,6 +58,8 @@ $Cp="$JsonJar;$AndroidJar"
     (Join-Path $Root 'tests\NotebookPageMotionTest.java') `
     (Join-Path $Root 'src\com\eatrecord\app\RootPageMotion.java') `
     (Join-Path $Root 'src\com\eatrecord\app\BottomNavMotion.java') `
+    (Join-Path $Root 'src\com\eatrecord\app\AnimationFrameClock.java') `
+    (Join-Path $Root 'tests\AnimationFrameClockTest.java') `
     (Join-Path $Root 'src\com\eatrecord\app\NavLensGeometry.java') `
     (Join-Path $Root 'tests\TabMotionTest.java') `
     (Join-Path $Root 'src\com\eatrecord\app\SettingsTransitionMath.java') `
@@ -73,8 +87,16 @@ $Cp="$JsonJar;$AndroidJar"
     (Join-Path $Root 'tests\ProfilePrivacyTest.java') `
     (Join-Path $Root 'tests\BackupReliabilityTest.java')
 if($LASTEXITCODE -ne 0){throw 'Food tests compilation failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.MealTimeTest
+if($LASTEXITCODE -ne 0){throw 'Local meal-time tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.DiaryProjectionIndexTest
+if($LASTEXITCODE -ne 0){throw 'Diary projection index tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.FoodMealAssignmentTest
+if($LASTEXITCODE -ne 0){throw 'Food meal assignment tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.TabMotionTest
 if($LASTEXITCODE -ne 0){throw 'Tab motion tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.AnimationFrameClockTest
+if($LASTEXITCODE -ne 0){throw 'Prepared frame clock tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.SettingsTransitionMathTest
 if($LASTEXITCODE -ne 0){throw 'Settings motion tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.SettingsContainerMathTest
@@ -91,6 +113,8 @@ if($LASTEXITCODE -ne 0){throw 'Food scheduling policy tests failed'}
 if($LASTEXITCODE -ne 0){throw 'API vision capability policy tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.AppDownloadClientTest
 if($LASTEXITCODE -ne 0){throw 'Distribution authentication tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.AppUpdateCheckTest
+if($LASTEXITCODE -ne 0){throw 'Ordered update checks failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.ThemeTokensTest
 if($LASTEXITCODE -ne 0){throw 'Theme palette checks failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.ReleaseNotesModelTest (Join-Path $Root 'AndroidManifest.xml')
@@ -105,6 +129,10 @@ if($LASTEXITCODE -ne 0){throw 'Home calendar date tests failed'}
 if($LASTEXITCODE -ne 0){throw 'Reminder time parser tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.ManualMealTextTest
 if($LASTEXITCODE -ne 0){throw 'Manual meal text tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.MealTextSaveTest
+if($LASTEXITCODE -ne 0){throw 'Meal text transaction tests failed'}
+& java -cp "$TestDir;$Cp" com.eatrecord.app.ShareImageTransactionTest
+if($LASTEXITCODE -ne 0){throw 'Share image transaction tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.ManualMealPromptsTest
 if($LASTEXITCODE -ne 0){throw 'Manual meal prompt policy tests failed'}
 & java -cp "$TestDir;$Cp" com.eatrecord.app.CutoutViewportTest

@@ -9,6 +9,10 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ABIS = ("arm64-v8a", "armeabi-v7a")
 COMMON_LIBS = {"libeatvision.so", "libMNN.so", "libmnncore.so", "libc++_shared.so"}
+COMPOSE_RUNTIME_HASHES = {
+    "arm64-v8a": {"libandroidx.graphics.path.so": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6"},
+    "armeabi-v7a": {"libandroidx.graphics.path.so": "41399eba6fc2a60f6f14642375c1824f3cf25eb8fec7397d753730a3ceda3e2b"},
+}
 RETIRED_LIBS = {"libeatoffline.so", "libllm.so", "libMNN_Express.so", "libMNNOpenCV.so", "libMNNAudio.so", "libMNN_CL.so", "libMNN_Vulkan.so"}
 # Extracted from the same official MNN 3.6.0 runtime zip pinned by the build script
 # (zip SHA-256 3ff2b92e11531f5a9d820b6bf6a8aede3e124e098a3645d8f6a23dcbc862015f).
@@ -107,8 +111,10 @@ def verify(apk):
                     "QA/source/download-only model artifact in APK: " + name)
         dex_names = [name for name in names if name.startswith("classes") and name.endswith(".dex")]
         require("classes.dex" in dex_names, "Missing classes.dex")
+        compose_dock = False
         for name in dex_names:
             data = archive.read(name)
+            compose_dock |= b"Lcom/eatrecord/app/ComposeBottomBar;" in data
             require(b"UpgradeSmoke" not in data, "QA instrumentation runner in " + name)
             require(not any(retired in data for retired in RETIRED_CLASSES), "Retired recognition class in " + name)
         actual_libs = {name for name in names if name.startswith("lib/") and not name.endswith("/")}
@@ -116,6 +122,10 @@ def verify(apk):
                 "Retired recognition runtime in APK")
         expected_libs = {"lib/" + abi + "/" + lib for abi in ABIS
                          for lib in COMMON_LIBS}
+        if compose_dock:
+            expected_libs |= {"lib/" + abi + "/" + lib for abi in ABIS for lib in COMPOSE_RUNTIME_HASHES[abi]}
+            require(archive.read("assets/licenses/Compose-AndroidX-NOTICE.txt"), "Missing Compose dependency notice")
+            require(read_local_asset(archive, "assets/licenses/Kotlin-Compose-Apache-2.0.txt"), "Missing Compose license")
         require(actual_libs == expected_libs,
                 "Unexpected ABI/library set: missing=" + str(sorted(expected_libs - actual_libs))
                 + ", extra=" + str(sorted(actual_libs - expected_libs)))
@@ -128,6 +138,8 @@ def verify(apk):
                         + " -> " + str(sorted(needed - packaged - SYSTEM_LIBS)))
                 if lib in RUNTIME_HASHES[abi]:
                     require(sha256(data) == RUNTIME_HASHES[abi][lib], "Pinned runtime differs: " + abi + "/" + lib)
+                if compose_dock and lib in COMPOSE_RUNTIME_HASHES[abi]:
+                    require(sha256(data) == COMPOSE_RUNTIME_HASHES[abi][lib], "Pinned Compose runtime differs: " + abi + "/" + lib)
                 if lib == "libeatvision.so":
                     require(b"EatVisionQA" not in data, "QA native entry point in " + abi)
         configs = [manifest["full"], manifest["small"], manifest["refiner"]["encoder"], manifest["refiner"]["decoder"]]
@@ -153,6 +165,8 @@ def verify(apk):
     return {"bytes": size, "MiB": size / (1024 * 1024), "sha256": digest, "models": 4,
             "abis": list(ABIS), "native_libraries": len(expected_libs), "native_dependency_closure": True,
             "pinned_runtime_hashes": sum(map(len, RUNTIME_HASHES.values())),
+            "compose_bottom_bar": compose_dock,
+            "pinned_compose_runtime_hashes": sum(map(len, COMPOSE_RUNTIME_HASHES.values())) if compose_dock else 0,
             "retired_recognition_components_absent": True,
             "QA_in_distributable": False}
 

@@ -2,6 +2,8 @@
 
 以下是可执行的操作指南，不是执行授权。默认只本地验证；commit、tag、push、发布、服务器修改须用户单独确认。纯文档任务不必构建或启动App。
 
+用户确认该版最终成品并要求OpenList和GitHub上传时，同轮执行范围包含百度版本归档，按第7.1节同步同版安装包、源码与相关资料。游客分发与云端字体迁移的实施清单见[DISTRIBUTION_MIGRATION_PLAN.md](DISTRIBUTION_MIGRATION_PLAN.md)。
+
 ## 1. 预检
 
 从 `git rev-parse --show-toplevel` 确认的真实根目录开始，读交接文件后检查：
@@ -30,6 +32,16 @@ git diff --check
 - 当前脚本签名文件为根目录debug.keystore（Git忽略），普通包后缀仍为-debug，但普通Manifest不启用debuggable；无独立release签名variant。正式生产密钥/管理策略待用户确认。
 - 已安装版本需同证书覆盖升级。密钥缺失时脚本会生成新文件，可能破坏覆盖兼容：先停下确认/恢复原密钥，不得把“签名成功”等同于“证书兼容”。密钥和签名密码不入Git/文档。
 
+## 2.1 局部Compose编译依赖
+
+0.6.3-beta.3起，build.ps1检测src中的Kotlin源码，通过scripts/build-compose.py准备依赖、编译AAR资源及Kotlin，再运行既有javac与D8。版本和下载SHA256固定在scripts/compose-dependencies.lock.json，缓存位于build/deps/compose。首次构建需要访问Google Maven与Maven Central，后续按摘要复用缓存。
+
+固定Kotlin与Compose编译插件2.0.21、Compose Android1.7.8、Lifecycle2.8.7、SavedState1.2.1及Coroutines1.8.1。源码编译、AAR资源符号和运行库在同一自定义流水线合并。APK收集全部classes*.dex及两种ARM的graphics-path库，附依赖NOTICE和Apache2全文。可选AndroidX Startup自动初始化由局部宿主所需的显式生命周期配置取代，当前默认文本和图标使用本机绘制与字体。
+
+beta.8新增ComposeBookTransition，Java BookOpenView只管理业务、纹理和返回锚点，Compose负责开合进度，beta.9通过单Canvas复用绘制对象和Shader，beta.10采用源尺寸封面纹理及当前圆角外沿，开本先呈现来源反馈并在布局准备后捕获。旧Java曲面辅助类和JVM几何测试已退役，检查新Compose宿主及真实绘制帧。
+
+验包对带ComposeBottomBar的APK要求原8个视觉库加2个固定graphics-path库，检查原6份MNN运行库及新2份摘要。scripts/test-compose-navigation.ps1提供普通包的无损底部交互检查，执行前确认设备与前台应用。旧Java底栏反射场景属于历史呈现入口，Compose验证使用新语义标签与实际触摸。
+
 ## 3. 本地普通包与JVM检查
 
 ```powershell
@@ -48,7 +60,9 @@ python .\scripts\verify-food-apk.py $TaskApk
 Get-FileHash -LiteralPath $TaskApk -Algorithm SHA256
 ```
 
-不要按dist最新mtime挑包，容易误选QA或旧版本。Verifier检查四抠图模型、默认小赖字体、固定运行库摘要、双ARM ABI/依赖闭包、许可证、随包教程、300MiB预算及QA隔离。beta.32起只含8个双ARM视觉库／6个固定运行库摘要，禁止退役营养识别类、模型声明／参考表、eatoffline或LLM专属库，以及旧SAM/ONNX、权重和QA夹具。
+beta.10的同一JVM入口包含MealTextSaveTest、ShareImageTransactionTest和DiaryProjectionIndexTest，覆盖持久化重试／并发合并、导出失败清理及增量投影。设备检查与JVM逻辑结果分别记入本轮报告。
+
+不要按dist最新mtime挑包，容易误选QA或旧版本。Verifier检查四抠图模型、默认小赖字体、固定运行库摘要、双ARM ABI/依赖闭包、许可证、随包教程、300MiB预算及QA隔离。beta.32起的视觉模块含8个双ARM库／6个固定运行库摘要，0.6.3-beta.3的Compose底栏另有2个固定graphics-path库，禁止退役营养识别类、模型声明／参考表、eatoffline或LLM专属库，以及旧SAM/ONNX、权重和QA夹具。
 
 另用实际选定Build Tools核对：
 
@@ -84,6 +98,20 @@ adb -s <test-serial> shell am instrument -w com.eatrecord.app/.UpgradeSmoke
 QA会改写日记/设置，不在用户日常手机运行，不发布。Android QA同设备串行，不同时启动多个instrumentation。通用回归覆盖真实JNI、草稿重建/SSE合同/确认/取消/手动优先/备份回收；云端结果使用假传输，不算真实服务商验证。
 
 定向入口（完整前提/结果见相应报告及tests/android/UpgradeSmoke.java）：
+
+- `-e scenario revision-v063b10`分阶段检查保存事务、字体／头像缓存、异步详情、分享导出及多年书架。使用合成日记、私有测试文件和故障注入，按本轮报告中的phase命令执行。保存核对持久化锁阻塞时UI回调、提交失败重试及最新字段合并。缓存核对对象复用、文件替换／删除和迟到回执。分享核对本次MediaStore条目、取消及失败清理。书架核对有界子View、远日期定位和开合返回。统一结果及普通包检查见V063_BETA10_REPORT.md，当前验收进度见CURRENT_TASK.md。
+
+- `-e scenario revision-v063b9`以14天网格书架夹具验证短按可感知峰值及连续回落、长按／横拖／取消／快速反向、组合图标、隐藏菜单和无障碍，以及四种Compose开合返回路径。记录OnDraw和FrameMetrics作诊断，主动等待和静止间隙须排除，硬件收益按实际设备采样。仅独立QA设备运行。
+
+- `-e scenario revision-v063b8`覆盖40ms短按完整峰值、主按钮独立放大、持续横拖与取消、快速反向、离开今日隐藏命中和无障碍、星光装饰移除，以及Compose记录本完整／半途／重复返回、收藏入口、缺失锚点、纹理复用与清理。仅独立QA设备运行。旧封面曲面／ValueAnimator反射场景属于历史实现，当前使用Compose宿主及OnDraw样本。
+
+- `-e scenario revision-v063b7`覆盖DOWN保持反馈、取消及移出、松手单次提交、主按钮实际尺寸、快速改选、隐藏命中、全程缩小合本、纹理复用及半途／重复返回。记录模拟器实际绘制时间，安装验收继续核对手机观感。仅独立QA设备运行。
+
+- `-e scenario revision-v063b6`检查无文字底栏图标中心、六次日夜切换、旧原生层黑滤镜注入后的恢复、重挂owner，以及封面提前显露和半途返回。故障注入按模拟恢复证据记录，魅族21实际效果另行安装验收。仅独立QA设备运行。
+
+- `-e scenario revision-v063b5`验证首页边缘及间距、呈现帧时钟、240ms注入停顿、干净根页复用、封面曲率、三条子页底栏退出、四次日夜切换硬件像素及FrameMetrics。仅独立QA设备运行，不能按旧ValueAnimator反射场景判断新的Choreographer时钟。
+
+- `-e scenario revision-v063b4`使用自生成双餐图片和合成营养，检查首屏单餐／滚动第二餐、餐纸与胶囊间距、记录本居中、主按钮独立反馈、按时间直达添加入口，以及同一详情弹窗的四餐循环和数据持久化。旧餐次选择及餐次管理场景保留为历史验收记录。仅独立QA设备运行，可加`-e night true`检查夜间。
 
 - `-e scenario revision-v062b8`覆盖通用A入口的真实点击、长页、嵌套/跳层、收藏双来源、字体来源身份及跨入口中断清理。runner写合成夹具，仅独立QA设备。本轮仅使用最终classes编译，新增场景的真机视觉由用户安装普通包验收，见V062_BETA8_NAVIGATION_REPORT.md。
 
@@ -169,7 +197,24 @@ git archive --format=zip --prefix=EatRecord-<versionName>/ --output=dist/EatReco
 - 上传后重新下载APK对比SHA256，核对版本/notes/链接及本地清单diff。不要凭脚本旧提示推断旧HTTP静态路由仍有效。
 - `scripts/upload-lanzou.ps1/.mjs`为另一自动上传路径，依赖Node/浏览器会话；当前登录与可用性 **待确认**。不为检查状态擅自运行。
 
+## 7.1 最终版发布时同步百度版本档案
+
+用户确认最终版并要求上传OpenList与GitHub后，执行本节的同轮同步归档约定。
+
+1. 使用本轮核对的正式APK、固定发布提交的源码ZIP、版本说明或更新日志、SHA256清单，以及适用教程、许可和公开验证摘要。
+2. 在`/baidu/03.工具/24.Personal/2_EatRecord/<完整版本号>`内使用apk、源码、文档分类，必要时增加验收证据目录。
+3. 三处发布位置使用同一份正式APK与源码ZIP，记录版本、发布提交、大小和SHA256。沿用最终成品保留策略。
+4. 上传后完整回下载校验APK、源码及相关资料，再更新百度项目索引、校验清单与本轮发布记录。
+5. 通过游客根`/24.Personal/2_EatRecord`核对对应版本、说明和下载可访问性。游客可读内容按公开资料审查，沿用项目凭据、签名、用户记录与QA包的排除规则。
+6. 游客update.json及fonts准备并启用后，将其同版清单和共享资源校验纳入发布收尾。
+
+2026-11-12已准备游客fonts、许可、教程及根update.json，并完成匿名完整下载校验。server/guest-update.json为游客侧正式清单，apkPath采用`/24.Personal/2_EatRecord`前缀。后续正式发布同时核对server/update.json与server/guest-update.json的版本、APK大小和SHA256，再分别按账号和游客上下文核对路径。当前两个清单对应已发布0.6.2/code202，Beta交付版本为0.6.3-beta.10/code212。旧目录整合与设备验收见[DISTRIBUTION_MIGRATION_PLAN.md](DISTRIBUTION_MIGRATION_PLAN.md)。
+
 ## 8. 维护边界
+
+2026-11-12历史成品已按完整版本号归档至百度挂载`/baidu/03.工具/24.Personal/2_EatRecord`。后续正式发布按第7.1节同步归档，游客分发迁移按专项计划逐步实施。已完成的空间整理、清单和原build证据路径映射见[ARCHIVE_REPORT_20261112.md](ARCHIVE_REPORT_20261112.md)。上文build/publish060、publish061、publish062及各Beta证据目录属于历史本地位置。
+
+空间维护保留当前源码、完整Git、签名/私有配置、说明及当前最小构建依赖。最终普通APK保留一份；其他成品只有在完整回下载SHA256验证后才删除本地。可再生编译中间件、退役/实验模型及已停止的项目内独立测试模拟器可按已审查清单清理，不扩大到系统SDK、用户日常设备或仓库外目录。当前四模型和运行库须按固定摘要保护；清缓存后的验证构建不得替换已发布正式APK。
 
 每次任务更新CURRENT_TASK；长期流程变化更新本文，固定模型/数据/签名策略变化还需更新DECISIONS。测试详细证据放已有版本报告，本文不累积每轮结果。发布端点、远端状态、凭据或命令未实测时标“待确认”，不虚构成功。
 

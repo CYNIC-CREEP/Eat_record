@@ -24,6 +24,27 @@ public final class FoodAnalysisJobService extends JobService {
     private static final java.util.concurrent.ConcurrentHashMap<String,Double> CALORIE_PREVIEWS=new java.util.concurrent.ConcurrentHashMap<>();
     public static Double previewCalories(String analysisId){return analysisId==null?null:CALORIE_PREVIEWS.get(analysisId);}
 
+    /** Move a confirmed food and its queued work in the same durable preferences transaction. */
+    public static boolean moveMeal(Context context,String date,String from,String to,String id){
+        if(context==null||!FoodDraftStore.validTarget(date,from)||!FoodDraftStore.validTarget(date,to))return false;
+        synchronized(NutritionStore.LOCK){
+            SharedPreferences prefs=context.getSharedPreferences(NutritionStore.PREFS,0);
+            String previousDays=prefs.getString(NutritionStore.DAYS,"{}"),previousQueue=prefs.getString(QUEUE,"[]");
+            JSONObject days=NutritionStore.read(prefs,NutritionStore.DAYS);
+            JSONArray queue=jobs(prefs);
+            try{
+                if(!FoodMealAssignment.move(days,queue,date,from,to,id))return false;
+                if(!prefs.edit().putString(NutritionStore.DAYS,days.toString()).putString(QUEUE,queue.toString()).commit()){
+                    // A failed commit can still change SharedPreferences' in-memory values.
+                    prefs.edit().putString(NutritionStore.DAYS,previousDays).putString(QUEUE,previousQueue).commit();
+                    return false;
+                }
+            }catch(JSONException invalid){return false;}
+        }
+        FoodDraftStore.changed(context);
+        return true;
+    }
+
     public static boolean enabled(JSONObject profile) {
         return FoodRecognitionPolicy.enabled(profile);
     }
@@ -184,16 +205,25 @@ public final class FoodAnalysisJobService extends JobService {
 
     /** Explicit local-only operation. It neither clears nutrition nor starts/restarts a paid request. */
     public static boolean enqueueCutout(Context c,String date,String key,String source){
-        return enqueueOperation(c,date,key,source,true);
+        return enqueueCutout(c,date,key,source,null);
+    }
+    public static boolean enqueueCutout(Context c,String date,String key,String source,String id){
+        return enqueueOperation(c,date,key,source,true,id);
     }
 
     /** Explicit nutrition-only operation, with the existing alpha and corrected name retained. */
     public static boolean enqueueNutrition(Context c,String date,String key,String source){
-        return enqueueOperation(c,date,key,source,false);
+        return enqueueNutrition(c,date,key,source,null);
+    }
+    public static boolean enqueueNutrition(Context c,String date,String key,String source,String id){
+        return enqueueOperation(c,date,key,source,false,id);
     }
 
     /** A manual mask edit merges only image metadata into the latest record, never a UI snapshot. */
     public static boolean saveCutout(Context c,String date,String key,String source,String cutout,JSONArray bounds){
+        return saveCutout(c,date,key,source,cutout,bounds,null);
+    }
+    public static boolean saveCutout(Context c,String date,String key,String source,String cutout,JSONArray bounds,String id){
         if(!FoodDraftStore.validTarget(date,key)||!NutritionStore.safeName(source)||!NutritionStore.safeName(cutout)
             ||!cutout.startsWith("food_cutout_")||!cutout.endsWith(".png")||!new File(c.getFilesDir(),cutout).isFile())return false;
         boolean committed=false;
@@ -204,8 +234,8 @@ public final class FoodAnalysisJobService extends JobService {
             if(record!=null){
                 if(!date.equals(record.optString("date"))||!key.equals(record.optString("meal")))return false;
                 item=record.optJSONObject("item");
-            }else item=FoodSavedPhotoPolicy.sourceItem(NutritionStore.meal(days,date,key),source);
-            if(item==null||item.optString("id").isEmpty())return false;
+            }else item=FoodSavedPhotoPolicy.sourceItem(NutritionStore.meal(days,date,key),source,id);
+            if(item==null||item.optString("id").isEmpty()||id!=null&&!id.isEmpty()&&!id.equals(item.optString("id")))return false;
             try{
                 if(record!=null){FoodDraftStore.rememberCutout(record,item.optString("cutoutFile"));FoodDraftStore.rememberCutout(record,cutout);}
                 item.put("cutoutFile",cutout).put("cutoutEdited",true).put("cutoutUserEdited",true)
@@ -235,7 +265,7 @@ public final class FoodAnalysisJobService extends JobService {
             if(record!=null){
                 if(!date.equals(record.optString("date"))||!key.equals(record.optString("meal")))return false;
                 latest=record.optJSONObject("item");
-            }else latest=FoodSavedPhotoPolicy.sourceItem(meal,source);
+            }else latest=FoodSavedPhotoPolicy.sourceItem(meal,source,edited.optString("id"));
             if(latest==null||latest.optString("id").isEmpty()||!latest.optString("id").equals(edited.optString("id")))return false;
             try{
                 JSONObject merged=FoodSavedPhotoPolicy.mergeNutritionEdit(latest,edited,UUID.randomUUID().toString());
@@ -253,7 +283,7 @@ public final class FoodAnalysisJobService extends JobService {
         cancelRequest(cancelled);FoodDraftStore.changed(c);return true;
     }
 
-    private static boolean enqueueOperation(Context c,String date,String key,String source,boolean cutoutOnly){
+    private static boolean enqueueOperation(Context c,String date,String key,String source,boolean cutoutOnly,String id){
         if(!NutritionStore.safeName(source)||!FoodDraftStore.validTarget(date,key))return false;
         String cancel="";
         synchronized(NutritionStore.LOCK){
@@ -263,7 +293,8 @@ public final class FoodAnalysisJobService extends JobService {
             if(record!=null){
                 if(!date.equals(record.optString("date"))||!key.equals(record.optString("meal")))return false;
                 old=record.optJSONObject("item");
-            }else old=FoodSavedPhotoPolicy.sourceItem(meal,source);
+            }else old=FoodSavedPhotoPolicy.sourceItem(meal,source,id);
+            if(id!=null&&!id.isEmpty()&&(old==null||!id.equals(old.optString("id"))))return false;
             File photo=new File(c.getFilesDir(),source);
             if(old==null||old.optString("id").isEmpty()||!photo.isFile())return false;
             try{
@@ -575,6 +606,7 @@ public final class FoodAnalysisJobService extends JobService {
     private boolean completed(JSONObject job){
         synchronized(NutritionStore.LOCK){
             SharedPreferences p=getSharedPreferences(NutritionStore.PREFS,0);
+            try{FoodMealAssignment.refreshJobTarget(job,jobs(p));}catch(JSONException invalid){return false;}
             JSONObject record=FoodDraftStore.read(p).optJSONObject(job.optString("source"));
             JSONObject item=record==null?NutritionStore.find(NutritionStore.meal(NutritionStore.read(p,NutritionStore.DAYS),job.optString("date"),job.optString("meal")),job.optString("id")):record.optJSONObject("item");
             return item!=null&&job.optString("analysisId").equals(item.optString("analysisId"))
@@ -594,6 +626,7 @@ public final class FoodAnalysisJobService extends JobService {
     private boolean current(JSONObject job){
         synchronized(NutritionStore.LOCK){
             SharedPreferences p=getSharedPreferences(NutritionStore.PREFS,0);
+            try{FoodMealAssignment.refreshJobTarget(job,jobs(p));}catch(JSONException invalid){return false;}
             if (job.optLong("epoch") != p.getLong("food_jobs_epoch",0)) return false;
             JSONObject record=FoodDraftStore.read(p).optJSONObject(job.optString("source"));
             JSONObject meal=NutritionStore.meal(NutritionStore.read(p,NutritionStore.DAYS),job.optString("date"),job.optString("meal"));
@@ -652,8 +685,8 @@ public final class FoodAnalysisJobService extends JobService {
                 JSONObject o=list.optJSONObject(i);
                 if(o!=null && job.optString("analysisId").equals(o.optString("analysisId"))) {
                     if(!remove) {
-                        // Confirm may have migrated this task while inference used a detached snapshot.
-                        try { job.put("draft",o.optBoolean("draft")); } catch(JSONException ignored) { }
+                        // Confirmation or a meal change may have migrated this detached snapshot.
+                        try { FoodMealAssignment.refreshJobTarget(job,list); } catch(JSONException ignored) { }
                         next.put(job);
                     }
                 }

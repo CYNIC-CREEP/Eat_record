@@ -129,7 +129,7 @@ public class MainActivity extends Activity {
     private final BroadcastReceiver foodReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             synchronized (NutritionStore.LOCK) {
-                NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY));
+                diaryProjectionDirty=true;NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY));
             }
             if (foodProcessing != null || getCurrentFocus() instanceof EditText) return;
             if (currentTab == 0 && !inPhotoViewer && !inPreferencesPage && !inAiAnalysisPage) {
@@ -162,8 +162,12 @@ public class MainActivity extends Activity {
             public void saveDays() { MainActivity.this.saveDays(); }
             // Reading a detail must not invalidate the unchanged home behind it.
             public void reload() { days = readJson(DATA_KEY); profile = readProfile(); }
-            public void refresh() { if (inBookDetail) renderBookDetail(bookDetailDate); else if(inMealManagementPage)rerenderPreservingScroll(()->renderMealManagementPage());else if(inMoreSettingsPage)renderMealReminderSettingsPage();else if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inThemeSettingsPage)renderThemeSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent(); }
-            public void api() { configureApi(() -> { days = readJson(DATA_KEY); profile = readProfile(); if (foodProcessing == null) {if(inMealManagementPage)rerenderPreservingScroll(()->renderMealManagementPage());else if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent();} }); }
+            public void mealAssignmentChanged() {
+                foodMealAssignmentPending=true;
+                invalidateRootPages();
+            }
+            public void refresh() { if (inBookDetail) renderBookDetail(bookDetailDate); else if(inMoreSettingsPage)renderMealReminderSettingsPage();else if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inThemeSettingsPage)renderThemeSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent(); }
+            public void api() { configureApi(() -> { days = readJson(DATA_KEY); profile = readProfile(); if (foodProcessing == null) {if(inSmartAssistantPage)renderCurrentAssistantSettingsPage();else if(inPreferencesPage)renderPreferencesPage(preferencesScrollY);else renderCurrent();} }); }
             public void preview(String date, String meal, String file) { showPhotoViewer(date, meal, file); }
             public void previewDetails(String date,String meal,String file,java.util.function.BooleanSupplier current,java.util.function.Consumer<Boolean> ready){
                 showPhotoViewer(date,meal,file,current,ready);
@@ -236,13 +240,16 @@ public class MainActivity extends Activity {
     private static final String CLOUD_API_DATA_DOWNLOAD_RAW = CLOUD_API_BASE + "/api/users/data/download-raw";
     private static final int MAX_JSON_RESPONSE_CHARS = 4 * 1024 * 1024;
     private final AppDownloadClient appDownloads = new AppDownloadClient();
+    private long updateCheckGeneration;
+    private boolean updateCheckRunning;
     private static final String OPENLIST_APP_ROOT = AppDownloadClient.ROOT;
-    private static final String OPENLIST_FONT_ROOT = OPENLIST_APP_ROOT + "/fonts";
     private static final String OPENLIST_UPDATE_JSON_PATH = OPENLIST_APP_ROOT + "/update.json";
+    private static final String GUEST_UPDATE_JSON_PATH = AppDownloadClient.GUEST_ROOT + "/update.json";
+    private static final String PROJECT_GITHUB_URL = "https://github.com/CYNIC-CREEP/Eat_record";
     private static final String OPENLIST_APP_PAGE = AppDownloadClient.BASE + "/eat%20record";
     private static final String TAG_BOOK_NOTEBOOK_PAGE = "book_detail_notebook_page";
     private static final int AI_STICKER_CANDIDATE_COUNT = 4;
-    private static final String[] TAB_TITLES = {"今日", "迹", "日历", "我"};
+    private static final String[] TAB_TITLES = {"今日", "足迹", "日历", "我"};
     private static final String[] TAB_ICONS = {"", "", "▦", "●"};
     private static final String[] DEFAULT_MEAL_KEYS = {"breakfast", "lunch", "dinner"};
     private static final String[] AVAILABLE_MEAL_KEYS = {"breakfast", "lunch", "afternoon_tea", "dinner", "snack"};
@@ -347,6 +354,7 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private FrameLayout content;
     private FrameLayout navHost;
+    private ComposeBottomBar composeBottomBar;
     private View navIndicator;
     private BottomNavIndicator bottomNavMotion;
     private BottomNavLens bottomNavLens;
@@ -398,7 +406,6 @@ public class MainActivity extends Activity {
     private boolean favoriteRecordsFromBooks;
     private boolean inInterfaceLayoutPage = false;
     private boolean inMoreSettingsPage = false;
-    private boolean inMealManagementPage = false;
     private boolean inSmartAssistantPage = false;
     private String smartAssistantSection = "";
     private boolean foodAdvancedExpanded;
@@ -414,13 +421,14 @@ public class MainActivity extends Activity {
     private int preferencesScrollY = 0;
     private ImageView themeModeTransitionOverlay;
     private ThemeRevealView circularThemeReveal;
+    private int dockConfigurationNightMode = -1;
     private AdvisorPager advisorPager;
     private boolean advisorActivated;
     private String advisorDate;
     private final Runnable refreshAdvisorPage=new Runnable(){public void run(){
         if(rootStopped||!advisorAttached()||!advisorPager.atToday())return;
         if(!homeDate().equals(advisorDate)){
-            if(windowTouchActive||rootPager.isInteracting()){root.postDelayed(this,80);return;}
+            if(windowTouchActive||navPageTransition||rootPager.isInteracting()){root.postDelayed(this,80);return;}
             View day=content.findViewWithTag("today_day_pager");
             if(day instanceof TodayDayPager&&((TodayDayPager)day).isInteracting()){root.postDelayed(this,80);return;}
             advisorDate=homeDate();advisorActivated=false;View page=buildAiAnalysisRoot(true);page.setBackground(pageBackground());advisorPager.replaceAdvisor(page);
@@ -514,12 +522,17 @@ public class MainActivity extends Activity {
     private void invalidateRootPages(){rootPagesDirty=true;if(root!=null&&!rootStopped){root.removeCallbacks(refreshRootPages);if(!mediaPreviewActive())root.postDelayed(refreshRootPages,120);}}
     private void resumeDeferredRootRefresh(){
         if(root==null||rootStopped||mediaPreviewActive()||isFinishing()||isDestroyed())return;
+        refreshFoodMealAssignment();
         if(rootPagesDirty){root.removeCallbacks(refreshRootPages);root.post(refreshRootPages);}
         if(homeFoodRefreshPending){homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);homeFoodRefreshHandler.post(homeFoodRefresh);}
     }
     private static int rootIndex(int tab){return tab==0?0:tab==1?1:2;}
     private static int rootTab(int index){return index==2?3:index;}
     private void positionRootIndicator(float position){
+        if(composeBottomBar!=null){
+            if(rootPagesVisible()&&rootPager.isDragging()){composeBottomBar.closeMenu();composeBottomBar.followRootPosition(position);}
+            return;
+        }
         if(UiTokens.NAV_LIQUID_MOTION_ENABLED){
             if(rootPagesVisible()&&rootPager.isDragging()&&bottomNavMotion!=null){
                 int left=Math.max(0,Math.min(1,(int)Math.floor(position)));
@@ -551,9 +564,16 @@ public class MainActivity extends Activity {
         rootPagesDirty=false;rootCacheEvicted=false;rootPagesDay=dateKey(Calendar.getInstance());
         final long generation=++rootPagerGeneration;
         RootPagePager created=new RootPagePager(this,pages,rootIndex(currentTab),new RootPagePager.Listener(){
+            public boolean canOwnInput(){return !navPageTransition;}
             public void onProgress(float position){if(installed[0]!=null&&generation==rootPagerGeneration&&installed[0]==rootPager)positionRootIndicator(position);}
+            public void onRelease(int index,float velocityPagesPerSecond){
+                if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;
+                if(composeBottomBar!=null)composeBottomBar.endRootGesture(rootTab(index),velocityPagesPerSecond);
+                onTarget(index);
+            }
             public void onTarget(int index){
                 if(generation!=rootPagerGeneration||installed[0]!=rootPager||!rootPagesVisible())return;currentTab=rootTab(index);
+                if(composeBottomBar!=null)composeBottomBar.endRootGesture(currentTab,0);
                 inAiAnalysisPage=index==0&&advisorPager!=null&&!advisorPager.atToday();
                 if(navPageTransition){updateNav(false);updateFab();return;}
                 navPeerActive=true;updateNav(UiTokens.NAV_LIQUID_MOTION_ENABLED);updateFab();
@@ -580,6 +600,7 @@ public class MainActivity extends Activity {
             private boolean current(){return owner[0]!=null&&advisorPager==owner[0]&&installed[0]!=null&&rootPager==installed[0]&&advisorAttached();}
             public void onMoving(){
                 if(!current())return;preservePendingHomeReturn();installed[0].freeze();
+                if(composeBottomBar!=null){composeBottomBar.closeMenu();return;}
                 fab.animate().cancel();manualFoodButton.animate().cancel();
                 fab.setScaleX(1);fab.setScaleY(1);manualFoodButton.setScaleX(1);manualFoodButton.setScaleY(1);
             }
@@ -591,7 +612,7 @@ public class MainActivity extends Activity {
             public void onRest(boolean visible){
                 if(!current())return;inAiAnalysisPage=currentTab==0&&visible;
                 boolean onToday=currentTab==0&&!visible;
-                for(View button:new View[]{fab,manualFoodButton}){button.setTranslationY(0);button.setAlpha(onToday?1:0);button.setVisibility(onToday?View.VISIBLE:View.GONE);}
+                if(composeBottomBar==null)for(View button:new View[]{fab,manualFoodButton}){button.setTranslationY(0);button.setAlpha(onToday?1:0);button.setVisibility(onToday?View.VISIBLE:View.GONE);}
                 installed[0].resume();updateFab();
                 if(currentTab==0&&visible){if(!advisorActivated){advisorActivated=true;if(aiAutoAnalysisEnabled())requestAiAnalysis(homeDate(),false);}}
                 else if(!visible)resumeDeferredRootRefresh();
@@ -599,6 +620,11 @@ public class MainActivity extends Activity {
         });return owner[0];
     }
     private void positionAdvisorControl(View button,float alpha,float position){
+        if(composeBottomBar!=null){
+            composeBottomBar.update(effectiveNavTab(),false,accent,UiTokens.card(nightDecoration()),
+                    UiTokens.ink(nightDecoration()),UiTokens.secondary(nightDecoration()),nightDecoration());
+            return;
+        }
         button.setVisibility(alpha>0?View.VISIBLE:View.GONE);button.setAlpha(alpha);button.setTranslationY(-position);button.setClickable(false);
     }
     private FoodRecognitionSetup foodRecognitionSetup;
@@ -607,7 +633,13 @@ public class MainActivity extends Activity {
     private boolean peerTracking,peerDragging,peerExisting,peerSwallow,navPeerActive;
     private long navIndicatorGeneration;
     private android.view.VelocityTracker peerTracker;
-    private boolean windowTouchActive,homeFoodRefreshPending;
+    private boolean windowTouchActive,homeFoodRefreshPending,foodMealAssignmentPending;
+    private void refreshFoodMealAssignment(){
+        if(!foodMealAssignmentPending||rootStopped||!hasWindowFocus()||mediaPreviewActive()||isFinishing()||isDestroyed())return;
+        foodMealAssignmentPending=false;
+        days=readJson(DATA_KEY);
+        if(inBookDetail)renderBookDetail(bookDetailDate);
+    }
     private final Handler homeFoodRefreshHandler=new Handler();
     private final Runnable homeFoodRefresh=new Runnable(){public void run(){
         if(!homeFoodRefreshPending||isFinishing()||isDestroyed())return;
@@ -630,7 +662,18 @@ public class MainActivity extends Activity {
     private long bookCloseGeneration;
     private String bookEntryDate;
     private int bookShelfScrollY,bookShelfScrollX;
-    private void cancelPendingBookClose(){bookClosePending=false;bookCloseGeneration++;}
+    private long bookOpenGeneration;
+    private Runnable pendingBookOpen;
+    private ViewTreeObserver.OnDrawListener pendingBookOpenDraw;
+    private View pendingBookSource;
+    private float pendingBookSourceZ;
+    private void cancelPendingBookOpen(){
+        bookOpenGeneration++;
+        if(root!=null){if(pendingBookOpen!=null)root.removeCallbacks(pendingBookOpen);if(pendingBookOpenDraw!=null&&root.getViewTreeObserver().isAlive())root.getViewTreeObserver().removeOnDrawListener(pendingBookOpenDraw);}
+        pendingBookOpen=null;pendingBookOpenDraw=null;
+        if(pendingBookSource!=null){pendingBookSource.setTranslationZ(pendingBookSourceZ);pendingBookSource=null;}
+    }
+    private void cancelPendingBookClose(){cancelPendingBookOpen();bookClosePending=false;bookCloseGeneration++;}
     private boolean inPhotoViewer = false;
     private boolean resumePreferencesOnMe = false;
     private View aiPreviewOverlay;
@@ -691,8 +734,13 @@ public class MainActivity extends Activity {
     private TextView bookDetailShareView;
     private BookDetailSwipeFrame bookDetailSwipeFrame;
     private final HashMap<String, Typeface> downloadedTypefaceCache = new HashMap<String, Typeface>();
+    // A committed edit outlives an Activity recreation. This queue owns no Activity or View.
+    private static final ExecutorService mealTextWrites = Executors.newSingleThreadExecutor();
+    private final ArrayList<MealTextSaveController> mealTextEditors = new ArrayList<>();
+    private boolean mealTextClosing;
     private final ExecutorService stickerGalleryExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService mediaThumbnailExecutor = Executors.newFixedThreadPool(3);
+    private AvatarLoader avatarLoader;
     // Full-screen requests must not wait behind the bookshelf thumbnail queue.
     private final ExecutorService photoViewerExecutor = Executors.newSingleThreadExecutor();
     private final HashMap<String, ArrayList<java.lang.ref.WeakReference<ImageView>>> mediaThumbnailInFlight = new HashMap<>();
@@ -746,6 +794,7 @@ public class MainActivity extends Activity {
 
         cleanupRetiredDownloadedFonts();
         applyNightModeOverride();
+        dockConfigurationNightMode=getResources().getConfiguration().uiMode&android.content.res.Configuration.UI_MODE_NIGHT_MASK;
         cleanupRecycleBin();
         applyDecoration();
         hintSeed = (int) (System.currentTimeMillis() % 100000);
@@ -785,90 +834,26 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT);
         root.addView(content, contentLp);
 
-        PaperNavLayout glassNav = new PaperNavLayout(this);
-        navHost = glassNav;
-        disableForceDark(navHost);
-        navHost.setPadding(dp(7), dp(7), dp(7), dp(7));
-        navHost.setBackgroundColor(Color.TRANSPARENT);
-        navHost.setElevation(0f);
-        FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(spaceByLayout(76, 72, 70)));
-        int navOuterMargin = dp(spaceByLayout(22, 20, 18));
-        navLp.leftMargin = navOuterMargin;
-        navLp.rightMargin = navOuterMargin;
-        navLp.bottomMargin = navOuterMargin;
-        navLp.gravity = Gravity.BOTTOM;
-        root.addView(navHost, navLp);
-        bottomNavBackdrop=new BottomNavBackdrop(this,navHost);
-        disableForceDark(bottomNavBackdrop);
-        bottomNavBackdrop.appearance(UiTokens.card(nightDecoration()),UiTokens.line(nightDecoration()),nightDecoration());
-        bottomNavBackdrop.setVisibility(UiTokens.NAV_LIQUID_MOTION_ENABLED?View.VISIBLE:View.GONE);
-        root.addView(bottomNavBackdrop,root.indexOfChild(navHost),new FrameLayout.LayoutParams(1,1));
-
+        // Unattached compatibility handles are never rendered or animated by the dock.
+        navBar = new LinearLayout(this);
         navIndicator = new View(this);
-        navIndicator.setVisibility(View.INVISIBLE);
-        disableForceDark(navIndicator);
-        navIndicator.setBackground(round(accentSoft, dp(26), 0, 0));
-        FrameLayout.LayoutParams navIndicatorLp = new FrameLayout.LayoutParams(
-                dp(1), ViewGroup.LayoutParams.MATCH_PARENT);
-        navIndicatorLp.topMargin = dp(2);
-        navIndicatorLp.bottomMargin = dp(2);
-        navHost.addView(navIndicator, navIndicatorLp);
-
-        navBar = new BottomNavItems(this);
-        disableForceDark(navBar);
-        navBar.setOrientation(LinearLayout.HORIZONTAL);
-        navBar.setGravity(Gravity.CENTER);
-        navBar.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
-            if(!navPeerActive&&(l!=ol||t!=ot||r!=or||b!=ob))updateNavIndicator(false);
-        });
-        navHost.addView(navBar, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        navIndicator.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        bottomNavLens=new BottomNavLens(this,navBar,navHost);
-        disableForceDark(bottomNavLens);
-        bottomNavLens.setVisibility(UiTokens.NAV_LIQUID_MOTION_ENABLED?View.VISIBLE:View.GONE);
-        // A root sibling escapes only the nav's existing software-layer clip. The nav and slots do not move.
-        root.addView(bottomNavLens,new FrameLayout.LayoutParams(1,1));
-        navHost.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{
-            FrameLayout.LayoutParams lensLp=(FrameLayout.LayoutParams)bottomNavLens.getLayoutParams();
-            int width=r-l+dp(32),height=b-t+dp(32),left=l-dp(16),top=t-dp(24);
-            if(lensLp.width!=width||lensLp.height!=height||lensLp.leftMargin!=left||lensLp.topMargin!=top){
-                lensLp.width=width;lensLp.height=height;lensLp.leftMargin=left;lensLp.topMargin=top;
-                lensLp.gravity=Gravity.TOP|Gravity.LEFT;bottomNavLens.setLayoutParams(lensLp);
-            }
-            FrameLayout.LayoutParams paperLp=(FrameLayout.LayoutParams)bottomNavBackdrop.getLayoutParams();
-            int paperWidth=r-l+dp(40),paperHeight=b-t+dp(40),paperLeft=l-dp(20),paperTop=t-dp(24);
-            if(paperLp.width!=paperWidth||paperLp.height!=paperHeight||paperLp.leftMargin!=paperLeft||paperLp.topMargin!=paperTop){
-                paperLp.width=paperWidth;paperLp.height=paperHeight;paperLp.leftMargin=paperLeft;paperLp.topMargin=paperTop;
-                paperLp.gravity=Gravity.TOP|Gravity.LEFT;bottomNavBackdrop.setLayoutParams(paperLp);
-            }
-        });
-        bottomNavMotion=new BottomNavIndicator(navIndicator,navBar,navHost,bottomNavLens,
-                value->((PaperNavLayout)navHost).setSwell(value));
-
+        navIndicator.setLayoutParams(new FrameLayout.LayoutParams(1, 1));
         fab = new TextView(this);
-        disableForceDark(fab);
-        fab.setText("");
-        fab.setTextColor(photoFabIconColor());
-        fab.setGravity(Gravity.CENTER);
-        fab.setBackground(round(photoFabColor(), dp(30), photoFabStrokeColor(), dp(2)));
-        fab.setElevation(dp(8));
-        FrameLayout.LayoutParams fabLp = new FrameLayout.LayoutParams(dp(spaceByLayout(62, 58, 56)), dp(spaceByLayout(62, 58, 56)));
-        fabLp.gravity = Gravity.RIGHT | Gravity.BOTTOM;
-        fabLp.rightMargin = dp(24);
-        fabLp.bottomMargin = dp(photoFabBottomMargin());
-        root.addView(fab, fabLp);
-        attachPressAnimation(fab);
-
+        fab.setLayoutParams(new FrameLayout.LayoutParams(0, 0));
+        fab.setVisibility(View.GONE);
         manualFoodButton = new View(this);
-        manualFoodButton.setTag("manual_add_food");
-        manualFoodButton.setContentDescription("手写记录餐食，不上传图片");
-        manualFoodButton.setFocusable(true);manualFoodButton.setOnClickListener(v -> chooseMealForText());
-        FrameLayout.LayoutParams penLp=new FrameLayout.LayoutParams(dp(56),dp(56),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
-        penLp.bottomMargin=dp(photoFabBottomMargin());manualFoodButton.setTranslationX(dp(58));
-        root.addView(manualFoodButton,penLp);attachPressAnimation(manualFoodButton);
-
+        manualFoodButton.setLayoutParams(new FrameLayout.LayoutParams(0, 0));
+        manualFoodButton.setVisibility(View.GONE);
+        composeBottomBar = new ComposeBottomBar(this, new ComposeBottomBar.Listener() {
+            public void onTab(int tab) { selectComposeTab(tab); }
+            public void onCapture() { if (canUseTodayActions()) chooseMealForPhoto(); }
+            public void onWrite() { if (canUseTodayActions()) chooseMealForText(); }
+        });
+        navHost = composeBottomBar;
+        disableForceDark(navHost);
+        FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(-1, dp(230), Gravity.BOTTOM);
+        navLp.bottomMargin = dp(18);
+        root.addView(navHost, navLp);
         buildNav();
         int startTab = 0; // Always open Today; retain old preference only for backup compatibility.
         boolean openedFromMealReminder = getIntent() != null
@@ -891,8 +876,13 @@ public class MainActivity extends Activity {
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if(startupRecoveryBlocked)return;
+        int nativeNightMode=newConfig.uiMode&android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+        boolean nativeThemeChanged=nativeNightMode!=dockConfigurationNightMode;
+        dockConfigurationNightMode=nativeNightMode;
         if(circularThemeReveal!=null&&root!=null&&circularThemeReveal.matchesSize(root.getWidth(),root.getHeight())){
-            refreshCurrentThemeSurface();return;
+            applyNightModeOverride();applyDecoration();refreshCurrentThemeSurface();
+            if(nativeThemeChanged&&composeBottomBar!=null)composeBottomBar.refreshThemeSurface();
+            return;
         }
         cancelReturnFeedback();
         cancelPendingBookClose();backSwipeTracking=false;if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();
@@ -902,7 +892,6 @@ public class MainActivity extends Activity {
         boolean keepAdvisorVisible = advisorVisible();
         boolean keepAssistantVisible = inSmartAssistantPage;
         boolean keepRemindersVisible = inMoreSettingsPage;
-        boolean keepMealManagementVisible = inMealManagementPage;
         boolean keepPreferencesVisible = inPreferencesPage;
         int previousScrollY = keepThemeSettingsVisible&&themeModeTransitionOverlay!=null?themeModeTransitionScrollY:currentContentScrollY();
         applyNightModeOverride();
@@ -932,8 +921,6 @@ public class MainActivity extends Activity {
             renderCurrentAssistantSettingsPage();restoreScrollPosition(currentPageScroll(),previousScrollY);
         } else if(keepRemindersVisible) {
             renderMealReminderSettingsPage();restoreScrollPosition(currentPageScroll(),previousScrollY);
-        } else if(keepMealManagementVisible) {
-            renderMealManagementPage();restoreScrollPosition(currentPageScroll(),previousScrollY);
         } else if(keepPreferencesVisible) {
             renderPreferencesPage(previousScrollY);
         } else {
@@ -941,10 +928,12 @@ public class MainActivity extends Activity {
         }
         updateFab();
         updateNavIndicator(false);
+        if(nativeThemeChanged&&composeBottomBar!=null)composeBottomBar.refreshThemeSurface();
     }
     @Override
     protected void onResume() {
         super.onResume();rootStopped=false;
+        if(composeBottomBar!=null)composeBottomBar.setHostActive(true);
         if(startupRecoveryBlocked)return;
         if (!foodReceiverRegistered) {
             IntentFilter filter = new IntentFilter(FoodAnalysisJobService.CHANGED);
@@ -952,7 +941,7 @@ public class MainActivity extends Activity {
             else registerReceiver(foodReceiver, filter);
             foodReceiverRegistered = true;
         }
-        synchronized (NutritionStore.LOCK) { NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
+        synchronized (NutritionStore.LOCK) { diaryProjectionDirty=true;NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
         if(rootCacheEvicted){int saved=rootCacheScroll;boolean advisor=rootCacheAdvisor;profile=readProfile();renderCurrent();if(advisor&&currentTab==0&&advisorPager!=null)advisorPager.showAdvisorImmediately();restoreScrollPosition(currentPageScroll(),saved);}
         FoodAnalysisJobService.schedule(this, false, 0);
         resumeFoodProcessing();
@@ -962,9 +951,10 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    protected void onStop(){if(startupRecoveryBlocked){super.onStop();return;}cancelPendingBookClose();rootStopped=true;if(rootPager!=null)rootPager.freeze();root.removeCallbacks(refreshRootPages);cancelPendingNavClick();windowTouchActive=false;homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);clearPeerPointer();if(pageCrossfade!=null)pageCrossfade.clear();finishPeerIndicator(effectiveNavTab());cancelThemeModeTransition();super.onStop();}
+    protected void onStop(){cancelNotebookShare();if(composeBottomBar!=null)composeBottomBar.setHostActive(false);cancelUpdateCheck();if(startupRecoveryBlocked){super.onStop();return;}cancelPendingBookClose();rootStopped=true;if(rootPager!=null)rootPager.freeze();root.removeCallbacks(refreshRootPages);cancelPendingNavClick();windowTouchActive=false;homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);clearPeerPointer();if(pageCrossfade!=null)pageCrossfade.clear();finishPeerIndicator(effectiveNavTab());cancelThemeModeTransition();super.onStop();}
     @Override public void onWindowFocusChanged(boolean focused){
         super.onWindowFocusChanged(focused);
+        if(focused&&root!=null)root.post(()->refreshFoodMealAssignment());
         if(focused&&homeFoodRefreshPending){homeFoodRefreshHandler.removeCallbacks(homeFoodRefresh);homeFoodRefreshHandler.post(homeFoodRefresh);}
         if(focused&&root!=null&&profile!=null)root.post(()->maybeShowRecognitionSetup());
     }
@@ -973,6 +963,11 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        cancelNotebookShare();
+        mealTextClosing=true;
+        for(MealTextSaveController editor:new ArrayList<>(mealTextEditors))editor.closeForDestroy();
+        if(avatarLoader!=null)avatarLoader.close();
+        cancelUpdateCheck();
         if(startupRecoveryBlocked){stickerGalleryExecutor.shutdownNow();mediaThumbnailExecutor.shutdownNow();photoViewerExecutor.shutdownNow();super.onDestroy();return;}
         cancelReturnFeedback();
         for(AlertDialog dialog:new ArrayList<AlertDialog>(glassDialogOwners.keySet()))dialog.dismiss();
@@ -1213,7 +1208,11 @@ public class MainActivity extends Activity {
     private boolean mainPeerVisible(){return rootPagesVisible();}
     private boolean nestedHorizontalAt(View view,float x,float y,int direction){
         if(view.getVisibility()!=View.VISIBLE||!containsRawPoint(view,x,y))return false;
-        if(view instanceof TodayDayPager||view instanceof HomeCalendarView
+        if(view instanceof TodayDayPager){
+            int[] location=new int[2];view.getLocationOnScreen(location);
+            return x>=location[0]+view.getPaddingLeft()&&x<location[0]+view.getWidth()-view.getPaddingRight();
+        }
+        if(view instanceof HomeCalendarView
                 ||view instanceof EditText||view instanceof SeekBar)return true;
         if(view instanceof HorizontalScrollView)return direction!=0&&view.canScrollHorizontally(direction);
         if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=group.getChildCount()-1;i>=0;i--)
@@ -1313,7 +1312,32 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    private void drawRootSnapshot(Canvas canvas) {
+        drawRootSnapshot(canvas,false);
+    }
+    private void drawRootSnapshot(Canvas canvas,boolean includeDock) {
+        int visibility=composeBottomBar==null?View.GONE:composeBottomBar.getVisibility();
+        try{
+            if(composeBottomBar!=null)composeBottomBar.setVisibility(View.INVISIBLE);
+            root.draw(canvas);
+        }finally{
+            if(composeBottomBar!=null)composeBottomBar.setVisibility(visibility);
+        }
+        if(includeDock&&composeBottomBar!=null&&visibility==View.VISIBLE){
+            int saved=canvas.save();
+            canvas.translate(composeBottomBar.getX(),composeBottomBar.getY());
+            composeBottomBar.drawCurrentFrame(canvas);
+            canvas.restoreToCount(saved);
+        }
+    }
+    private void raiseComposeBottomBar(){
+        if(composeBottomBar!=null)composeBottomBar.bringToFront();
+        if(circularThemeReveal!=null)circularThemeReveal.bringToFront();
+        if(themeModeTransitionOverlay!=null)themeModeTransitionOverlay.bringToFront();
+    }
     private boolean containsRawPoint(View view, float rawX, float rawY) {
+        if(view==composeBottomBar&&composeBottomBar!=null)return composeBottomBar.containsInteractiveRawPoint(rawX,rawY);
+        if(view==null||view.getVisibility()!=View.VISIBLE)return false;
         int[] location = new int[2];
         view.getLocationOnScreen(location);
         return rawX >= location[0] && rawX <= location[0] + view.getWidth()
@@ -1365,23 +1389,15 @@ public class MainActivity extends Activity {
             return;
         }
         final String date = homeDate();
-        final String[] keys = entryMealKeys();
-        showChoiceDialog("添加图片", entryMealTitles(), 0, new ChoiceHandler() {
-            @Override
-            public void onChoice(int which) {
-                if (which < 0 || which >= keys.length || pendingSharedStickerUri == null) {
-                    return;
-                }
-                Uri source = pendingSharedStickerUri;
-                pendingSharedStickerUri = null;
-                showTab(0, false);
-                pendingPhotoDate = date; pendingPhotoMeal = keys[which];
-                importSelectedMealMediaAsync(java.util.Collections.singletonList(source), false);
-            }
-        });
+        Uri source = pendingSharedStickerUri;
+        pendingSharedStickerUri = null;
+        showTab(0, false);
+        pendingPhotoDate = date; pendingPhotoMeal = MealTime.currentMeal();
+        importSelectedMealMediaAsync(java.util.Collections.singletonList(source), false);
     }
 
     private void buildNav() {
+        if(composeBottomBar!=null){updateComposeBottomBar();return;}
         navBar.removeAllViews();
         for (int i = 0; i < TAB_TITLES.length; i++) {
             if (i == 2) continue; // Calendar belongs to Today, never a separate/merged Footprints tab.
@@ -1459,6 +1475,7 @@ public class MainActivity extends Activity {
     }
 
     private void updateNav(boolean animateIndicator) {
+        if(composeBottomBar!=null){updateComposeBottomBar();return;}
         for (int i = 0; i < navBar.getChildCount(); i++) {
             LinearLayout item = (LinearLayout) navBar.getChildAt(i);
             Object tag = item.getTag();
@@ -1510,6 +1527,7 @@ public class MainActivity extends Activity {
     }
 
     private void requestNavIndicator(final int tab,final boolean animated) {
+        if(composeBottomBar!=null){updateComposeBottomBar();return;}
         cancelPendingNavIndicatorLayout();
         final long generation=++navIndicatorGeneration;
         if(navHost==null||navBar==null||navIndicator==null||navPeerActive&&!UiTokens.NAV_LIQUID_MOTION_ENABLED)return;
@@ -1547,7 +1565,7 @@ public class MainActivity extends Activity {
             }
             navIndicator.setBackground(round(accentSoft,dp(26),0,0));
             bottomNavLens.appearance(accentSoft,UiTokens.navLensTint(),accent,themedTextColor(Color.rgb(32,32,32)),UiTokens.line(nightDecoration()),nightDecoration());
-            return bottomNavMotion.select(tab,animated);
+            return bottomNavMotion.select(tab,animated||navPageTransition);
         }
         ViewGroup.LayoutParams lp=navIndicator.getLayoutParams();
         if(lp.width!=width){lp.width=width;navIndicator.setLayoutParams(lp);}
@@ -1594,6 +1612,7 @@ public class MainActivity extends Activity {
     }
 
     private void showTab(final int tab, boolean animated) {
+        cancelUpdateCheck();
         photoViewerGeneration++;
         cancelReturnFeedback();
         cancelPendingBookClose();if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();cancelThemeModeTransition();
@@ -1601,9 +1620,8 @@ public class MainActivity extends Activity {
         if(tab==2){homeCalendarExpanded=true;showTab(0,animated);return;}
         final int oldTab = currentTab;
         final boolean peer=mainPeerVisible();
-        final boolean advisorExit=advisorVisible();
         clearPeerPointer();
-        if (animated && tab == oldTab) {
+        if (animated && tab == oldTab && peer) {
             return;
         }
         boolean leavingPreferences = inPreferencesPage && tab != 3;
@@ -1620,7 +1638,6 @@ public class MainActivity extends Activity {
         inFavoriteRecordsPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
-        inMealManagementPage = false;
         inApiOfficialSitesPage = false;
         inStickerGalleryPage = false;
         inAiAnalysisPage = false;
@@ -1666,17 +1683,13 @@ public class MainActivity extends Activity {
                 }
             }
         };
-        if(advisorExit&&restorePreferences||navPageTransition){
-            slideTabFromAdvisor(render,direction,tab);return;
-        }
-        if(peer&&rootPagesVisible()&&(pageCrossfade==null||!pageCrossfade.active())&&!restorePreferences){
-            if(pageCrossfade!=null&&pageCrossfade.active())pageCrossfade.clear();
+        if(cachedSwitch&&!navPageTransition){
             if(advisorPager!=null)advisorPager.stopForRootNavigation();
             rootPager.select(rootIndex(tab),true);
-        }else smoothContentSwap(render,direction);
+        }else slideTabFromPage(render,direction,tab);
     }
-    /** Keep the retained advisor sheet and the pill on the same horizontal clock. */
-    private void slideTabFromAdvisor(Runnable render,float direction,int tab){
+    /** The actual outgoing child sheet and bottom navigation share one root-navigation clock. */
+    private void slideTabFromPage(Runnable render,float direction,int tab){
         final long[] generation={0};
         final float[] origin={0,0};
         cancelPendingNavIndicatorLayout();navIndicator.animate().cancel();
@@ -1685,17 +1698,34 @@ public class MainActivity extends Activity {
                 generation[0]=++navPageTransitionGeneration;
                 origin[0]=navIndicator.getTranslationX();origin[1]=navIndicator.getWidth()*navIndicator.getScaleX();
                 navPageTransition=true;navPeerActive=true;
+                if(composeBottomBar!=null)composeBottomBar.beginPagePreparation();
+                else if(bottomNavMotion!=null)bottomNavMotion.beginPagePreparation();
+            }
+            public void onReady(){
+                if(generation[0]!=navPageTransitionGeneration)return;
+                if(composeBottomBar!=null)composeBottomBar.endPagePreparation();
+                else if(bottomNavMotion!=null)bottomNavMotion.endPagePreparation();
             }
             public void onProgress(float movement){
                 if(generation[0]!=navPageTransitionGeneration)return;
                 navPageTransition=true;navPeerActive=true;
+                if(composeBottomBar!=null||UiTokens.NAV_LIQUID_MOTION_ENABLED)return;
                 navIndicator.setVisibility(View.VISIBLE);navIndicator.setPivotX(0);
                 navIndicator.setTranslationX(lerp(origin[0],navItemX(tab),movement));
                 navIndicator.setScaleX(lerp(origin[1],navItemWidth(tab),movement)/Math.max(1,navIndicator.getWidth()));
             }
             public void onEnd(){
                 if(generation[0]!=navPageTransitionGeneration)return;
-                navPageTransition=false;navIndicator.setScaleX(1);finishPeerIndicator(effectiveNavTab());resumeDeferredRootRefresh();
+                navPageTransition=false;
+                if(composeBottomBar!=null)composeBottomBar.endPagePreparation();
+                else if(bottomNavMotion!=null)bottomNavMotion.endPagePreparation();
+                if(rootPagesVisible()){
+                    rootPager.refreshOwnership();
+                    if(currentTab==0&&advisorPager!=null)advisorPager.resumeVertical();
+                }
+                if(UiTokens.NAV_LIQUID_MOTION_ENABLED){navPeerActive=false;updateNav(true);}
+                else{navIndicator.setScaleX(1);finishPeerIndicator(effectiveNavTab());}
+                resumeDeferredRootRefresh();
                     }
         });
     }
@@ -1873,7 +1903,6 @@ public class MainActivity extends Activity {
         if(inDataSecurityPage)return "data-security";
         if(inSmartAssistantPage)return "assistant:"+smartAssistantSection;
         if(inInterfaceLayoutPage)return "notebook-layout";
-        if(inMealManagementPage)return "meal-management";
         if(inMoreSettingsPage)return "reminders";
         if(inHintManagerPage)return "meal-hints";
         if(inVibrationPage)return "vibration";
@@ -1885,6 +1914,7 @@ public class MainActivity extends Activity {
         runContentSwap(renderAction,direction,gentle,progress,settings,false,null);
     }
     private void runContentSwap(final Runnable renderAction,final float direction,boolean gentle,PageCrossfade.ProgressListener progress,boolean settings,boolean mealContainer,View source){
+        cancelUpdateCheck();
         photoViewerGeneration++;
         if(progress==null&&direction<0&&afterReturnFeedback(()->runContentSwap(renderAction,direction,gentle,progress,settings,mealContainer,source)))return;
         cancelReturnFeedback();
@@ -1911,7 +1941,7 @@ public class MainActivity extends Activity {
         if(rememberScroll)settingsScrollPositions.put(fromSurface,currentContentScrollY());
         Runnable commit=()->{
             boolean previous=suppressEntryAnimation,previousReturn=cachedRootReturn;
-            suppressEntryAnimation=true;cachedRootReturn=direction<0;
+            suppressEntryAnimation=true;cachedRootReturn=direction<0||progress!=null;
             try{
                 renderAction.run();
                 String acceptedSurface=settingsSurfaceKey();
@@ -1935,9 +1965,12 @@ public class MainActivity extends Activity {
     private void renderCurrent() {
         if(advisorPager!=null){advisorPager=null;}
         photoViewerGeneration++;
-        // Clean Me/books roots are already laid out. Reusing them avoids rebuilding
-        // three pages on Back. Today is rebuilt because detached media owns its decode lifecycle.
-        boolean reuse=cachedRootReturn&&(currentTab==1||currentTab==3)&&rootPager!=null&&rootPager.getParent()==null
+        // Media Views reload asynchronously on attachment. A matching clean Today root
+        // can reuse its measured hierarchy just like the shelf and Me roots.
+        View cachedDay=currentTab==0&&rootPager!=null?rootPager.page(0).findViewWithTag("today_day_pager"):null;
+        boolean homeMatches=currentTab!=0||cachedDay instanceof TodayDayPager
+                &&homeDate().equals(dateKey(((TodayDayPager)cachedDay).currentDate()));
+        boolean reuse=cachedRootReturn&&homeMatches&&rootPager!=null&&rootPager.getParent()==null
                 &&!rootPagesDirty&&!rootCacheEvicted&&rootHomeRestoreDate==null
                 &&dateKey(Calendar.getInstance()).equals(rootPagesDay)
                 &&rootPager.getWidth()==content.getWidth()&&rootPager.getHeight()==content.getHeight()
@@ -1958,12 +1991,14 @@ public class MainActivity extends Activity {
     @Override public void onBackPressed(){if(startupRecoveryBlocked||!handleBackNavigation())super.onBackPressed();}
 
     private boolean handleBackNavigation() {
+        if(pendingBookOpen!=null){cancelPendingBookOpen();return true;}
         if(returnAfterDraw!=null)return true;
         if(bookClosePending||bookOpeningOverlay!=null&&bookOpeningOverlay.closing)return true;
         // Some system/key paths deliver both legacy and dispatcher callbacks for one Back.
         long backNow=android.os.SystemClock.uptimeMillis();
         if(backNow-lastBackNavigationAt<100)return true;
         lastBackNavigationAt=backNow;
+        if(composeBottomBar!=null&&composeBottomBar.consumeBack())return true;
         if (aiPreviewOverlay != null) {
             closeAiStickerPreview();
             return true;
@@ -2047,7 +2082,6 @@ public class MainActivity extends Activity {
             return false;
         }
         if(inInterfaceLayoutPage){closeInterfaceLayoutPage();return true;}
-        if(inMealManagementPage){closeMealManagementPage();return true;}
         if (inSmartAssistantPage && !smartAssistantSection.isEmpty()) {
             smoothSettingsSwap(() -> renderSmartAssistantPage(), -1f);
             return true;
@@ -2069,7 +2103,7 @@ public class MainActivity extends Activity {
         if (inHintManagerPage || inVibrationPage || inStickerSettingsPage
                  || inNotebookSettingsPage || inDataSecurityPage
                 || inCloudSyncPage || inRecycleBinPage
-                || inInterfaceLayoutPage || inMoreSettingsPage || inMealManagementPage || inSmartAssistantPage) {
+                || inInterfaceLayoutPage || inMoreSettingsPage || inSmartAssistantPage) {
             content.animate().cancel();
             smoothSettingsSwap(new Runnable() {
                 @Override
@@ -2094,7 +2128,6 @@ public class MainActivity extends Activity {
         inFavoriteRecordsPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
-        inMealManagementPage = false;
         inSmartAssistantPage = false;
         inApiOfficialSitesPage = false;
     }
@@ -2105,7 +2138,7 @@ public class MainActivity extends Activity {
                  && !inNotebookSettingsPage
                 && !inDataSecurityPage && !inCloudSyncPage && !inRecycleBinPage
 
-                && !inInterfaceLayoutPage && !inMoreSettingsPage && !inMealManagementPage && !inSmartAssistantPage
+                && !inInterfaceLayoutPage && !inMoreSettingsPage && !inSmartAssistantPage
                 && !inApiOfficialSitesPage;
     }
 
@@ -2150,7 +2183,40 @@ public class MainActivity extends Activity {
         return super.dispatchKeyEvent(event);
     }
 
+    private boolean todayDockAvailable() {
+        return currentTab==0&&rootPagesVisible()&&!inBookDetail&&!inPhotoViewer
+                &&!inStickerGalleryPage&&(!advisorAttached()||advisorPager.atToday());
+    }
+    private boolean canUseTodayActions() {
+        return todayDockAvailable()&&!navPageTransition&&!rootPager.isInteracting()
+                &&activeGlassDialogCount==0&&activeOverlay==null&&!mediaPreviewActive();
+    }
+    private void updateComposeBottomBar() {
+        if(composeBottomBar==null)return;
+        composeBottomBar.update(effectiveNavTab(),todayDockAvailable(),accent,
+                UiTokens.card(nightDecoration()),UiTokens.ink(nightDecoration()),
+                UiTokens.secondary(nightDecoration()),nightDecoration());
+    }
+    private void selectComposeTab(int tab) {
+        if(inBookDetail)cancelNotebookShare();
+        composeBottomBar.closeMenu();
+        cancelPendingNavClick();
+        if(tab==3&&currentTab==3&&!inBookDetail&&!inPhotoViewer){
+            if(isMeSubPageVisible())returnToMeRoot();
+            return;
+        }
+        if(tab==0&&currentTab==0&&!inStickerGalleryPage&&!inBookDetail&&!inPhotoViewer){
+            if(inAiAnalysisPage)closeAiAnalysisPage();
+            return;
+        }
+        requestTabFromNav(tab);
+    }
     private void updateFab() {
+        if(composeBottomBar!=null){
+            fab.setVisibility(View.GONE);fab.setClickable(false);
+            manualFoodButton.setVisibility(View.GONE);manualFoodButton.setClickable(false);
+            updateComposeBottomBar();return;
+        }
         boolean show = currentTab == 0 && !inStickerGalleryPage && !inAiAnalysisPage && !inBookDetail && !inPhotoViewer
                 && !inPreferencesPage && !inThemeSettingsPage && !inProfileSettingsPage;
         fab.animate().alpha(show ? 1f : 0f).scaleX(show ? 1f : .8f).scaleY(show ? 1f : .8f).setDuration(160).start();
@@ -2165,11 +2231,24 @@ public class MainActivity extends Activity {
         }
     }
 
+    private int composeBottomContentInset(View page, int height) {
+        // Reserve a stable gap above the visible capsule and its expansion.
+        int minimum = dp(110);
+        if (composeBottomBar.getHeight() <= 0) return minimum;
+        int[] position = new int[2];
+        page.getLocationOnScreen(position);
+        int layoutTop = position[1] - Math.round(page.getTranslationY());
+        int capsuleTop = composeBottomBar.contentTopOnScreen() - layoutTop;
+        return Math.max(minimum, height - capsuleTop + dp(16));
+    }
+
     private int photoFabBottomMargin() {
+        if(composeBottomBar!=null)return 24;
         return spaceByLayout(110, 105, 100);
     }
 
     private void updatePhotoFabState(boolean expanded) {
+        if(composeBottomBar!=null){updateComposeBottomBar();return;}
         if (fab == null) return;
         if(photoFabAnimator!=null){photoFabAnimator.cancel();photoFabAnimator=null;}
         fab.setBackground(new RecognitionButtonDrawable(photoFabColor(),photoFabIconColor()));
@@ -2203,9 +2282,18 @@ public class MainActivity extends Activity {
 
     private View buildTodayRoot(){return buildTodayRoot(homeDate());}
     private View buildTodayRoot(final String date) {
-        FrameLayout host = new FrameLayout(this);
-        host.setTag("main_peer_today");
         LinearLayout page = basePage();
+        page.setClipChildren(false);
+        FrameLayout host = new FrameLayout(this) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                int bottom = composeBottomBar == null ? dp(photoFabBottomMargin() + 56 + 12)
+                        : composeBottomContentInset(page, MeasureSpec.getSize(heightSpec)) + dp(12);
+                page.setPadding(page.getPaddingLeft(), dp(UiTokens.HEADER_CORE + 12),
+                        page.getPaddingRight(), bottom);
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
+        host.setTag("main_peer_today");
         page.setPadding(page.getPaddingLeft(), dp(UiTokens.HEADER_CORE + 12), page.getPaddingRight(), dp(photoFabBottomMargin() + 56 + 12));
         host.addView(page, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout header = row(Gravity.CENTER_VERTICAL);
@@ -2213,9 +2301,6 @@ public class MainActivity extends Activity {
         brand.setContentDescription("一蔬一饭，点击打开美食栏"); brand.setTag("food_gallery_entry");
         brand.setOnClickListener(v -> withNavigationSource(v,()->openStickerGalleryPage()));
         header.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView weekly = label("周报 ↗", 14, UiTokens.ink(nightDecoration()), true);
-        weekly.setGravity(Gravity.CENTER); weekly.setMinHeight(dp(48)); weekly.setMinWidth(dp(72));
-        weekly.setOnClickListener(v -> foodUi().weekly(homeDate())); header.addView(weekly);
         installStickyHeader(host, page, header, false);
         page.addView(createHomeCalendar(date));
         TodayDayPager pager = new TodayDayPager(this, calendarFromKey(date),
@@ -2230,7 +2315,10 @@ public class MainActivity extends Activity {
                 syncHomeVisibleDate(picked);
             }
         });
-        LinearLayout.LayoutParams pagerLp = new LinearLayout.LayoutParams(-1,0,1);pagerLp.topMargin=dp(14);page.addView(pager,pagerLp);
+        pager.setPadding(page.getPaddingLeft(),0,page.getPaddingRight(),0);
+        LinearLayout.LayoutParams pagerLp = new LinearLayout.LayoutParams(-1,0,1);
+        pagerLp.leftMargin=-page.getPaddingLeft();pagerLp.rightMargin=-page.getPaddingRight();
+        pagerLp.topMargin=dp(28);page.addView(pager,pagerLp);
         return host;
     }
 
@@ -2250,7 +2338,7 @@ public class MainActivity extends Activity {
             public View editableMedia(DayFoodEntries.Entry entry, View image) { return journalMedia(date, entry, image); }
             public View editableText(DayFoodEntries.Entry entry, View text) { return journalText(date,entry,text); }
         });
-        LinearLayout summary = new LinearLayout(this); summary.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout summary = new LinearLayout(this); summary.setOrientation(LinearLayout.VERTICAL); summary.setTag("today_summary");
         LinearLayout dateRow = row(Gravity.CENTER_VERTICAL);
         LinearLayout pick = row(Gravity.CENTER_VERTICAL); pick.setTag("today_date_pick");
         TextView dateLabel = label(date.equals(today) ? "今天" : new SimpleDateFormat("M月d日", Locale.CHINA).format(calendarFromKey(date).getTime()), 14, UiTokens.secondary(nightDecoration()), false);
@@ -2294,14 +2382,8 @@ public class MainActivity extends Activity {
         calendar.setDatePickedDuringExpansion(homeCalendarPickedDuringExpansion);
         calendar.setPalette(accent,accentSoft);
         int goal=Math.max(0,profile.optInt("dailyCalorieGoal"));
-        HashMap<String,Integer> calorieDays=new HashMap<>();
-        if(goal>0){
-            java.util.Iterator<String> dates=days.keys();
-            while(dates.hasNext()){
-                String key=dates.next();int calories=FoodUi.displayCalories(days.optJSONObject(key));
-                if(calories>0)calorieDays.put(key,calories);
-            }
-        }
+        updateDiaryProjection();
+        HashMap<String,Integer> calorieDays=goal>0?diaryProjection.calorieDays():new HashMap<String,Integer>();
         calendar.setCalorieProgress(goal,calorieDays);return calendar;
     }
 
@@ -2346,7 +2428,7 @@ public class MainActivity extends Activity {
     private void manageDayRecords(final String date) {
         JSONObject day=days.optJSONObject(date);
         final List<MealOption> meals=visibleMealsForDay(day==null?new JSONObject():day);
-        if(nightSnackEnabled())addMealIfMissing(meals,"snack");sortMeals(meals);
+        addMealIfMissing(meals,"snack");sortMeals(meals);
         String[] entries=new String[meals.size()];
         for(int i=0;i<meals.size();i++)entries[i]="编辑"+meals.get(i).title+"记录";
         showChoiceDialog("管理今日记录",entries,-1,which->{
@@ -2354,12 +2436,109 @@ public class MainActivity extends Activity {
         });
     }
 
+    private final class InlineMealDialog extends AlertDialog {
+        MealTextSaveController saver;
+        boolean savedDismiss;
+        InlineMealDialog() { super(PaperComponents.dialogBuilder(MainActivity.this,nightDecoration()).getContext()); }
+        @Override public void dismiss() {
+            if(saver!=null&&!savedDismiss&&!mealTextClosing&&!isFinishing()&&!isDestroyed()) {
+                saver.saveThen(this::closeSaved);
+                return;
+            }
+            super.dismiss();
+        }
+        void closeSaved() { savedDismiss=true;super.dismiss(); }
+    }
+
+    private static MealTextSave.Store mealTextStore(final SharedPreferences preferences) {
+        return new MealTextSave.Store(){
+            public String read(){return preferences.getString(DATA_KEY,"{}");}
+            public boolean write(String raw){return preferences.edit().putString(DATA_KEY,raw).commit();}
+            public boolean restoring(){return preferences.contains(NutritionStore.RESTORE_MARKER);}
+        };
+    }
+
+    /** Only the transaction runs on the process queue. Completion keeps the current editor owner. */
+    private final class MealTextSaveController {
+        final AlertDialog dialog;
+        final EditText input;
+        final TextView status;
+        final String date,key;
+        final boolean inline;
+        final ArrayList<View> actions=new ArrayList<>();
+        String lastSaved;
+        boolean saving;
+        Runnable pendingAction;
+        MealTextSaveController(AlertDialog dialog,EditText input,TextView status,String date,String key,boolean inline,String saved) {
+            this.dialog=dialog;this.input=input;this.status=status;this.date=date;this.key=key;this.inline=inline;lastSaved=saved;
+            mealTextEditors.add(this);
+        }
+        void saveThen(Runnable next) {
+            if(saving)return;
+            String value=inline?ManualMealText.clean(input.getText().toString()):ManualMealText.normalize(input.getText().toString());
+            if(value==null){input.setError(inline?"餐食名称最多2000字":"请填写餐食名称，最多2000字");return;}
+            if(value.equals(lastSaved)){if(next!=null)next.run();return;}
+            saving=true;pendingAction=next;setBusy(true);status.setText("正在保存…");status.setVisibility(View.VISIBLE);
+            final SharedPreferences targetPrefs=prefs;
+            final String targetDate=date,targetMeal=key;
+            final boolean inlineEdit=inline;
+            final java.lang.ref.WeakReference<MealTextSaveController> owner=new java.lang.ref.WeakReference<>(this);
+            mealTextWrites.execute(()->{
+                MealTextSave.Result result=MealTextSave.save(mealTextStore(targetPrefs),NutritionStore.LOCK,targetDate,targetMeal,value,inlineEdit);
+                new Handler(android.os.Looper.getMainLooper()).post(()->{
+                    MealTextSaveController current=owner.get();
+                    if(current!=null)current.completed(result,value);
+                });
+            });
+        }
+        void completed(MealTextSave.Result result,String value) {
+            if(result.saved&&!result.raw.equals(prefs.getString(DATA_KEY,"{}"))
+                    &&!mealTextClosing&&!isFinishing()&&!isDestroyed()&&dialog.isShowing()) {
+                final SharedPreferences targetPrefs=prefs;
+                final java.lang.ref.WeakReference<MealTextSaveController> owner=new java.lang.ref.WeakReference<>(this);
+                mealTextWrites.execute(()->{
+                    MealTextSave.Result latest=MealTextSave.latest(mealTextStore(targetPrefs),NutritionStore.LOCK);
+                    new Handler(android.os.Looper.getMainLooper()).post(()->{
+                        MealTextSaveController current=owner.get();
+                        if(current!=null)current.finishCompleted(latest,value);
+                    });
+                });
+                return;
+            }
+            finishCompleted(result,value);
+        }
+        void finishCompleted(MealTextSave.Result result,String value) {
+            saving=false;
+            Runnable next=pendingAction;pendingAction=null;
+            if(mealTextClosing||isFinishing()||isDestroyed()||!dialog.isShowing())return;
+            setBusy(false);
+            if(!result.saved){status.setText("保存失败，请重试");status.setVisibility(View.VISIBLE);return;}
+            lastSaved=value;
+            days=result.days;status.setVisibility(View.GONE);
+            if(rootStopped){status.setText("已保存");status.setVisibility(View.VISIBLE);invalidateRootPages();return;}
+            // A continuation may install a new root and clear its dirty flag. Mark it afterwards
+            // so an update arriving after this background snapshot still gets its deferred refresh.
+            try{if(next!=null)next.run();}finally{invalidateRootPages();}
+        }
+        void setBusy(boolean busy) {
+            input.setEnabled(!busy);
+            for(View action:actions)action.setEnabled(!busy);
+            dialog.setCancelable(!busy);
+            dialog.setCanceledOnTouchOutside(!busy);
+        }
+        void closeForDestroy() {
+            if(inline&&!saving)saveThen(null);
+            if(dialog instanceof InlineMealDialog)((InlineMealDialog)dialog).closeSaved();else dialog.dismiss();
+        }
+        void dismissed() { mealTextEditors.remove(this);resumeDeferredRootRefresh(); }
+    }
+
     private AlertDialog showMealRecordEditor(final String date, final String key) {
         if(date==null||date.compareTo(dateKey(Calendar.getInstance()))>0)return null;
-        final AlertDialog dialog=PaperComponents.dialogBuilder(this,nightDecoration()).setTitle(mealTitle(key)+"记录").create();
+        final InlineMealDialog dialog=new InlineMealDialog();dialog.setTitle(mealTitle(key)+"记录");
         LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(dp(24),dp(4),dp(24),dp(12));
         box.setTag("meal_record_body");
-        JSONObject snapshot=NutritionStore.read(prefs,DATA_KEY);
+        JSONObject snapshot=days;
         JSONObject meal=NutritionStore.meal(snapshot,date,key);
         String savedText=meal==null?"":meal.optString("text","").trim();
         final String prompt=savedText.isEmpty()?manualMealPrompt(date,key):null;
@@ -2377,25 +2556,11 @@ public class MainActivity extends Activity {
             int cut=start;while(available-->0&&cut<end)cut+=Character.charCount(Character.codePointAt(source,cut));
             return source.subSequence(start,cut);
         }});
-        final String[] lastSaved={savedText};
-        final java.util.function.BooleanSupplier saveText=()->{
-            String value=ManualMealText.clean(text.getText().toString());
-            if(value==null){text.setError("餐食名称最多2000字");return false;}
-            if(value.equals(lastSaved[0]))return true;
-            synchronized(NutritionStore.LOCK){
-                JSONObject latest=NutritionStore.read(prefs,DATA_KEY),day=latest.optJSONObject(date);
-                JSONObject current=day==null?null:day.optJSONObject(key);
-                if(current==null&&value.isEmpty()){lastSaved[0]=value;return true;}
-                JSONObject updated=ManualMealText.updatedInlineMeal(current,value);
-                try{
-                    if(updated==null)return false;
-                    if(day==null)day=new JSONObject();day.put(key,updated);latest.put(date,day);
-                    if(!prefs.edit().putString(DATA_KEY,latest.toString()).commit()){text.setError("保存失败，请重试");return false;}
-                    days=latest;lastSaved[0]=value;return true;
-                }catch(JSONException failed){text.setError("保存失败，请重试");return false;}
-            }
-        };
         box.addView(text,new LinearLayout.LayoutParams(-1,-2));
+        TextView saveStatus=label("",12,UiTokens.secondary(nightDecoration()),false);
+        saveStatus.setTag("meal_text_save_status");saveStatus.setVisibility(View.GONE);box.addView(saveStatus);
+        final MealTextSaveController saver=new MealTextSaveController(dialog,text,saveStatus,date,key,true,savedText);
+        dialog.saver=saver;
 
         LinearLayout grid=new LinearLayout(this);grid.setOrientation(LinearLayout.VERTICAL);grid.setTag("meal_record_grid");
         box.addView(grid,new LinearLayout.LayoutParams(-1,-2));
@@ -2405,15 +2570,16 @@ public class MainActivity extends Activity {
             if(count%2==0){line=new LinearLayout(this);grid.addView(line,new LinearLayout.LayoutParams(-1,-2));}
             LinearLayout cell=new LinearLayout(this);cell.setOrientation(LinearLayout.VERTICAL);cell.setTag("meal_record_food");
             View image=TodayPaperView.mediaPreview(this,entry.fileName,entry.fallbackFile,entry.sticker,nightDecoration(),NutritionStore.displayRotation(entry.item));
-            Runnable openFood=()->{if(!saveText.getAsBoolean())return;dialog.dismiss();if(entry.isFood())foodUi().details(date,key,entry.item);else showPhotoViewer(date,key,entry.fileName);};
+            Runnable openFood=()->saver.saveThen(()->{dialog.closeSaved();if(entry.isFood())foodUi().details(date,key,entry.item);else showPhotoViewer(date,key,entry.fileName);});
             cell.addView(journalMedia(date,entry,image,openFood),new LinearLayout.LayoutParams(-1,dp(132)));
             TextView name=label(entry.title,14,UiTokens.ink(nightDecoration()),false);name.setTag("meal_record_name");name.setGravity(Gravity.CENTER);name.setPadding(0,dp(4),0,dp(12));cell.addView(name,new LinearLayout.LayoutParams(-1,-2));
-            name.setMinHeight(dp(48));
+            name.setMinHeight(dp(48));saver.actions.add(cell);
             LinearLayout.LayoutParams cellLp=new LinearLayout.LayoutParams(0,-2,1);cellLp.rightMargin=count%2==0?dp(8):0;line.addView(cell,cellLp);count++;
         }
         if(count%2==1)line.addView(new Space(this),new LinearLayout.LayoutParams(0,1,1));
 
-        TextView add=PaperComponents.button(this,"添加图片",nightDecoration(),v->{if(saveText.getAsBoolean()){dialog.dismiss();chooseMealPhotoSource(date,key);}});
+        TextView add=PaperComponents.button(this,"添加图片",nightDecoration(),v->saver.saveThen(()->{dialog.closeSaved();chooseMealPhotoSource(date,key);}));
+        saver.actions.add(add);
         add.setTag("meal_record_add_image");
         LinearLayout.LayoutParams addLp=new LinearLayout.LayoutParams(-1,-2);addLp.topMargin=dp(20);box.addView(add,addLp);
         // Keep these two actions together instead of inheriting AlertController's
@@ -2421,7 +2587,7 @@ public class MainActivity extends Activity {
         LinearLayout footer=row(Gravity.RIGHT|Gravity.CENTER_VERTICAL);
         TextView done=label("完成",15,UiTokens.ink(nightDecoration()),false);done.setTag("meal_record_done");
         done.setGravity(Gravity.CENTER);done.setMinHeight(dp(48));done.setMinWidth(dp(64));done.setPadding(dp(12),0,0,0);
-        done.setOnClickListener(v->{if(saveText.getAsBoolean())dialog.dismiss();});footer.addView(done,new LinearLayout.LayoutParams(-2,-2));
+        done.setOnClickListener(v->saver.saveThen(dialog::closeSaved));saver.actions.add(done);footer.addView(done,new LinearLayout.LayoutParams(-2,-2));
         LinearLayout.LayoutParams footerLp=new LinearLayout.LayoutParams(-1,-2);footerLp.topMargin=dp(8);box.addView(footer,footerLp);
         ScrollView scroll=new ScrollView(this);scroll.setVerticalScrollBarEnabled(false);scroll.addView(box);
         dialog.setView(PaperComponents.dialogContent(this,scroll));
@@ -2429,7 +2595,7 @@ public class MainActivity extends Activity {
         box.setFocusableInTouchMode(true);box.requestFocus();
         // A successor detail/viewer may already be showing when this callback runs.
         // Actual edits already mark the root dirty; an unchanged read needs no rebuild.
-        dialog.setOnDismissListener(d->{saveText.getAsBoolean();resumeDeferredRootRefresh();});dialog.show();PaperComponents.styleDialog(dialog,nightDecoration());
+        dialog.setOnDismissListener(d->saver.dismissed());dialog.show();PaperComponents.styleDialog(dialog,nightDecoration());
         return dialog;
     }
 
@@ -2872,20 +3038,16 @@ public class MainActivity extends Activity {
         button.setBackground(round(nightDecoration() ? Color.rgb(36, 37, 40) : Color.WHITE,
                 dp(27), accentSoft, dp(1)));
         attachPressAnimation(button);
-        Bitmap avatarBitmap = loadAvatar();
-        if (avatarBitmap != null) {
-            RoundedImageView avatar = new RoundedImageView(this);
-            avatar.setRadius(dp(22));
-            avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            avatar.setImageBitmap(avatarBitmap);
-            button.addView(avatar, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        } else {
-            TextView fallback = label("👤", 22, accent, true);
-            fallback.setGravity(Gravity.CENTER);
-            button.addView(fallback, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        }
+        TextView fallback = label("👤", 22, accent, true);
+        fallback.setGravity(Gravity.CENTER);
+        button.addView(fallback, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        RoundedImageView avatar = new RoundedImageView(this);
+        avatar.setRadius(dp(22));
+        avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        button.addView(avatar, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        loadAvatar(avatar, fallback);
         return button;
     }
 
@@ -4738,11 +4900,7 @@ public class MainActivity extends Activity {
 
 
     private void chooseMealForText() {
-        final String date=homeDate();
-        final String[] keys=entryMealKeys();
-        showChoiceDialog("手写餐食",entryMealTitles(),-1,which->{
-            if(which>=0&&which<keys.length)showManualMealTextEditor(date,keys[which]);
-        });
+        showManualMealTextEditor(homeDate(),MealTime.currentMeal());
     }
 
     private AlertDialog showManualMealTextEditor(final String date,final String key) {
@@ -4756,7 +4914,7 @@ public class MainActivity extends Activity {
         input.setHint(shownPrompt==null?manualMealPrompt(date,key):shownPrompt);
         input.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE|InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setMinLines(2);input.setMaxLines(5);input.setMinHeight(dp(72));
-        JSONObject existing=NutritionStore.meal(NutritionStore.read(prefs,DATA_KEY),date,key);
+        JSONObject existing=NutritionStore.meal(days,date,key);
         input.setText(existing==null?"":existing.optString("text"));input.setSelection(input.length());
         LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setPadding(dp(24),dp(4),dp(24),dp(12));
         box.addView(input,new LinearLayout.LayoutParams(-1,-2));
@@ -4765,30 +4923,27 @@ public class MainActivity extends Activity {
         hint.setPadding(0,dp(12),0,0);box.addView(hint);
         final AlertDialog dialog=PaperComponents.dialogBuilder(this,nightDecoration()).setTitle("记录"+mealTitle(key))
                 .setView(box).setNegativeButton("取消",null).setPositiveButton("保存",null).create();
+        TextView saveStatus=label("",12,UiTokens.secondary(nightDecoration()),false);
+        saveStatus.setTag("meal_text_save_status");saveStatus.setVisibility(View.GONE);box.addView(saveStatus);
+        final MealTextSaveController saver=new MealTextSaveController(dialog,input,saveStatus,date,key,false,null);
+        dialog.setOnDismissListener(ignored->saver.dismissed());
         dialog.setOnShowListener(ignored->{
             PaperComponents.styleDialog(dialog,nightDecoration());
             input.requestFocus();
             if(dialog.getWindow()!=null)dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE|WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
-                if(ManualMealText.normalize(input.getText().toString())==null){input.setError("请填写餐食名称，最多2000字");return;}
-                boolean saved=false;
-                synchronized(NutritionStore.LOCK){
-                    JSONObject latest=NutritionStore.read(prefs,DATA_KEY),day=latest.optJSONObject(date);
-                    if(day==null)day=new JSONObject();
-                    JSONObject meal=ManualMealText.updatedMeal(day.optJSONObject(key),input.getText().toString());
-                    try{if(meal!=null){day.put(key,meal);latest.put(date,day);saved=prefs.edit().putString(DATA_KEY,latest.toString()).commit();if(saved)days=latest;}}catch(JSONException ignoredSave){}
-                }
-                if(!saved){input.setError("保存失败，请重试");return;}
+            saver.actions.add(dialog.getButton(AlertDialog.BUTTON_POSITIVE));
+            saver.actions.add(dialog.getButton(AlertDialog.BUTTON_NEGATIVE));
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->saver.saveThen(()->{
                 boolean snackReminder="snack".equals(key)&&ManualMealPrompts.snackRecordedStreak(days,date)>3;
                 dialog.dismiss();renderCurrent();
                 if(snackReminder)showGlassToast("夜晚的小美好也要适量，吃饱就好，别忘了休息~",Toast.LENGTH_LONG);
-            });
+            }));
         });dialog.show();return dialog;
     }
 
     /** UI-only text; neither absence reminders nor examples become saved meal content. */
     private String manualMealPrompt(String date,String key) {
-        JSONObject snapshot=NutritionStore.read(prefs,DATA_KEY);
+        JSONObject snapshot=days;
         String group="meal";List<String> pool;
         if("snack".equals(key)) {
             if(ManualMealPrompts.snackRecordedStreak(snapshot,date)>3) {
@@ -4807,16 +4962,7 @@ public class MainActivity extends Activity {
     }
 
     private void chooseMealForPhoto() {
-        final String date = homeDate();
-        final String[] keys = entryMealKeys();
-        showChoiceDialog("添加图片", entryMealTitles(), 0, new ChoiceHandler() {
-            @Override
-            public void onChoice(int which) {
-                if (which >= 0 && which < keys.length) {
-                    chooseMealPhotoSource(date, keys[which]);
-                }
-            }
-        });
+        chooseMealPhotoSource(homeDate(),MealTime.currentMeal());
     }
 
     private void renderBooks() {
@@ -4882,27 +5028,22 @@ public class MainActivity extends Activity {
         rowScroll.setClipToPadding(false);
         rowScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         rowScroll.setPadding(dp(2), 0, dp(12), 0);
-        LinearLayout books = new LinearLayout(this);
-        books.setOrientation(LinearLayout.HORIZONTAL);
-        books.setPadding(0, 0, 0, 0);
-        rowScroll.addView(books);
-        page.addView(rowScroll);
-
-        int[] colors = {
-                accent,
-                Color.rgb(166, 39, 184),
-                Color.rgb(255, 99, 64),
-                Color.rgb(255, 234, 44),
-                Color.rgb(91, 166, 229)
-        };
-
-        for (int i = 0; i < dates.size(); i++) {
-            final String date = dates.get(i);
-            View book = bookCard(date, colors[i % colors.length]);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(132), ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.rightMargin = dp(14);
-            books.addView(book, lp);
-        }
+        final int[] colors = {accent,Color.rgb(166,39,184),Color.rgb(255,99,64),Color.rgb(255,234,44),Color.rgb(91,166,229)};
+        View prototype=bookCard(dates.get(0),colors[0]);
+        prototype.measure(View.MeasureSpec.makeMeasureSpec(dp(132),View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+        final int cardHeight=prototype.getMeasuredHeight();
+        final List<String> shelfDates=new ArrayList<String>(dates);
+        HashMap<String,Integer> positions=new HashMap<String,Integer>();
+        for(int i=0;i<shelfDates.size();i++)positions.put(shelfDates.get(i),i);
+        BookShelfWindow books=new BookShelfWindow(this,true,cardHeight,new BookShelfWindow.Adapter(){
+            public int count(){return shelfDates.size();}
+            public int extent(int position){return dp(146);}
+            public View create(int position){
+                View book=bookCard(shelfDates.get(position),colors[position%colors.length]);
+                book.setPadding(book.getPaddingLeft(),book.getPaddingTop(),dp(14),book.getPaddingBottom());return book;
+            }
+        },positions);
+        rowScroll.addView(books);page.addView(rowScroll);
         setupBookCarousel(rowScroll, books);
 
         TextView recent = label("最近足迹", 22, Color.rgb(40, 40, 40), true);
@@ -4920,63 +5061,63 @@ public class MainActivity extends Activity {
         addBookGrid(page, dates, false);
     }
 
-    private void addBookGrid(LinearLayout page, List<String> dates, boolean fromFavorites) {
-        int columns = footprintColumns();
-        int gapDp = footprintGap();
-        int gap = dp(gapDp);
-        int available = getResources().getDisplayMetrics().widthPixels - dp(spaceByLayout(44, 40, 36));
-        int side = Math.max(dp(48), (available - gap * (columns - 1)) / columns);
-        int[] colors = {
-                accent,
-                Color.rgb(166, 39, 184),
-                Color.rgb(255, 99, 64),
-                Color.rgb(255, 234, 44),
-                Color.rgb(91, 166, 229)
-        };
-        LinearLayout rowBox = null;
-        String currentYear = "";
-        String currentMonth = "";
-        int sectionIndex = 0;
-        for (int i = 0; i < dates.size(); i++) {
-            String date = dates.get(i);
-            if (footprintDateSectionsEnabled()) {
-                Calendar calendar = calendarFromKey(date);
-                String year = String.valueOf(calendar.get(Calendar.YEAR));
-                String month = String.valueOf(calendar.get(Calendar.MONTH) + 1);
-                if (!year.equals(currentYear)) {
-                    boolean crossedYear = currentYear.length() > 0;
-                    currentYear = year;
-                    currentMonth = "";
-                    if (crossedYear) {
-                        TextView yearTitle = label(year + "年", 19, Color.rgb(142, 146, 154), false);
-                        yearTitle.setPadding(dp(2), dp(20), 0, dp(7));
-                        page.addView(yearTitle);
-                    }
+    private static final class BookShelfRow {
+        final String heading;
+        final boolean year;
+        final int start,extent;
+        int count;
+        BookShelfRow(String heading,boolean year,int start,int extent){this.heading=heading;this.year=year;this.start=start;this.extent=extent;}
+    }
+    private TextView bookShelfHeading(String title,boolean year){
+        TextView view=label(title,year?19:17,year?Color.rgb(142,146,154):accent,!year);
+        view.setPadding(dp(year?2:3),dp(year?20:4),0,dp(year?7:10));return view;
+    }
+    private void addBookGrid(LinearLayout page, List<String> dates, final boolean fromFavorites) {
+        final int columns=footprintColumns(),gap=dp(footprintGap());
+        int available=getResources().getDisplayMetrics().widthPixels-dp(spaceByLayout(44,40,36));
+        final int side=Math.max(dp(48),(available-gap*(columns-1))/columns);
+        final int rowGap=dp(footprintGap()+spaceByLayout(12,8,5));
+        final int[] colors={accent,Color.rgb(166,39,184),Color.rgb(255,99,64),Color.rgb(255,234,44),Color.rgb(91,166,229)};
+        final List<String> shelfDates=new ArrayList<String>(dates);
+        View prototype=bookGridCard(dates.get(0),colors[0],side,columns,fromFavorites);
+        prototype.measure(View.MeasureSpec.makeMeasureSpec(side,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+        final int rowExtent=prototype.getMeasuredHeight()+rowGap;
+        TextView monthProbe=bookShelfHeading("11月",false),yearProbe=bookShelfHeading("2026年",true);
+        monthProbe.measure(View.MeasureSpec.makeMeasureSpec(available,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+        yearProbe.measure(View.MeasureSpec.makeMeasureSpec(available,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+        final ArrayList<BookShelfRow> rows=new ArrayList<BookShelfRow>();
+        HashMap<String,Integer> positions=new HashMap<String,Integer>();
+        String previousYear="",previousMonth="";BookShelfRow current=null;
+        for(int i=0;i<shelfDates.size();i++){
+            String date=shelfDates.get(i);
+            if(footprintDateSectionsEnabled()){
+                Calendar calendar=calendarFromKey(date);String year=String.valueOf(calendar.get(Calendar.YEAR)),month=String.valueOf(calendar.get(Calendar.MONTH)+1);
+                if(!year.equals(previousYear)){
+                    if(!previousYear.isEmpty())rows.add(new BookShelfRow(year+"年",true,-1,yearProbe.getMeasuredHeight()));
+                    previousYear=year;previousMonth="";current=null;
                 }
-                if (!month.equals(currentMonth)) {
-                    currentMonth = month;
-                    TextView monthTitle = label(month + "月", 17, accent, true);
-                    monthTitle.setPadding(dp(3), dp(4), 0, dp(10));
-                    page.addView(monthTitle);
-                    sectionIndex = 0;
-                    rowBox = null;
+                if(!month.equals(previousMonth)){
+                    rows.add(new BookShelfRow(month+"月",false,-1,monthProbe.getMeasuredHeight()));previousMonth=month;current=null;
                 }
             }
-            if (sectionIndex % columns == 0) {
-                rowBox = row(Gravity.TOP);
-                LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                rowLp.bottomMargin = dp(gapDp + spaceByLayout(12, 8, 5));
-                page.addView(rowBox, rowLp);
-            }
-            View book = bookGridCard(date, colors[i % colors.length], side, columns, fromFavorites);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(side, ViewGroup.LayoutParams.WRAP_CONTENT);
-            if (sectionIndex % columns < columns - 1) {
-                lp.rightMargin = gap;
-            }
-            rowBox.addView(book, lp);
-            sectionIndex++;
+            if(current==null||current.count==columns){current=new BookShelfRow(null,false,i,rowExtent);rows.add(current);}
+            positions.put(date,rows.size()-1);current.count++;
         }
+        BookShelfWindow shelf=new BookShelfWindow(this,false,available,new BookShelfWindow.Adapter(){
+            public int count(){return rows.size();}
+            public int extent(int position){return rows.get(position).extent;}
+            public View create(int position){
+                BookShelfRow item=rows.get(position);
+                if(item.heading!=null)return bookShelfHeading(item.heading,item.year);
+                LinearLayout line=row(Gravity.TOP);line.setPadding(0,0,0,rowGap);
+                for(int n=0;n<item.count;n++){
+                    int index=item.start+n;View book=bookGridCard(shelfDates.get(index),colors[index%colors.length],side,columns,fromFavorites);
+                    LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(side,ViewGroup.LayoutParams.WRAP_CONTENT);if(n<columns-1)lp.rightMargin=gap;line.addView(book,lp);
+                }
+                return line;
+            }
+        },positions);
+        page.addView(shelf,new LinearLayout.LayoutParams(-1,-2));
     }
 
     private void setupBookCarousel(final HorizontalScrollView rowScroll, final LinearLayout books) {
@@ -4987,6 +5128,7 @@ public class MainActivity extends Activity {
                 updateBookCarouselDepth(rowScroll, books);
             }
         };
+        if(books instanceof BookShelfWindow)((BookShelfWindow)books).setOnWindowChanged(depth);
         rowScroll.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
             @Override
             public void onGlobalLayout() {
@@ -5120,8 +5262,6 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 if (fromFavorites) {
-                    returnToFavoriteRecordsAfterBook = true;
-                    inFavoriteRecordsPage = false;
                 }
                 openBookDetail(date, v);
             }
@@ -5501,21 +5641,30 @@ public class MainActivity extends Activity {
     }
 
     private void openBookDetail(final String date, final View source) {
-        cancelReturnFeedback();
-        preservePendingHomeReturn();
-        cancelPendingBookClose();bookEntryDate=date;bookShelfScrollY=currentContentScrollY();bookShelfScrollX=0;
+        cancelReturnFeedback();preservePendingHomeReturn();cancelPendingBookClose();
+        bookEntryDate=date;bookShelfScrollY=currentContentScrollY();bookShelfScrollX=0;
         View carousel=content==null?null:content.findViewWithTag("footprints_book_carousel");
         if(carousel instanceof HorizontalScrollView)bookShelfScrollX=((HorizontalScrollView)carousel).getScrollX();
-        if (ValueAnimator.areAnimatorsEnabled()) {
-            animateBookOpen(date, source);
-            return;
+        final boolean favorites=inFavoriteRecordsPage;
+        if(!ValueAnimator.areAnimatorsEnabled()){returnToFavoriteRecordsAfterBook=favorites;inFavoriteRecordsPage=false;renderBookDetail(date,false);return;}
+        final long generation=bookOpenGeneration;
+        final View origin=source;
+        if(origin!=null){
+            View visibleCover=origin.findViewWithTag("footprint_plain_cover");pendingBookSource=visibleCover==null?origin:visibleCover;
+            pendingBookSourceZ=pendingBookSource.getTranslationZ();pendingBookSource.setTranslationZ(pendingBookSourceZ+dp(2));
         }
-        smoothContentSwap(new Runnable() {
-            @Override
-            public void run() {
-                renderBookDetail(date, false);
-            }
-        }, 1f);
+        pendingBookOpen=()->{
+            if(generation!=bookOpenGeneration)return;
+            boolean ready=root!=null&&!rootStopped&&!isFinishing()&&!isDestroyed()&&hasWindowFocus()
+                    &&(origin==null||origin.isAttachedToWindow());
+            cancelPendingBookOpen();
+            if(ready){returnToFavoriteRecordsAfterBook=favorites;inFavoriteRecordsPage=false;animateBookOpen(date,origin);}
+        };
+        // Present the pressed source once before preparing textures and the native detail tree.
+        pendingBookOpenDraw=()->{
+            if(pendingBookOpen!=null&&generation==bookOpenGeneration)root.post(pendingBookOpen);
+        };
+        root.getViewTreeObserver().addOnDrawListener(pendingBookOpenDraw);root.invalidate();
     }
 
     private void animateBookOpen(final String date, View source) {
@@ -5530,6 +5679,7 @@ public class MainActivity extends Activity {
         renderBookDetail(date, false);
         root.addView(overlay, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        raiseComposeBottomBar();
         overlay.start(new Runnable() {
             @Override
             public void run() {
@@ -5549,9 +5699,10 @@ public class MainActivity extends Activity {
         finally{suppressEntryAnimation=previous;cachedRootReturn=previousReturn;}
     }
     private void closeBookDetail(){
+        cancelNotebookShare();
         if(bookClosePending||bookOpeningOverlay!=null&&bookOpeningOverlay.closing)return;
         if(!inBookDetail)return;
-        if(afterReturnFeedback(()->closeBookDetail()))return;
+        cancelReturnFeedback();navigationPress=null;
         cancelThemeModeTransition();
         if(!ValueAnimator.areAnimatorsEnabled()){
             boolean favorites=returnToFavoriteRecordsAfterBook;if(bookOpeningOverlay!=null)bookOpeningOverlay.finish();renderBookReturn(favorites);return;
@@ -5568,15 +5719,17 @@ public class MainActivity extends Activity {
         if(overlay!=null&&(overlay.pageImage==null||overlay.pageImage.isRecycled()||!overlay.date.equals(bookDetailDate))){overlay.finish();overlay=null;}
         if(overlay==null){
             overlay=new BookOpenView(this,bookDetailDate);bookOpeningOverlay=overlay;overlay.setVisibility(View.INVISIBLE);
-            root.addView(overlay,new FrameLayout.LayoutParams(-1,-1));
+            root.addView(overlay,new FrameLayout.LayoutParams(-1,-1));raiseComposeBottomBar();
             overlay.measure(View.MeasureSpec.makeMeasureSpec(root.getWidth(),View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(root.getHeight(),View.MeasureSpec.EXACTLY));overlay.layout(0,0,root.getWidth(),root.getHeight());
-            if(!overlay.preparePaper()){overlay.finish();renderBookReturn(favorites);return;}
+            if(!overlay.preparePaper(false)){overlay.finish();renderBookReturn(favorites);return;}
             overlay.progress=1;overlay.current.set(overlay.target);
+            overlay.showPresentationAt(1);
         }
         if(!overlay.beginClosing(favorites)){overlay.finish();if(inBookDetail)renderBookReturn(favorites);}
     }
     private View findBookCover(View node,String date){
         if(node==null||date==null)return null;
+        if(node instanceof BookShelfWindow)((BookShelfWindow)node).ensureDate(date);
         if("footprint_plain_cover".equals(node.getTag())&&node.getBackground() instanceof BookCoverDrawable&&date.equals(((BookCoverDrawable)node.getBackground()).date))return node;
         if(node instanceof ViewGroup){ViewGroup group=(ViewGroup)node;for(int i=0;i<group.getChildCount();i++){View found=findBookCover(group.getChildAt(i),date);if(found!=null)return found;}}
         return null;
@@ -5656,7 +5809,7 @@ public class MainActivity extends Activity {
         @Override protected void onMeasure(int widthSpec,int heightSpec){
             int height=MeasureSpec.getSize(heightSpec),header=dp(spaceByLayout(112,106,102));
             int navTop=navHost!=null&&navHost.getTop()>header?navHost.getTop():height-dp(110);
-            int bottom=Math.max(dp(100),height-navTop+dp(12));
+            int bottom=composeBottomBar!=null?composeBottomContentInset(this,height):Math.max(dp(100),height-navTop+dp(12));
             setPadding(dp(spaceByLayout(22,20,18)),header,dp(spaceByLayout(22,20,18)),bottom);
             if(getChildCount()>0){View child=getChildAt(0);LinearLayout.LayoutParams lp=(LinearLayout.LayoutParams)child.getLayoutParams();lp.height=Math.min(dp(spaceByLayout(486,468,450)),Math.max(dp(160),height-header-bottom));lp.topMargin=0;}
             super.onMeasure(widthSpec,heightSpec);
@@ -6215,7 +6368,7 @@ public class MainActivity extends Activity {
                 HttpURLConnection connection = null;
                 File temporary = null;
                 try {
-                    String rawUrl = fetchOpenListRawUrl(OPENLIST_FONT_ROOT + "/" + fileName);
+                    String rawUrl = appDownloads.fontUrl(fileName);
                     URL url = new URL(rawUrl);
                     connection = (HttpURLConnection) url.openConnection();
                     connection.setConnectTimeout(12000);
@@ -6299,7 +6452,7 @@ public class MainActivity extends Activity {
                         @Override
                         public void run() {
                             downloadedTypefaceCache.put(style, downloaded);
-                            AppTypography.invalidate();
+                            AppTypography.invalidate(style);
                             progress.setIndeterminate(false);
                             progress.setProgress(100);
                             percent.setText("100%");
@@ -6547,12 +6700,7 @@ public class MainActivity extends Activity {
         avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
         avatar.setBackgroundColor(Color.TRANSPARENT);
         avatar.setPadding(0, 0, 0, 0);
-        Bitmap avatarBitmap = loadAvatar();
-        if (avatarBitmap != null) {
-            avatar.setImageBitmap(avatarBitmap);
-        } else {
-            avatar.setImageDrawable(null);
-        }
+        loadAvatar(avatar, null);
         avatar.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -6820,6 +6968,8 @@ public class MainActivity extends Activity {
                 openUpdateLogPage();
             }
         }));
+        page.addView(settingRow("GitHub", "查看项目源码与版本发布", "Git", logColor,
+                v -> openUpdateUrl(PROJECT_GITHUB_URL)));
         page.addView(settingRow("联系作者", "反馈问题与建议", "@contact", contactColor, new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -7071,19 +7221,6 @@ public class MainActivity extends Activity {
     private void openMealReminderSettingsPage(){
         if(duplicateSettingsPush(inMoreSettingsPage))return;smoothSettingsSwap(()->renderMealReminderSettingsPage(),1f);}
 
-    private void openMealManagementPage(){openMealManagementPage(content.findViewWithTag("meal_management_entry"));}
-    private void openMealManagementPage(View source){
-        if(duplicateSettingsPush(inMealManagementPage))return;
-        if(UiTokens.SETTINGS_CONTAINER_MOTION_ENABLED&&inPreferencesPage&&!inMealManagementPage&&isPreferencesRootVisible())
-            runContentSwap(()->renderMealManagementPage(),1f,false,null,true,true,source);
-        else smoothSettingsSwap(()->renderMealManagementPage(),1f);
-    }
-
-    private void closeMealManagementPage(){
-        if(UiTokens.SETTINGS_CONTAINER_MOTION_ENABLED)runContentSwap(()->renderPreferencesPage(preferencesScrollY),-1f,false,null,true,true,null);
-        else smoothSettingsSwap(()->renderPreferencesPage(preferencesScrollY),-1f);
-    }
-
     private void openHintManagerPage() {
         if(duplicateSettingsPush(inHintManagerPage))return;
         smoothSettingsSwap(new Runnable() {
@@ -7306,7 +7443,6 @@ public class MainActivity extends Activity {
         inDataSecurityPage = false;
         inInterfaceLayoutPage = false;
         inMoreSettingsPage = false;
-        inMealManagementPage = false;
         inSmartAssistantPage = false;
         inApiOfficialSitesPage = false;
         inUpdateLogPage = false;
@@ -7345,8 +7481,6 @@ public class MainActivity extends Activity {
             }
         }));
         page.addView(settingRow("三餐提醒",mealNotificationsEnabled()?"已开启 · "+mealNotificationTime("breakfastNotificationTime","08:00")+" / "+mealNotificationTime("lunchNotificationTime","12:00")+" / "+mealNotificationTime("dinnerNotificationTime","18:30"):"设置早餐、午餐和晚餐提醒", "@reminder",accent,v->openMealReminderSettingsPage()));
-        View meals=settingRow("餐次管理",nightSnackEnabled()?"三餐与夜宵 · 夜宵已开启":"三餐与夜宵 · 夜宵未开启","@dining",accent,v->openMealManagementPage(v));
-        meals.setTag("meal_management_entry");page.addView(meals);
         section(page, "照片与文案");
 
         page.addView(settingRow("照片查看", "原图背景 · " + photoBgTitle(), "@media", accent, new View.OnClickListener() {
@@ -7383,37 +7517,6 @@ public class MainActivity extends Activity {
         if (restoreScrollY <= 0) {
             animateIn(page);
         }
-    }
-
-    private void renderMealManagementPage() {
-        clearPreferencesSubPageFlags();
-        inPreferencesPage=true;
-        inMealManagementPage=true;
-        inBookDetail=false;
-        inPhotoViewer=false;
-        updateFab();
-        content.removeAllViews();
-        ScrollView scroll=pageScroll();
-        LinearLayout page=basePage();
-        page.setTag(R.id.navigation_route,"meal-management");page.setTag("meal_management_page");
-        scroll.addView(page);content.addView(scroll);
-
-        LinearLayout top=row(Gravity.CENTER_VERTICAL);
-        TextView back=label("‹",38,Color.rgb(34,34,34),true);
-        back.setGravity(Gravity.CENTER);back.setBackground(surfaceRound(dp(25)));
-        back.setContentDescription("返回其他设置");attachPressAnimation(back);
-        back.setOnClickListener(v->closeMealManagementPage());
-        top.addView(back,new LinearLayout.LayoutParams(dp(52),dp(52)));
-        TextView title=label("餐次管理",30,Color.rgb(28,28,30),true);title.setPadding(dp(14),0,0,0);
-        top.addView(title,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1));
-        installStickyHeader(scroll,page,top);
-
-        section(page,"餐次");
-        View snack=settingsToggleRow("开启夜宵",nightSnackEnabled(),()->setProfileBoolean("nightSnackEnabled",!nightSnackEnabled()));
-        snack.setTag("night_snack_toggle");page.addView(snack);
-        TextView snackHint=label("开启后可添加夜宵；关闭仍保留已有夜宵记录。",13,UiTokens.secondary(nightDecoration()),false);
-        snackHint.setPadding(0,dp(8),0,dp(12));page.addView(snackHint);
-        page.addView(space(dp(120)));animateIn(page);
     }
 
     private void renderInterfaceLayoutPage() {
@@ -8049,8 +8152,6 @@ public class MainActivity extends Activity {
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                returnToFavoriteRecordsAfterBook = true;
-                inFavoriteRecordsPage = false;
                 openBookDetail(date, v);
             }
         });
@@ -10802,6 +10903,7 @@ public class MainActivity extends Activity {
                 }
                 Bitmap cropped = centerCrop(src, 360, 360);
                 saveBitmap(cropped, new File(getFilesDir(), "avatar.bin"), 88);
+                if(avatarLoader!=null)avatarLoader.invalidate();
                 recycleBitmapUnless(src, cropped);
                 recycleBitmapUnless(cropped, null);
                 showGlassToast("头像已更新", Toast.LENGTH_SHORT);
@@ -11059,22 +11161,9 @@ public class MainActivity extends Activity {
         return uris;
     }
 
-    private Bitmap loadAvatar() {
-        File avatar = new File(getFilesDir(), "avatar.bin");
-        if (!avatar.exists()) {
-            return null;
-        }
-        BitmapFactory.Options bounds = new BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        BitmapFactory.decodeFile(avatar.getAbsolutePath(), bounds);
-        int target = dp(160);
-        int sample = 1;
-        while (bounds.outWidth / sample > target || bounds.outHeight / sample > target) {
-            sample *= 2;
-        }
-        BitmapFactory.Options opts = new BitmapFactory.Options();
-        opts.inSampleSize = Math.max(1, sample);
-        return BitmapFactory.decodeFile(avatar.getAbsolutePath(), opts);
+    private void loadAvatar(ImageView view, View fallback) {
+        if(avatarLoader==null)avatarLoader=new AvatarLoader(new File(getFilesDir(),"avatar.bin"),mediaThumbnailExecutor);
+        avatarLoader.load(view,dp(64),fallback);
     }
 
     private Bitmap decodeBitmap(Uri uri, int target) {
@@ -11170,6 +11259,7 @@ public class MainActivity extends Activity {
         invalidateRootPages();
         mediaThumbnailEpoch++;mediaThumbnailInFlight.clear();
         mediaThumbnailCache.evictAll();
+        if(avatarLoader!=null)avatarLoader.clear();
     }
 
     private void saveBitmap(Bitmap bitmap, File out, int quality) throws Exception {
@@ -11184,30 +11274,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    private boolean nightSnackEnabled(){return profile.optBoolean("nightSnackEnabled",false);}
-    private String[] entryMealKeys(){return nightSnackEnabled()?new String[]{"breakfast","lunch","dinner","snack"}:DEFAULT_MEAL_KEYS.clone();}
-    private String[] entryMealTitles(){return nightSnackEnabled()?new String[]{"早餐","午餐","晚餐","夜宵"}:new String[]{"早餐","午餐","晚餐"};}
-
     private List<MealOption> activeMeals() {
-        JSONArray arr = profile.optJSONArray("meals");
-        if (arr == null || arr.length() == 0) {
-            arr = new JSONArray();
-            // Reading legacy defaults must not write settings during a UI-mode switch.
-            for (String key : DEFAULT_MEAL_KEYS) arr.put(key);
-        }
         List<MealOption> result = new ArrayList<MealOption>();
-        for (int i = 0; i < arr.length(); i++) {
-            MealOption meal = mealByKey(arr.optString(i));
-            if (meal != null) {
-                result.add(meal);
-            }
-        }
-        if(nightSnackEnabled())addMealIfMissing(result,"snack");
-        else for(int i=result.size()-1;i>=0;i--)if("snack".equals(result.get(i).key))result.remove(i);
-        sortMeals(result);
-        if (result.isEmpty()) {
-            result.add(new MealOption("breakfast", "早餐", 0));
-        }
+        for (String key : DEFAULT_MEAL_KEYS) result.add(mealByKey(key));
         return result;
     }
 
@@ -11935,7 +12004,7 @@ public class MainActivity extends Activity {
                 &&(long)root.getWidth()*root.getHeight()*4<=32L*1024*1024
                 &&(getWindow().getAttributes().flags&WindowManager.LayoutParams.FLAG_SECURE)==0&&!hasUncapturableSurface(root)){
             float previousAlpha=trigger.getAlpha();
-            try{trigger.setAlpha(0);old=Bitmap.createBitmap(root.getWidth(),root.getHeight(),Bitmap.Config.ARGB_8888);root.draw(new Canvas(old));}
+            try{trigger.setAlpha(0);old=Bitmap.createBitmap(root.getWidth(),root.getHeight(),Bitmap.Config.ARGB_8888);drawRootSnapshot(new Canvas(old),true);}
             catch(OutOfMemoryError|RuntimeException unavailable){if(old!=null)old.recycle();old=null;}
             finally{trigger.setAlpha(previousAlpha);}
         }
@@ -11951,12 +12020,16 @@ public class MainActivity extends Activity {
         }
         if(!setProfileBoolean("nightMode",!nightDecoration())){cancelThemeModeTransition();return;}
         boolean previous=suppressEntryAnimation;suppressEntryAnimation=true;
-        try{applyNightModeOverride();applyDecoration();renderCurrent();refreshCurrentThemeSurface();restoreScrollPosition(currentPageScroll(),scroll);}
+        try{
+            applyNightModeOverride();applyDecoration();renderCurrent();refreshCurrentThemeSurface();
+            if(composeBottomBar!=null)composeBottomBar.refreshThemeSurface();
+            restoreScrollPosition(currentPageScroll(),scroll);
+        }
         finally{suppressEntryAnimation=previous;}
         final ThemeRevealView reveal=circularThemeReveal;
         if(reveal!=null){
             revealedButton[0]=themeModeButton;if(themeModeButton!=null)themeModeButton.setAlpha(0);
-            reveal.bringToFront();
+            reveal.bringToFront();raiseComposeBottomBar();
             root.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener(){public boolean onPreDraw(){
                 root.getViewTreeObserver().removeOnPreDrawListener(this);
                 if(circularThemeReveal==reveal){
@@ -11974,7 +12047,7 @@ public class MainActivity extends Activity {
         }
         try {
             Bitmap snapshot = Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);
-            root.draw(new Canvas(snapshot));
+            drawRootSnapshot(new Canvas(snapshot),true);
             cancelThemeModeTransition();
             if(pageCrossfade!=null)pageCrossfade.clear();
             ImageView overlay = new ImageView(this);
@@ -11984,8 +12057,8 @@ public class MainActivity extends Activity {
             overlay.setClickable(false);
             root.addView(overlay, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            overlay.bringToFront();
             themeModeTransitionOverlay = overlay;
+            overlay.bringToFront();raiseComposeBottomBar();
         } catch (Throwable ignored) {
             themeModeTransitionOverlay = null;
         }
@@ -13576,6 +13649,12 @@ public class MainActivity extends Activity {
     }
 
     private void checkForUpdates() {
+        if (updateCheckRunning) {
+            showGlassToast("正在检测更新...", Toast.LENGTH_SHORT);
+            return;
+        }
+        final long generation = ++updateCheckGeneration;
+        updateCheckRunning = true;
         showGlassToast("正在检测更新...", Toast.LENGTH_SHORT);
         new Thread(new Runnable() {
             @Override
@@ -13585,6 +13664,7 @@ public class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
+                            if (!acceptUpdateCheck(generation)) return;
                             showUpdateResult(update);
                         }
                     });
@@ -13592,6 +13672,7 @@ public class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
+                            if (!acceptUpdateCheck(generation)) return;
                             showUpdateFailed();
                         }
                     });
@@ -13600,9 +13681,26 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private boolean acceptUpdateCheck(long generation) {
+        if (generation != updateCheckGeneration) return false;
+        updateCheckRunning = false;
+        return !isFinishing() && !isDestroyed() && inAboutSoftwarePage
+                && !inFontSourcesPage && !inUpdateLogPage;
+    }
+
+    private void cancelUpdateCheck() {
+        updateCheckGeneration++;
+        updateCheckRunning = false;
+    }
+
     private JSONObject fetchUpdateInfo() throws Exception {
+        return AppUpdateCheck.fetch(currentVersionCode(), this::fetchPrimaryUpdateInfo,
+                () -> fetchJsonFromUrl(appDownloads.rawUrl(GUEST_UPDATE_JSON_PATH)));
+    }
+
+    private JSONObject fetchPrimaryUpdateInfo() throws Exception {
         try {
-            return fetchOpenListUpdateJson();
+            return AppUpdateCheck.validate(fetchOpenListUpdateJson());
         } catch (Exception ignored) {
             return fetchOpenListUpdateInfo();
         }
@@ -14059,9 +14157,9 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             if (cm != null) {
-                cm.setPrimaryClip(ClipData.newPlainText("一蔬一饭更新链接", url));
+            cm.setPrimaryClip(ClipData.newPlainText("一蔬一饭链接", url));
             }
-            showGlassToast("没有可打开的浏览器，已复制下载链接", Toast.LENGTH_LONG);
+            showGlassToast("没有可打开的浏览器，已复制链接", Toast.LENGTH_LONG);
         }
     }
 
@@ -14148,306 +14246,83 @@ public class MainActivity extends Activity {
     }
 
 
+    private NotebookShareExport.Request notebookShareTask;
+    private TextView notebookSharePendingButton;
+
     private void shareDayImage(String date) {
-        try {
-            Bitmap bitmap = buildDayShareBitmap(date);
-            Uri uri = saveShareBitmap(bitmap, date);
-            if (uri == null) {
-                showGlassToast("图片保存失败", Toast.LENGTH_SHORT);
-                return;
-            }
-            Intent send = new Intent(Intent.ACTION_SEND);
-            send.setType("image/png");
-            send.putExtra(Intent.EXTRA_STREAM, uri);
-            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            showGlassToast("图片已保存", Toast.LENGTH_SHORT);
-            startActivity(Intent.createChooser(send, "分享到微信或QQ"));
-        } catch (Exception e) {
-            showGlassToast("分享图片生成失败", Toast.LENGTH_SHORT);
-        }
-    }
-
-    private Uri saveShareBitmap(Bitmap bitmap, String date) throws Exception {
-        ContentValues values = new ContentValues();
-        values.put(MediaStore.Images.Media.DISPLAY_NAME, "eat_record_" + date.replace("-", "") + "_" + System.currentTimeMillis() + ".png");
-        values.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-        if (Build.VERSION.SDK_INT >= 29) {
-            values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/一蔬一饭");
-            values.put(MediaStore.Images.Media.IS_PENDING, 1);
-        }
-        Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
-        if (uri == null) {
-            return null;
-        }
-        OutputStream out = getContentResolver().openOutputStream(uri);
-        if (out == null) {
-            return null;
-        }
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-        out.close();
-        if (Build.VERSION.SDK_INT >= 29) {
-            ContentValues done = new ContentValues();
-            done.put(MediaStore.Images.Media.IS_PENDING, 0);
-            getContentResolver().update(uri, done, null, null);
-        }
-        return uri;
-    }
-
-    private Bitmap buildDayShareBitmap(String date) {
-        return buildNotebookShareBitmap(date);
-    }
-
-    private Bitmap buildNotebookShareBitmap(String date) {
-        JSONObject day = dayReadSnapshot(date);
-        final float scale = 2f;
-        boolean paperOnly = bookSharePaperOnlyEnabled();
-        int logicalWidth = paperOnly ? 720 : 820;
-        int margin = paperOnly ? 0 : 68;
-        int notebookTop = paperOnly ? 0 : 112;
-        int notebookHeight = notebookShareHeight(day, paperOnly);
-        int footerBaselineGap = paperOnly ? 0 : 88;
-        int footerBottomGap = paperOnly ? 0 : 42;
-        int logicalHeight = notebookTop + notebookHeight + footerBaselineGap + footerBottomGap;
-        int width = Math.round(logicalWidth * scale);
-        int totalHeight = Math.round(logicalHeight * scale);
-        Bitmap bitmap = Bitmap.createBitmap(width, totalHeight, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-        canvas.scale(scale, scale);
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        int bgTop = notebookPaperBackgroundTop();
-        int bgBottom = notebookPaperBackgroundBottom();
-        if (!paperOnly) {
-            bgTop = blendColor(bgTop, Color.WHITE, 0.08f);
-            bgBottom = blendColor(Color.WHITE, bgBottom, 0.12f);
-        }
-        paint.setShader(new LinearGradient(0, 0, 0, logicalHeight, bgTop, bgBottom, Shader.TileMode.CLAMP));
-        canvas.drawRect(0, 0, logicalWidth, logicalHeight, paint);
-        paint.setShader(null);
-        if (!paperOnly) {
-            int sideTint = blendColor(bgBottom, bgTop, 0.30f);
-            paint.setShader(new LinearGradient(0, 0, logicalWidth, 0,
-                    Color.argb(0, Color.red(bgTop), Color.green(bgTop), Color.blue(bgTop)),
-                    Color.argb(46, Color.red(sideTint), Color.green(sideTint), Color.blue(sideTint)),
-                    Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, logicalWidth, logicalHeight, paint);
-            paint.setShader(null);
-        }
-
-        if (!paperOnly) {
-            Paint titlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            titlePaint.setColor(Color.rgb(24, 24, 24));
-            titlePaint.setTypeface(AppTypography.typeface(MainActivity.this,true));
-            titlePaint.setTextSize(48);
-            canvas.drawText("吃饭记录本" + primaryDayEmoji(date), margin, 66, titlePaint);
-        }
-
-        RectF note = new RectF(margin, notebookTop, logicalWidth - margin, notebookTop + notebookHeight);
-        drawNotebookSharePaper(canvas, note, paperOnly);
-
-        float x = note.left + 50;
-        float y = note.top + 70;
-        Paint datePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        datePaint.setColor(Color.rgb(95, 78, 60));
-        datePaint.setTypeface(bookDetailTypeface(true));
-        datePaint.setTextSize(38);
-        canvas.drawText(displayNotebookDate(date), x, y, datePaint);
-        y += 62;
-
-        Paint storyPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        storyPaint.setColor(Color.rgb(70, 64, 56));
-        storyPaint.setTypeface(bookDetailTypeface(false));
-        storyPaint.setTextSize(34);
-        String style = bookFontStyle();
-        if ("split".equals(bookStoryLayout())) {
-            y = drawWrappedText(canvas, notebookMealCountLine(day), x, y, note.width() - 100, storyPaint, 2);
-            y += 10;
-            List<String> lines = notebookStoryLines(date, day);
-            for (String line : lines) {
-                y = drawWrappedText(canvas, line, x, y, note.width() - 100, storyPaint, 2);
-                y += 10;
-            }
-        } else {
-            y = drawWrappedText(canvas, notebookDayStory(date, day), x, y, note.width() - 100, storyPaint, 9);
-        }
-        y += 18;
-
-        String times = notebookTimeLine(day);
-        if (times.length() > 0) {
-            Paint smallPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            smallPaint.setColor(Color.rgb(145, 132, 114));
-            smallPaint.setTypeface(bookDetailTypeface(false));
-            smallPaint.setTextSize(24);
-            y = drawWrappedText(canvas, times, x, y, note.width() - 100, smallPaint, 2);
-            y += 12;
-        }
-
-        String mediaLine = notebookMediaLine(day);
-        if (mediaLine.length() > 0) {
-            Paint smallPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            smallPaint.setColor(Color.rgb(158, 145, 128));
-            smallPaint.setTypeface(bookDetailTypeface(false));
-            smallPaint.setTextSize(23);
-            y = drawWrappedText(canvas, mediaLine, x, y, note.width() - 100, smallPaint, 2);
-        }
-        float stickerStart = Math.max(y + 18, note.top + 470);
-        float stickerNeed = notebookShareStickerHeight(day);
-        float bottomReserve = paperOnly ? 84 : 34;
-        float bottomLimit = note.bottom - bottomReserve - stickerNeed;
-        if (stickerNeed > 0 && stickerStart > bottomLimit) {
-            stickerStart = Math.max(y + 14, bottomLimit);
-        }
-        drawNotebookShareStickers(canvas, day, note, stickerStart);
-
-        if (paperOnly) {
-            drawNotebookPaperWatermark(canvas, note);
-        } else {
-            drawShareFooter(canvas, logicalWidth, margin, logicalHeight, footerBottomGap);
-        }
-        return bitmap;
-    }
-
-    private int notebookShareHeight(JSONObject day, boolean paperOnly) {
-        int base = paperOnly ? 626 : 592;
-        int textExtra = Math.max(0, notebookStoryLines("", day).size() - 3) * 48;
-        int stickerHeight = notebookShareStickerHeight(day);
-        int mediaExtra = stickerHeight == 0 ? 0 : 42 + stickerHeight;
-        int watermarkExtra = paperOnly ? 56 : 0;
-        return Math.max(paperOnly ? 760 : 708, base + textExtra + mediaExtra + watermarkExtra);
-    }
-
-    private int notebookShareStickerHeight(JSONObject day) {
-        int mediaCount = Math.min(dayNotebookMedia(day).size(), 12);
-        if (mediaCount == 0) {
-            return 0;
-        }
-        int columns = notebookShareColumns(mediaCount);
-        int rows = (mediaCount + columns - 1) / columns;
-        boolean straight = "straight".equals(bookStickerLayout());
-        return 26 + rows * (straight ? 94 : 98);
-    }
-
-    private int notebookShareColumns(int mediaCount) {
-        if (mediaCount <= 1) {
-            return 1;
-        }
-        if (mediaCount == 2) {
-            return 2;
-        }
-        if (mediaCount <= 8) {
-            return 4;
-        }
-        if (mediaCount <= 15) {
-            return 5;
-        }
-        return 6;
-    }
-
-    private void drawShareFooter(Canvas canvas, int width, int margin, int totalHeight) {
-        drawShareFooter(canvas, width, margin, totalHeight, 42);
-    }
-
-    private void drawShareFooter(Canvas canvas, int width, int margin, int totalHeight, int bottomGap) {
-        Paint footerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        footerPaint.setColor(Color.argb(132, 80, 80, 80));
-        footerPaint.setTextSize(24);
-        footerPaint.setTypeface(AppTypography.typeface(MainActivity.this,true));
-        String left = "Capturing a day of sweet treats. 📸";
-        String right = "一蔬一饭";
-        float baseline = totalHeight - bottomGap;
-        canvas.drawText(left, margin, baseline, footerPaint);
-        footerPaint.setTypeface(bookDetailTypeface(false));
-        float ww = footerPaint.measureText(right);
-        footerPaint.setColor(Color.argb(184, 82, 84, 90));
-        canvas.drawText(right, width - margin - ww, baseline, footerPaint);
-    }
-
-    private void drawNotebookShareStickers(Canvas canvas, JSONObject day, RectF note, float y) {
-        List<NotebookMedia> media = dayNotebookMedia(day);
-        if (media.isEmpty()) {
+        if (notebookShareTask != null) {
+            showGlassToast("正在生成分享图片…", Toast.LENGTH_SHORT);
             return;
         }
-        Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        textPaint.setColor(Color.rgb(150, 137, 119));
-        textPaint.setTypeface(bookDetailTypeface(false));
-        textPaint.setTextSize(18);
-        float inset = 50;
-        canvas.drawText("今日记录", note.left + inset, y + 13, textPaint);
-        y += 36;
-        int max = Math.min(media.size(), 12);
-        int columns = notebookShareColumns(max);
-        int stickerCount = 0;
-        int photoCount = 0;
-        for (int i = 0; i < max; i++) {
-            if (media.get(i).sticker) {
-                stickerCount++;
-            } else {
-                photoCount++;
-            }
+        final NotebookShareRenderer.Snapshot snapshot;
+        try { snapshot = captureNotebookShare(date); }
+        catch (RuntimeException | OutOfMemoryError unavailable) {
+            showGlassToast("分享图片暂时无法生成", Toast.LENGTH_SHORT);
+            return;
         }
-        float available = note.width() - inset * 2f;
-        float minGap = columns >= 5 ? 8 : 12;
-        float maxSize = columns >= 5 ? 116 : 136;
-        float cell = (available - (columns - 1) * minGap) / columns;
-        float size = Math.min(maxSize, Math.max(64, cell * 0.9f));
-        boolean straight = "straight".equals(bookStickerLayout());
-        float gap = columns <= 1 ? 0 : Math.max(minGap, Math.min(columns >= 5 ? 14 : 18, (available - columns * size) / Math.max(1, columns - 1)));
-        float step = size + gap;
-        float rowHeight = straight ? size + 14 : size + 18;
-        for (int i = 0; i < max; i++) {
-            NotebookMedia item = media.get(i);
-            File file = new File(getFilesDir(), item.fileName);
-            if (!file.exists()) {
-                continue;
-            }
-            Bitmap sticker = decodeFileSampled(file, 512);
-            if (sticker == null) {
-                continue;
-            }
-            float left;
-            float top;
-            int row = i / columns;
-            int column = i % columns;
-            left = note.left + inset + column * step;
-            if (columns > 1 && max <= 2) {
-                float used = columns * size + (columns - 1) * gap;
-                left += Math.max(0f, (available - used) / 2f);
-            }
-            top = y + 4 + row * rowHeight + (straight ? 0 : (column % 2) * 4);
-            RectF dst = new RectF(left, top, left + size, top + size);
-            int save = canvas.save();
-            canvas.rotate(item.displayRotation, dst.centerX(), dst.centerY());
-            if (!straight) {
-                canvas.rotate(new float[]{-8f, 5f, -4f, 8f, -6f, 3f, -3f, 6f}[i % 8], dst.centerX(), dst.centerY());
-            }
-            Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
-            int fill = notebookStickerFrameFillColor();
-            bg.setColor(Color.argb(148, Color.red(fill), Color.green(fill), Color.blue(fill)));
-            canvas.drawRoundRect(dst, 18, 18, bg);
-            Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-            stroke.setStyle(Paint.Style.STROKE);
-            stroke.setStrokeWidth(1.6f);
-            stroke.setColor(notebookStickerFrameStrokeColor());
-            canvas.drawRoundRect(dst, 18, 18, stroke);
-            drawBitmapContain(canvas, sticker, new RectF(dst.left + 7, dst.top + 7, dst.right - 7, dst.bottom - 7), 14);
-            canvas.restoreToCount(save);
-            recycleBitmapUnless(sticker, null);
+        final View sourcePage = bookDetailSwipeFrame;
+        notebookSharePendingButton = bookDetailShareView;
+        if (notebookSharePendingButton != null) {
+            notebookSharePendingButton.setEnabled(false);
+            notebookSharePendingButton.setContentDescription("正在生成分享图片");
         }
+        showGlassToast("正在生成分享图片…", Toast.LENGTH_SHORT);
+        notebookShareTask = NotebookShareExport.start(getApplicationContext().getContentResolver(), snapshot, date,
+                (request, image, failed) -> {
+                    if (notebookShareTask != request) return false;
+                    notebookShareTask = null;
+                    restoreNotebookShareButton();
+                    if (isFinishing() || isDestroyed() || rootStopped || !hasWindowFocus() || !inBookDetail
+                            || sourcePage == null || !sourcePage.isAttachedToWindow()
+                            || sourcePage != bookDetailSwipeFrame || !date.equals(bookDetailDate)
+                            || mediaPreviewActive() || activeGlassDialogCount > 0 || activeOverlay != null) return false;
+                    if (failed || image == null) {
+                        showGlassToast("分享图片生成失败，请重试", Toast.LENGTH_SHORT);
+                        return false;
+                    }
+                    Intent send = new Intent(Intent.ACTION_SEND);
+                    send.setType("image/png");
+                    send.putExtra(Intent.EXTRA_STREAM, image);
+                    send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    showGlassToast("图片已保存", Toast.LENGTH_SHORT);
+                    try { startActivity(Intent.createChooser(send, "分享到微信或QQ")); }
+                    catch (RuntimeException unavailable) { showGlassToast("图片已保存，暂时无法打开分享面板", Toast.LENGTH_LONG); }
+                    return true;
+                });
     }
 
-    private void drawNotebookPaperWatermark(Canvas canvas, RectF note) {
-        Paint footerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        footerPaint.setColor(Color.argb(118, 112, 106, 98));
-        footerPaint.setTextSize(19);
-        footerPaint.setTypeface(AppTypography.typeface(MainActivity.this,true));
-        String left = "Capturing a day of sweet treats. 📸";
-        String right = "一蔬一饭";
-        float y = note.bottom - 42;
-        float leftX = note.left + 52;
-        canvas.drawText(left, leftX, y, footerPaint);
-        footerPaint.setTypeface(bookDetailTypeface(false));
-        float ww = footerPaint.measureText(right);
-        footerPaint.setColor(Color.argb(176, 92, 86, 80));
-        canvas.drawText(right, note.right - 44 - ww, y, footerPaint);
+    private void cancelNotebookShare() {
+        if (notebookShareTask != null) notebookShareTask.cancel();
+        notebookShareTask = null;
+        restoreNotebookShareButton();
+    }
+
+    private void restoreNotebookShareButton() {
+        if (notebookSharePendingButton == null) return;
+        notebookSharePendingButton.setEnabled(true);
+        notebookSharePendingButton.setContentDescription("分享当天记录");
+        notebookSharePendingButton = null;
+    }
+
+    /** Compatibility entry for existing rendering checks. Normal sharing uses the worker queue. */
+    private Uri saveShareBitmap(Bitmap bitmap, String date) throws Exception {
+        return NotebookShareExport.write(getApplicationContext().getContentResolver(), bitmap, date, () -> false);
+    }
+
+    private Bitmap buildDayShareBitmap(String date) { return buildNotebookShareBitmap(date); }
+
+    private Bitmap buildNotebookShareBitmap(String date) {
+        return new NotebookShareRenderer(captureNotebookShare(date), () -> false).render();
+    }
+
+    private NotebookShareRenderer.Snapshot captureNotebookShare(String date) {
+        JSONObject day = dayReadSnapshot(date);
+        return new NotebookShareRenderer.Snapshot(getFilesDir(), displayNotebookDate(date), primaryDayEmoji(date),
+                notebookMealCountLine(day), notebookDayStory(date, day), notebookStoryLines(date, day),
+                notebookTimeLine(day), notebookMediaLine(day), notebookPageStyle(), NotebookMediaEntries.collect(day, true),
+                bookSharePaperOnlyEnabled(), "split".equals(bookStoryLayout()), "straight".equals(bookStickerLayout()),
+                notebookPaperBackgroundTop(), notebookPaperBackgroundBottom(), notebookStickerFrameFillColor(),
+                notebookStickerFrameStrokeColor(), AppTypography.typeface(this, true), bookDetailTypeface(true), bookDetailTypeface(false));
     }
 
     /** Front paper and its folded back share a palette; decoration alpha is not a paper color. */
@@ -14546,186 +14421,6 @@ public class MainActivity extends Activity {
     private int notebookPaperBackgroundTop() { return notebookPaperPalette(notebookPageStyle())[0]; }
 
     private int notebookPaperBackgroundBottom() { return notebookPaperPalette(notebookPageStyle())[1]; }
-
-    private void drawNotebookSharePaper(Canvas canvas, RectF rect) {
-        drawNotebookSharePaper(canvas, rect, false);
-    }
-
-    private void drawNotebookSharePaper(Canvas canvas, RectF rect, boolean edgeToEdge) {
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        String style = notebookPageStyle();
-        int top = Color.rgb(255, 253, 246);
-        int bottom = Color.rgb(252, 246, 232);
-        int strip = Color.rgb(246, 239, 222);
-        int line = Color.rgb(229, 219, 198);
-        if ("fresh".equals(style)) {
-            top = Color.rgb(245, 255, 250);
-            bottom = Color.rgb(230, 248, 255);
-            strip = Color.rgb(216, 243, 232);
-            line = Color.rgb(197, 226, 218);
-        } else if ("pink".equals(style)) {
-            top = Color.rgb(255, 248, 252);
-            bottom = Color.rgb(255, 235, 242);
-            strip = Color.rgb(253, 224, 235);
-            line = Color.rgb(238, 204, 217);
-        } else if ("grid".equals(style)) {
-            top = Color.rgb(255, 253, 248);
-            bottom = Color.rgb(248, 250, 255);
-            strip = Color.rgb(236, 239, 248);
-            line = Color.rgb(216, 224, 238);
-        } else if ("plain".equals(style)) {
-            top = Color.rgb(255, 255, 255);
-            bottom = Color.rgb(249, 250, 252);
-            strip = Color.rgb(240, 242, 245);
-            line = Color.rgb(225, 228, 232);
-        } else if ("recipe".equals(style)) {
-            top = Color.rgb(255, 249, 236);
-            bottom = Color.rgb(255, 242, 218);
-            strip = Color.rgb(255, 226, 183);
-            line = Color.rgb(232, 205, 170);
-        } else if ("dotted".equals(style)) {
-            top = Color.rgb(252, 253, 255);
-            bottom = Color.rgb(241, 247, 255);
-            strip = Color.rgb(225, 238, 255);
-            line = Color.rgb(205, 218, 236);
-        } else if ("memo".equals(style)) {
-            top = Color.rgb(255, 254, 225);
-            bottom = Color.rgb(255, 248, 194);
-            strip = Color.rgb(255, 235, 141);
-            line = Color.rgb(223, 205, 130);
-        } else if ("letter".equals(style)) {
-            top = Color.rgb(255, 251, 247);
-            bottom = Color.rgb(246, 247, 255);
-            strip = Color.rgb(244, 232, 220);
-            line = Color.rgb(204, 218, 244);
-        } else if ("fruit".equals(style)) {
-            top = Color.rgb(255, 252, 237);
-            bottom = Color.rgb(238, 255, 238);
-            strip = Color.rgb(255, 225, 190);
-            line = Color.rgb(215, 232, 183);
-        } else if ("sunset".equals(style)) {
-            top = Color.rgb(255, 244, 232);
-            bottom = Color.rgb(248, 231, 255);
-            strip = Color.rgb(255, 202, 173);
-            line = Color.rgb(230, 192, 206);
-        } else if ("blueprint".equals(style)) {
-            top = Color.rgb(238, 248, 255);
-            bottom = Color.rgb(220, 237, 255);
-            strip = Color.rgb(188, 218, 248);
-            line = Color.rgb(144, 190, 232);
-        }
-        paint.setShader(new LinearGradient(rect.left, rect.top, rect.left, rect.bottom, top, bottom, Shader.TileMode.CLAMP));
-        if (edgeToEdge) {
-            canvas.drawRect(rect, paint);
-        } else {
-            canvas.drawRoundRect(rect, 34, 34, paint);
-        }
-        paint.setShader(null);
-
-        Path paperClip = new Path();
-        if (edgeToEdge) {
-            paperClip.addRect(rect, Path.Direction.CW);
-        } else {
-            paperClip.addRoundRect(rect, 34, 34, Path.Direction.CW);
-        }
-        int save = canvas.save();
-        canvas.clipPath(paperClip);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(strip);
-        canvas.drawRect(rect.left, rect.top, rect.left + 34, rect.bottom, paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(2);
-        paint.setColor(line);
-        for (int y = (int) rect.top + 104; y < rect.bottom - 24; y += 58) {
-            canvas.drawLine(rect.left + 58, y, rect.right - 32, y, paint);
-        }
-        if ("grid".equals(style)) {
-            for (int x = (int) rect.left + 116; x < rect.right - 28; x += 58) {
-                canvas.drawLine(x, rect.top + 36, x, rect.bottom - 28, paint);
-            }
-        } else if ("dotted".equals(style)) {
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(adjustAlpha(line, 118));
-            for (int yy = (int) rect.top + 82; yy < rect.bottom - 30; yy += 48) {
-                for (int xx = (int) rect.left + 86; xx < rect.right - 32; xx += 48) {
-                    canvas.drawCircle(xx, yy, 2.4f, paint);
-                }
-            }
-        } else if ("blueprint".equals(style)) {
-            for (int x = (int) rect.left + 104; x < rect.right - 28; x += 52) {
-                canvas.drawLine(x, rect.top + 36, x, rect.bottom - 28, paint);
-            }
-        } else if ("letter".equals(style)) {
-            paint.setColor(Color.rgb(232, 202, 188));
-            canvas.drawLine(rect.left + 96, rect.top + 38, rect.left + 96, rect.bottom - 30, paint);
-        } else if ("fruit".equals(style) || "sunset".equals(style)) {
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor("fruit".equals(style) ? Color.argb(64, 255, 105, 86) : Color.argb(58, 255, 160, 118));
-            canvas.drawCircle(rect.right - 74, rect.top + 68, 26, paint);
-            paint.setColor("fruit".equals(style) ? Color.argb(82, 80, 206, 115) : Color.argb(48, 180, 124, 255));
-            canvas.drawCircle(rect.right - 128, rect.top + 94, 16, paint);
-        }
-        canvas.restoreToCount(save);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(Color.rgb(255, 255, 252));
-        for (int y = (int) rect.top + 42; y < rect.bottom - 24; y += 58) {
-            canvas.drawCircle(rect.left + 17, y, 7, paint);
-        }
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(2);
-        paint.setColor(adjustAlpha(line, 138));
-        if (!edgeToEdge) {
-            canvas.drawRoundRect(new RectF(rect.left + 15, rect.top + 15, rect.right - 15, rect.bottom - 15), 26, 26, paint);
-        }
-    }
-
-    private float drawWrappedText(Canvas canvas, String text, float x, float y, float maxWidth, Paint paint, int maxLines) {
-        if (text == null || text.length() == 0) {
-            return y;
-        }
-        String rest = text;
-        Paint.FontMetrics fm = paint.getFontMetrics();
-        float lineHeight = fm.descent - fm.ascent + 10;
-        int line = 0;
-        while (rest.length() > 0 && line < maxLines) {
-            int count = paint.breakText(rest, true, maxWidth, null);
-            if (count <= 0) {
-                break;
-            }
-            String part = rest.substring(0, count);
-            if (line == maxLines - 1 && count < rest.length()) {
-                part = part.length() > 1 ? part.substring(0, part.length() - 1) + "..." : "...";
-            }
-            canvas.drawText(part, x, y, paint);
-            rest = rest.substring(count);
-            y += lineHeight;
-            line++;
-        }
-        return y;
-    }
-
-
-    private void drawBitmapContain(Canvas canvas, Bitmap bitmap, RectF dst, float radius) {
-        if (bitmap == null || bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0) {
-            return;
-        }
-        Path path = new Path();
-        path.addRoundRect(dst, radius, radius, Path.Direction.CW);
-        int save = canvas.save();
-        canvas.clipPath(path);
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        float scale = Math.min(dst.width() / bitmap.getWidth(), dst.height() / bitmap.getHeight());
-        float w = bitmap.getWidth() * scale;
-        float h = bitmap.getHeight() * scale;
-        RectF target = new RectF(
-                dst.centerX() - w / 2f,
-                dst.centerY() - h / 2f,
-                dst.centerX() + w / 2f,
-                dst.centerY() + h / 2f);
-        canvas.drawBitmap(bitmap, null, target, p);
-        canvas.restoreToCount(save);
-    }
-
 
     private class EmojiAdapter extends BaseAdapter {
         @Override public int getCount() { return EMOJIS.length; }
@@ -15123,7 +14818,7 @@ public class MainActivity extends Activity {
                 return false;
             }
             if (savedSources != null) savedSources.add(fileName);
-            synchronized (NutritionStore.LOCK) { NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
+            synchronized (NutritionStore.LOCK) { diaryProjectionDirty=true;NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
             if (showToast) {
                 showGlassToast("照片已准备，请预览后确认", Toast.LENGTH_SHORT);
             }
@@ -15168,7 +14863,7 @@ public class MainActivity extends Activity {
             stickers.put(fileName);
             saveDays();
             FoodAnalysisJobService.enqueue(this, date, mealKey, fileName, false);
-            synchronized (NutritionStore.LOCK) { NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
+            synchronized (NutritionStore.LOCK) { diaryProjectionDirty=true;NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY)); }
             if (showToast) {
                 showGlassToast("美食贴纸已保存", Toast.LENGTH_SHORT);
             }
@@ -16881,7 +16576,7 @@ public class MainActivity extends Activity {
 
     private void saveDays() {
         synchronized (NutritionStore.LOCK) {
-            NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY));
+            diaryProjectionDirty=true;NutritionStore.mergeLatest(days, NutritionStore.read(prefs, DATA_KEY));
             prefs.edit().putString(DATA_KEY, days.toString()).apply();
         }
     }
@@ -17925,6 +17620,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject ensureDay(String date) {
+        diaryProjectionDirty=true;
         JSONObject day = optObj(days, date);
         try {
             if (!days.has(date)) {
@@ -18225,45 +17921,22 @@ public class MainActivity extends Activity {
         return sb.toString();
     }
 
-    private List<String> recordedDates() {
-        List<String> dates = new ArrayList<String>();
-        JSONArray names = days.names();
-        if (names == null) {
-            return dates;
-        }
-        for (int i = 0; i < names.length(); i++) {
-            String date = names.optString(i);
-            JSONObject day = days.optJSONObject(date);
-            String mood = day == null ? "" : moodText(date);
-            String dining = day == null ? "" : dayDiningMethodsText(date);
-            if (mealCount(date) > 0 || mood.length() > 0 || dining.length() > 0) {
-                dates.add(date);
-            }
-        }
-        Collections.sort(dates, new Comparator<String>() {
-            @Override
-            public int compare(String a, String b) {
-                return b.compareTo(a);
-            }
-        });
-        return dates;
+    private final DiaryProjectionIndex diaryProjection=new DiaryProjectionIndex();
+    private boolean diaryProjectionDirty=true;
+    private JSONObject indexedDays;
+    private String indexedCommittedDays;
+    private void updateDiaryProjection(){
+        String committed=prefs.getString(DATA_KEY,"{}");
+        if(!diaryProjectionDirty&&indexedDays==days&&committed.equals(indexedCommittedDays))return;
+        diaryProjection.update(days==null?"{}":days.toString());
+        indexedDays=days;indexedCommittedDays=committed;diaryProjectionDirty=false;
     }
-
+    private List<String> recordedDates() {
+        updateDiaryProjection();return diaryProjection.recordedDates();
+    }
     private int mealCount(String date) {
-        JSONObject day = dayReadSnapshot(date);
-        int count = 0;
-        for (MealOption meal : allMealOptions()) {
-            JSONObject mealObj = optObj(day, meal.key);
-            JSONArray photos = mealObj.optJSONArray("photos");
-            JSONArray stickers = mealObj.optJSONArray("stickers");
-            if (mealObj.optString("text", "").trim().length() > 0
-                    || (photos != null && photos.length() > 0)
-                    || (stickers != null && stickers.length() > 0)
-                    || mealObj.optBoolean("skipped", false)) {
-                count++;
-            }
-        }
-        return count;
+        // The current in-memory day is authoritative for transient unsaved UI projections.
+        return DiaryProjectionIndex.mealCount(days==null?null:days.optJSONObject(date));
     }
 
     private String daySummary(String date) {
@@ -18571,10 +18244,10 @@ public class MainActivity extends Activity {
                     String title=v instanceof TextView?((TextView)v).getText().toString():"";
                     boolean back="‹".equals(title)||"×".equals(title)||title.startsWith("返回");
                     if(back)navigationPress=new java.lang.ref.WeakReference<View>(v);
-                    v.setScaleX(back?.94f:.985f);v.setScaleY(back?.94f:.985f);
+                    v.setScaleX(back?.94f:.975f);v.setScaleY(back?.94f:.975f);
                 } else if (event.getAction() == MotionEvent.ACTION_UP
                         || event.getAction() == MotionEvent.ACTION_CANCEL) {
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(205).start();
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(180).setInterpolator(UiTokens.motionEaseOut()).start();
                 }
                 return false;
             }
@@ -19067,6 +18740,7 @@ public class MainActivity extends Activity {
     }
 
     private void refreshChrome() {
+        if(composeBottomBar!=null){updateComposeBottomBar();return;}
         if (navHost != null) {
             FrameLayout.LayoutParams navLp = (FrameLayout.LayoutParams) navHost.getLayoutParams();
             navLp.height = dp(spaceByLayout(76, 72, 70));
@@ -19943,18 +19617,14 @@ public class MainActivity extends Activity {
     private BookOpenView bookOpeningOverlay;
 
     /** The selected cover grows into the real sheet and opens around its left spine. */
-    private class BookOpenView extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private class BookOpenView extends ComposeBookTransition {
         private final RectF start = new RectF(), target = new RectF(), current = new RectF();
         private final RectF localPaper = new RectF();
-        private final Path paperCaptureClip=new Path(),pageOutline=new Path(),projectedCover=new Path();
+        private final Path paperCaptureClip=new Path();
         private float sourceCornerX,sourceCornerY;
         private float paperElevation,paperTranslationZ;
-        private final Matrix coverMatrix = new Matrix();
-        private final android.animation.TimeInterpolator growEase=UiTokens.motionEaseSoft();
-        private final float[] coverSource = new float[8], coverDestination = new float[8];
         private final String date;
-        private Bitmap outgoingScreen, pageImage, coverImage;
+        private Bitmap outgoingScreen, retiredBackdrop, pageImage, coverImage;
         private Canvas pageCanvas;
         private boolean mediaRefreshPosted;
         private final Runnable refreshMedia = new Runnable() {
@@ -19966,24 +19636,24 @@ public class MainActivity extends Activity {
                         || paper.getHeight() != pageImage.getHeight()) { finish(); return; }
                 try {
                     drawPaperTexture();
-                    invalidate();
+                    pageImage.prepareToDraw();
+                    setPresentationTextures(pageImage,coverImage,outgoingScreen,notebookPaperPalette(notebookPageStyle())[0]);
                 } catch (OutOfMemoryError | RuntimeException unavailable) { finish(); }
             }
         };
-        private LinearGradient coverBack, spineShadow;
-        private ValueAnimator animator;
         private ViewTreeObserver.OnPreDrawListener pending;
         private View paper, sourceCover;
         private float paperAlpha = 1f, progress;
-        private boolean finished, paperHidden,closing;
+        private boolean finished, paperHidden,closing,coverCaptured;
         private View closingDestination,shelfCover;
-        private float shelfAlpha,shelfElevation,shelfZ,closingStartProgress,closingCornerX,closingCornerY;
+        private float shelfAlpha,shelfElevation,shelfZ,closingStartProgress,closingStartOpening;
         private final RectF closingFrom=new RectF();
         private int closingLayoutPass;
         private Runnable endAction;
         BookOpenView(Context context, String date) {
             super(context); this.date = date;
             setWillNotDraw(false);
+            disableForceDark(this);
             setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
 
@@ -20021,12 +19691,34 @@ public class MainActivity extends Activity {
             // One short-lived snapshot preserves the shelf until the growing book reveals its page.
             // It is never stored, and capture failure leaves a fully usable live detail page.
             if (captureBackdrop&&root != null && root.getWidth() > 0 && root.getHeight() > 0) {
-                try {
+                if (!captureBackdrop()) { recycle(outgoingScreen); outgoingScreen = null; }
+            }
+        }
+
+        private boolean captureBackdrop() {
+            SettingsContainerTransform.CaptureAppearance appearance = new SettingsContainerTransform.CaptureAppearance();
+            try {
+                if (outgoingScreen == null || outgoingScreen.isRecycled()
+                        || outgoingScreen.getWidth() != root.getWidth() || outgoingScreen.getHeight() != root.getHeight()) {
+                    recycle(outgoingScreen);
                     outgoingScreen = Bitmap.createBitmap(root.getWidth(), root.getHeight(), Bitmap.Config.ARGB_8888);
-                    root.draw(new Canvas(outgoingScreen));
-                } catch (OutOfMemoryError | RuntimeException unavailable) {
-                    recycle(outgoingScreen); outgoingScreen = null;
                 }
+                // Preserve exact theme pixels; software replay of Paper can lift dark colors.
+                outgoingScreen.eraseColor(UiTokens.paper(nightDecoration()));
+                Canvas canvas = new Canvas(outgoingScreen);
+                Drawable background = root.getBackground();
+                appearance.disable(root);
+                if (background instanceof PaperComponents.Paper) {
+                    ((PaperComponents.Paper) background).drawTexture(canvas);
+                }
+                drawRootSnapshot(canvas);
+                outgoingScreen.prepareToDraw();
+                setPresentationTextures(pageImage,coverImage,outgoingScreen,notebookPaperPalette(notebookPageStyle())[0]);
+                return true;
+            } catch (OutOfMemoryError | RuntimeException unavailable) {
+                return false;
+            } finally {
+                appearance.restore();
             }
         }
 
@@ -20037,19 +19729,8 @@ public class MainActivity extends Activity {
                 @Override public boolean onPreDraw() {
                     if(pending!=this){if(getViewTreeObserver().isAlive())getViewTreeObserver().removeOnPreDrawListener(this);return true;}
                     removePending();
-                    if (!ownsDetail() || !preparePaper()) { finish(); return true; }
-                    animator = ValueAnimator.ofFloat(0f, 1f);
-                    animator.setDuration(UiTokens.BOOK_OPEN_MS);
-                    // A real clock keeps the cover reveal visible instead of front-loading it.
-                    animator.setInterpolator(new android.view.animation.LinearInterpolator());
-                    animator.addUpdateListener(value -> {
-                        if (!ownsDetail()) { finish(); return; }
-                        progress = (Float) value.getAnimatedValue(); invalidate();
-                    });
-                    animator.addListener(new android.animation.AnimatorListenerAdapter() {
-                        @Override public void onAnimationEnd(android.animation.Animator value) { finish(); }
-                    });
-                    animator.start();
+                    if (!ownsDetail() || outgoingScreen == null || !preparePaper()) { finish(); return true; }
+                    startProgressAnimation(0,1,UiTokens.BOOK_OPEN_MS);
                     return true;
                 }
             };
@@ -20080,9 +19761,20 @@ public class MainActivity extends Activity {
         }
         private void drawPaperTexture(){
             pageImage.eraseColor(Color.TRANSPARENT);
-            int saved=pageCanvas.save();
-            try{pageCanvas.clipPath(paperCaptureClip);paper.draw(pageCanvas);}
-            finally{pageCanvas.restoreToCount(saved);}
+            int saved=pageCanvas.save();Drawable background=paper.getBackground();
+            Rect previous=background==null?null:background.copyBounds();
+            boolean initializeOutline=previous!=null&&(previous.left!=0||previous.top!=0
+                    ||previous.right!=paper.getWidth()||previous.bottom!=paper.getHeight());
+            try{
+                if(background!=null)background.setBounds(0,0,paper.getWidth(),paper.getHeight());
+                pageCanvas.clipPath(paperCaptureClip);paper.draw(pageCanvas);
+            }finally{
+                // View.draw consumes its pending background-size update, including on a software
+                // capture before the first window draw. Keep the live View's correct bounds.
+                if(background!=null)background.setBounds(0,0,paper.getWidth(),paper.getHeight());
+                if(initializeOutline)paper.invalidateOutline();
+                pageCanvas.restoreToCount(saved);
+            }
         }
         private void captureCoverTexture(){
             float sourceWidth=sourceCover==null?start.width():sourceCover.getWidth(),sourceHeight=sourceCover==null?start.height():sourceCover.getHeight();
@@ -20101,21 +19793,26 @@ public class MainActivity extends Activity {
             }else{
                 BookCoverDrawable cover=new BookCoverDrawable(date,bookPalette(date,accent),bookCoverStyle());cover.setBounds(0,0,coverImage.getWidth(),coverImage.getHeight());cover.drawFlat(canvas);
             }
+            coverCaptured=true;
+            coverImage.prepareToDraw();
             sourceCover=null;
         }
-        private void stopAnimator(){
-            if(animator!=null){ValueAnimator previous=animator;animator=null;previous.removeAllUpdateListeners();previous.removeAllListeners();previous.cancel();}
+        private void stopAnimation(){
+            cancelPresentationMotion();
         }
-        private boolean captureClosingBackdrop(){
-            BookDetailSwipeFrame frame=bookDetailSwipeFrame;float alpha=frame==null?1:frame.getAlpha();int visibility=getVisibility();
-            try{
-                setVisibility(View.INVISIBLE);if(frame!=null)frame.setAlpha(0);
-                if(outgoingScreen==null||outgoingScreen.isRecycled()||outgoingScreen.getWidth()!=root.getWidth()||outgoingScreen.getHeight()!=root.getHeight()){
-                    recycle(outgoingScreen);outgoingScreen=Bitmap.createBitmap(root.getWidth(),root.getHeight(),Bitmap.Config.ARGB_8888);
+        private void startProgressAnimation(final float from,final float to,long durationMs){
+            stopAnimation();
+            if(durationMs<=0||Math.abs(to-from)<.0001f||!ValueAnimator.areAnimatorsEnabled()){progress=to;finish();return;}
+            setPresentationTextures(pageImage,coverImage,outgoingScreen,notebookPaperPalette(notebookPageStyle())[0]);
+            setPresentationGeometry(start,target,sourceCornerX,sourceCornerY,dp(UiTokens.NOTEBOOK_RADIUS_DP));
+            animatePresentation(from,to,durationMs,closing,closingFrom,closingStartOpening,new ComposeBookTransition.Listener(){
+                public void onFrame(float value,float left,float top,float right,float bottom){
+                    if(finished)return;
+                    progress=value;current.set(left,top,right,bottom);
+                    if(!ownsDetail())finish();
                 }
-                outgoingScreen.eraseColor(Color.TRANSPARENT);root.draw(new Canvas(outgoingScreen));return true;
-            }catch(OutOfMemoryError|RuntimeException unavailable){return false;}
-            finally{if(frame!=null)frame.setAlpha(alpha);setVisibility(visibility);}
+                public void onFinished(){finish();}
+            });
         }
         private View positionShelfCover(){
             View scope=closingDestination instanceof RootPagePager?((RootPagePager)closingDestination).selectedPage():closingDestination;
@@ -20128,7 +19825,8 @@ public class MainActivity extends Activity {
             found.requestRectangleOnScreen(new Rect(0,0,found.getWidth(),found.getHeight()),true);
             if(scroll!=null){
                 int[] at=new int[2],base=new int[2],nav=new int[2];found.getLocationOnScreen(at);root.getLocationOnScreen(base);navHost.getLocationOnScreen(nav);
-                int top=base[1]+dp(UiTokens.HEADER_CORE+12),bottom=nav[1]-dp(12);int delta=0;
+                int top=base[1]+dp(UiTokens.HEADER_CORE+12);
+                int bottom=composeBottomBar==null?nav[1]-dp(12):composeBottomBar.contentTopOnScreen()-dp(12);int delta=0;
                 if(at[1]<top)delta=at[1]-top;else if(at[1]+found.getHeight()>bottom)delta=at[1]+found.getHeight()-bottom;
                 if(delta!=0)scroll.scrollTo(0,Math.max(0,scroll.getScrollY()+delta));
             }
@@ -20136,12 +19834,13 @@ public class MainActivity extends Activity {
         }
         boolean beginClosing(boolean favorites){
             if(finished||pageImage==null||pageImage.isRecycled())return false;
-            removePending();stopAnimator();removeCallbacks(refreshMedia);mediaRefreshPosted=false;
-            closingStartProgress=Math.max(0,Math.min(1,progress));float grown=growEase.getInterpolation(Math.min(1,progress/.30f));
-            closingFrom.set(current.isEmpty()?new RectF(lerp(start.left,target.left,grown),lerp(start.top,target.top,grown),lerp(start.right,target.right,grown),lerp(start.bottom,target.bottom,grown)):current);
-            float radius=Math.min(dp(UiTokens.NOTEBOOK_RADIUS_DP),Math.min(localPaper.width(),localPaper.height())*.5f);
-            closingCornerX=lerp(sourceCornerX,radius,grown);closingCornerY=lerp(sourceCornerY,radius,grown);
-            if(!captureClosingBackdrop())return false;
+            removePending();stopAnimation();removeCallbacks(refreshMedia);mediaRefreshPosted=false;
+            closingStartProgress=Math.max(0,Math.min(1,progress));
+            float presentedOpening=getPresentationOpening();
+            closingStartOpening=Float.isFinite(presentedOpening)?presentedOpening:ComposeBookTransition.openingForProgress(progress);
+            closingFrom.set(current.isEmpty()?target:current);
+            retiredBackdrop=outgoingScreen;outgoingScreen=null;
+            setPresentationTextures(pageImage,coverImage,null,notebookPaperPalette(notebookPageStyle())[0]);
             closing=true;setClickable(true);renderBookReturn(favorites);
             if(content.getChildCount()==0)return false;closingDestination=content.getChildAt(0);
             endAction=()->{ViewParent parent=getParent();if(parent instanceof ViewGroup)((ViewGroup)parent).removeView(this);};
@@ -20150,21 +19849,23 @@ public class MainActivity extends Activity {
                 if(pending!=this){if(getViewTreeObserver().isAlive())getViewTreeObserver().removeOnPreDrawListener(this);return true;}
                 if(!ownsDetail()){finish();return true;}
                 View destination=positionShelfCover();
-                if(closingLayoutPass++==0){root.requestLayout();invalidate();return false;}
+                closingLayoutPass++;
+                if(closingDestination.isLayoutRequested()){invalidate();return false;}
                 removePending();
                 try{
                     if(destination!=null&&destination.getWidth()>0&&destination.getHeight()>0){
-                        setSource(destination,false);captureCoverTexture();shelfCover=destination;shelfAlpha=destination.getAlpha();shelfElevation=destination.getElevation();shelfZ=destination.getTranslationZ();
+                        setSource(destination,false);
+                        if(!coverCaptured)captureCoverTexture();else sourceCover=null;
+                        shelfCover=destination;shelfAlpha=destination.getAlpha();shelfElevation=destination.getElevation();shelfZ=destination.getTranslationZ();
                         destination.setElevation(0);destination.setTranslationZ(0);destination.setAlpha(0);
-                    }
+                    }else if(!coverCaptured)captureCoverTexture();
                 }catch(OutOfMemoryError|RuntimeException unavailable){finish();return true;}
-                animator=ValueAnimator.ofFloat(closingStartProgress,0);animator.setDuration(Math.round(UiTokens.BOOK_CLOSE_MS*closingStartProgress));animator.setInterpolator(new android.view.animation.LinearInterpolator());
-                animator.addUpdateListener(value->{if(!ownsDetail()){finish();return;}progress=(Float)value.getAnimatedValue();invalidate();});
-                animator.addListener(new android.animation.AnimatorListenerAdapter(){@Override public void onAnimationEnd(android.animation.Animator value){finish();}});animator.start();return true;
+                startProgressAnimation(closingStartProgress,0,Math.max(300,Math.round(UiTokens.BOOK_CLOSE_MS*closingStartProgress)));return true;
             }};
             getViewTreeObserver().addOnPreDrawListener(pending);requestLayout();invalidate();return true;
         }
-        private boolean preparePaper() {
+        private boolean preparePaper() { return preparePaper(true); }
+        private boolean preparePaper(boolean captureCover) {
             paper = bookDetailSwipeFrame == null ? null
                     : bookDetailSwipeFrame.findViewWithTag(TAG_BOOK_NOTEBOOK_PAGE);
             if (paper == null || paper.getWidth() <= 0 || paper.getHeight() <= 0) return false;
@@ -20193,67 +19894,20 @@ public class MainActivity extends Activity {
                 pageImage = Bitmap.createBitmap(paper.getWidth(), paper.getHeight(), Bitmap.Config.ARGB_8888);
                 pageCanvas = new Canvas(pageImage);
                 drawPaperTexture();
-                coverImage = Bitmap.createBitmap(paper.getWidth(),paper.getHeight(),Bitmap.Config.ARGB_8888);
-                captureCoverTexture();
+                pageImage.prepareToDraw();
+                // Keep the short-lived cover transition texture at its source resolution,
+                // avoiding another full-page raster allocation for every open/close.
+                int coverWidth=Math.min(paper.getWidth(),Math.max(1,Math.round(sourceWidth)));
+                int coverHeight=Math.min(paper.getHeight(),Math.max(1,Math.round(sourceHeight)));
+                coverImage = Bitmap.createBitmap(coverWidth,coverHeight,Bitmap.Config.ARGB_8888);
+                if(captureCover)captureCoverTexture();
             } catch (OutOfMemoryError | RuntimeException unavailable) { return false; }
             paperAlpha=paper.getAlpha();paperElevation=paper.getElevation();paperTranslationZ=paper.getTranslationZ();
             paper.setElevation(0);paper.setTranslationZ(0);paper.setAlpha(0f);paperHidden=true;
-            float w = pageImage.getWidth(), h = pageImage.getHeight();
-            localPaper.set(0, 0, w, h);
-            coverSource[0]=0; coverSource[1]=0; coverSource[2]=w; coverSource[3]=0;
-            coverSource[4]=w; coverSource[5]=h; coverSource[6]=0; coverSource[7]=h;
             int[] colors = notebookPaperPalette(notebookPageStyle());
-            coverBack = new LinearGradient(0, 0, 0, h, colors[0], colors[1], Shader.TileMode.CLAMP);
-            spineShadow = new LinearGradient(0, 0, w*.24f, 0,
-                    new int[]{0x44000000,0x10000000,0x00000000},
-                    new float[]{0,.35f,1}, Shader.TileMode.CLAMP);
+            setPresentationGeometry(start,target,sourceCornerX,sourceCornerY,radius);
+            setPresentationTextures(pageImage,coverImage,outgoingScreen,colors[0]);
             return true;
-        }
-
-        @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);if(finished)return;
-            paint.setShader(null);paint.setStyle(Paint.Style.FILL);paint.setColor(Color.WHITE);paint.setAlpha(255);
-            if(outgoingScreen!=null&&!outgoingScreen.isRecycled()){
-                paint.setAlpha(Math.round(255*(closing?Math.min(1,progress/.35f):1-Math.min(1,progress/.35f))));canvas.drawBitmap(outgoingScreen,0,0,paint);paint.setAlpha(255);
-            }
-            if(pageImage==null||pageImage.isRecycled())return;
-            float grow=growEase.getInterpolation(Math.min(1,progress/.30f));
-            float shapeGrow=grow;
-            if(closing){float range=Math.min(.30f,closingStartProgress);float fraction=range<=0?1:Math.max(0,Math.min(1,(range-progress)/range));shapeGrow=1-growEase.getInterpolation(fraction);}
-            RectF expanded=closing?closingFrom:target;
-            current.set(lerp(start.left,expanded.left,shapeGrow),lerp(start.top,expanded.top,shapeGrow),lerp(start.right,expanded.right,shapeGrow),lerp(start.bottom,expanded.bottom,shapeGrow));
-            float w=localPaper.width(),h=localPaper.height();
-            float radius=Math.min(dp(UiTokens.NOTEBOOK_RADIUS_DP),Math.min(w,h)*.5f);
-            float rx=Math.min(w*.5f,lerp(sourceCornerX,closing?closingCornerX:radius,closing?shapeGrow:grow)),ry=Math.min(h*.5f,lerp(sourceCornerY,closing?closingCornerY:radius,closing?shapeGrow:grow));
-            pageOutline.reset();pageOutline.addRoundRect(localPaper,rx,ry,Path.Direction.CW);
-            float opening=Math.max(0,Math.min(1,(progress-.22f)/.78f));
-            float angle=(float)Math.PI*.94f*opening,sine=(float)Math.sin(angle),cosine=(float)Math.cos(angle);
-            int coverAlpha=Math.round(255*(1-Math.max(0,(opening-.80f)/.20f)));
-            float perspective=3f*w/(3f*w-w*sine),edge=w*cosine*perspective,top=h*.5f*(1-perspective),bottom=h-top;
-            coverDestination[0]=0;coverDestination[1]=0;coverDestination[2]=edge;coverDestination[3]=top;
-            coverDestination[4]=edge;coverDestination[5]=bottom;coverDestination[6]=0;coverDestination[7]=h;
-            boolean faceVisible=coverAlpha>0&&Math.abs(cosine)>.015f&&coverMatrix.setPolyToPoly(coverSource,0,coverDestination,0,4);
-            projectedCover.reset();if(faceVisible)pageOutline.transform(coverMatrix,projectedCover);
-            int saved=canvas.save();canvas.translate(current.left,current.top);canvas.scale(current.width()/w,current.height()/h);
-            // A closed cover has no paper behind its transparent corner pixels. Once
-            // opening starts, expose only paper genuinely uncovered by the front face.
-            if(opening>0){
-                int paperSave=canvas.save();canvas.clipPath(pageOutline);canvas.clipPath(paperCaptureClip);
-                if(faceVisible&&cosine>=0)canvas.clipOutPath(projectedCover);
-                paint.setShader(null);paint.setAlpha(255);canvas.drawBitmap(pageImage,0,0,paint);
-                if(coverAlpha>0){
-                    paint.setShader(spineShadow);paint.setAlpha(Math.round(160*sine));
-                    canvas.drawRect(0,0,w*.24f,h,paint);paint.setShader(null);paint.setAlpha(255);
-                }
-                canvas.restoreToCount(paperSave);
-            }
-            if(faceVisible){
-                int face=canvas.save();canvas.concat(coverMatrix);canvas.clipPath(pageOutline);paint.setAlpha(coverAlpha);
-                if(cosine>=0&&coverImage!=null&&!coverImage.isRecycled())canvas.drawBitmap(coverImage,0,0,paint);
-                else{paint.setShader(coverBack);canvas.drawPath(pageOutline,paint);paint.setShader(null);}
-                canvas.restoreToCount(face);paint.setAlpha(255);
-            }
-            canvas.restoreToCount(saved);
         }
 
         @Override public boolean onTouchEvent(MotionEvent event) {
@@ -20272,12 +19926,13 @@ public class MainActivity extends Activity {
             if (finished) return;
             finished = true; removePending();
             removeCallbacks(refreshMedia); mediaRefreshPosted = false; pageCanvas = null;
-            stopAnimator();
+            stopAnimation();
+            disposePresentation();
             if(paperHidden&&paper!=null){paper.setElevation(paperElevation);paper.setTranslationZ(paperTranslationZ);paper.setAlpha(paperAlpha);}
             paperHidden = false;
             if(shelfCover!=null){shelfCover.setElevation(shelfElevation);shelfCover.setTranslationZ(shelfZ);shelfCover.setAlpha(shelfAlpha);shelfCover=null;}
-            recycle(outgoingScreen); recycle(pageImage); recycle(coverImage);
-            outgoingScreen=pageImage=coverImage=null; sourceCover=null;
+            recycle(outgoingScreen);recycle(retiredBackdrop);recycle(pageImage);recycle(coverImage);
+            outgoingScreen=retiredBackdrop=pageImage=coverImage=null; sourceCover=null;
             if (bookOpeningOverlay == this) bookOpeningOverlay=null;
             Runnable completed=endAction;endAction=null;setClickable(false);
             if(completed!=null)completed.run();else{ViewParent parent=getParent();if(parent instanceof ViewGroup)((ViewGroup)parent).removeView(this);}

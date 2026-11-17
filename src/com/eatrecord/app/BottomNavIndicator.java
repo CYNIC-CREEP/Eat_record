@@ -15,8 +15,8 @@ final class BottomNavIndicator implements Choreographer.FrameCallback {
     private final ContainerFeedback container;
     final NavLensGeometry geometry=new NavLensGeometry();
     final BottomNavMotion motion=new BottomNavMotion();
-    private boolean initialized,scheduled;
-    private long lastFrame;
+    private boolean initialized,scheduled,preparingPage;
+    private final AnimationFrameClock frameClock=new AnimationFrameClock();
     private int targetId;
     private GradientDrawable background;
     private float cornerRadius;
@@ -25,7 +25,7 @@ final class BottomNavIndicator implements Choreographer.FrameCallback {
         this.indicator=indicator;this.bar=bar;this.host=host;this.lens=lens;this.container=container;
         indicator.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener(){
             public void onViewAttachedToWindow(View v){}
-            public void onViewDetachedFromWindow(View v){motion.snap(motion.position.target);stop();lens.hide();container.swell(0);}
+            public void onViewDetachedFromWindow(View v){preparingPage=false;motion.snap(motion.position.target);stop();lens.hide();container.swell(0);}
         });
         lens.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(initialized)draw();});
     }
@@ -48,12 +48,27 @@ final class BottomNavIndicator implements Choreographer.FrameCallback {
         motion.follow(center(a)+(center(b)-center(a))*Math.max(0,Math.min(1,progress)));wake();
     }
     void settle(){select(targetId,false);}
-    void stop(){Choreographer.getInstance().removeFrameCallback(this);scheduled=false;lastFrame=0;}
-    private void wake(){if(!scheduled&&indicator.isAttachedToWindow()&&motion.running()){scheduled=true;lastFrame=System.nanoTime();Choreographer.getInstance().postFrameCallback(this);}}
+    void beginPagePreparation(){
+        preparingPage=true;
+        stop();
+    }
+    void endPagePreparation(){
+        if(!preparingPage)return;
+        preparingPage=false;
+        wake();
+        // The first visible frame establishes the clock, including after a slow render/buildLayer.
+        frameClock.reset();
+    }
+    void stop(){Choreographer.getInstance().removeFrameCallback(this);scheduled=false;frameClock.reset();}
+    private void wake(){
+        if(!preparingPage&&!scheduled&&indicator.isAttachedToWindow()&&motion.running()){
+            scheduled=true;frameClock.start(System.nanoTime());Choreographer.getInstance().postFrameCallback(this);
+        }
+    }
     @Override public void doFrame(long time){
         if(!scheduled)return;scheduled=false;
         if(!ValueAnimator.areAnimatorsEnabled()){settle();return;}
-        boolean moving=motion.step(Math.max(0,(time-lastFrame)/1e9));lastFrame=time;draw();
+        boolean moving=motion.step(frameClock.advance(time));draw();
         if(moving&&indicator.isAttachedToWindow()){scheduled=true;Choreographer.getInstance().postFrameCallback(this);}
     }
     private float dp(float value){return value*indicator.getResources().getDisplayMetrics().density;}

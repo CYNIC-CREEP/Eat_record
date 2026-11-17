@@ -8,12 +8,17 @@ import java.util.ArrayList;
 
 /** Opaque child-page changes; root navigation belongs to RootPagePager. */
 final class PageCrossfade {
-    interface ProgressListener { void onStart(); void onProgress(float movement); void onEnd(); }
+    interface ProgressListener {
+        void onStart();
+        default void onReady() { }
+        void onProgress(float movement);
+        void onEnd();
+    }
     private ProgressListener progressListener;
     private final ViewGroup host;
     private final SettingsContainerTransform container;
     private Slide image;
-    private ValueAnimator animator;
+    private Choreographer.FrameCallback animationFrame;
     private int paperColor=UiTokens.paper(false);
     private Drawable paperBackground;
     private ViewTreeObserver.OnPreDrawListener pending;
@@ -108,7 +113,7 @@ final class PageCrossfade {
             if(!replaced&&!sized){host.requestLayout();host.invalidate();return false;}
             if(host.getViewTreeObserver().isAlive())host.getViewTreeObserver().removeOnPreDrawListener(this);pending=null;
             if(replaced){clear();return true;}
-            if(current.settings)current.awaitFirstWindowDraw();
+            if(current.settings||progressListener!=null)current.awaitFirstWindowDraw();
             else{
                 current.prepareLayers(incoming);
                 position(current.progress);
@@ -118,9 +123,31 @@ final class PageCrossfade {
         }};host.getViewTreeObserver().addOnPreDrawListener(pending);host.invalidate();
     }
     private void startAnimator(final Slide current){
-        animator=ValueAnimator.ofFloat(0,1);animator.setDuration(current.durationMs);animator.setInterpolator(new android.view.animation.LinearInterpolator());
-        animator.addUpdateListener(a->{if(image==current){if(current.settings&&!ValueAnimator.areAnimatorsEnabled())clear();else position((Float)a.getAnimatedValue());}});
-        animator.addListener(new AnimatorListenerAdapter(){@Override public void onAnimationEnd(Animator a){if(image==current)clear();}});animator.start();
+        if(image!=current)return;
+        if(progressListener!=null)progressListener.onReady();
+        if(image!=current)return;
+        float durationScale=1f;
+        try{durationScale=android.provider.Settings.Global.getFloat(host.getContext().getContentResolver(),
+                android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,1f);}catch(SecurityException ignored){ }
+        final double durationSeconds=current.durationMs/1000d
+                *(Float.isFinite(durationScale)&&durationScale>0?durationScale:1f);
+        final AnimationFrameClock clock=new AnimationFrameClock(AnimationFrameClock.MAX_PRESENTED_SECONDS);
+        animationFrame=new Choreographer.FrameCallback(){
+            private double presentedSeconds;
+            @Override public void doFrame(long frameTimeNanos){
+                if(image!=current||animationFrame!=this)return;
+                if(!ValueAnimator.areAnimatorsEnabled()||!host.isAttachedToWindow()){clear();return;}
+                // Cache upload, a bitmap arrival or another long main-thread task must not
+                // consume all of the motion before the next frame can actually be drawn.
+                presentedSeconds+=clock.advance(frameTimeNanos);
+                float fraction=(float)Math.min(1d,presentedSeconds/durationSeconds);
+                position(fraction);
+                if(image!=current||animationFrame!=this)return;
+                if(fraction>=1){clear();return;}
+                Choreographer.getInstance().postFrameCallback(this);
+            }
+        };
+        Choreographer.getInstance().postFrameCallback(animationFrame);
     }
     private Bitmap capturePresentation(){
         Bitmap snapshot=null;
@@ -168,7 +195,7 @@ final class PageCrossfade {
             for(HeaderState header:image.outgoingHeaders)header.apply(SettingsTransitionMath.outgoingHeader(progress));
             for(HeaderState header:image.incomingHeaders)header.apply(SettingsTransitionMath.incomingHeader(progress));
         }
-        if(image.settings)for(IncomingSurface surface:incomingSurfaces)if(incoming.contains(surface.view))surface.blockInput(blocksIncomingInput());
+        for(IncomingSurface surface:incomingSurfaces)if(incoming.contains(surface.view))surface.blockInput(blocksIncomingInput());
         // A freshly created incoming page starts outside the viewport. Re-record
         // this parent as it enters, even when only RenderNode translations change.
         host.invalidate();
@@ -178,7 +205,7 @@ final class PageCrossfade {
     }
     private void clearSlide(){
         removePending();
-        if(animator!=null){ValueAnimator previous=animator;animator=null;previous.removeAllUpdateListeners();previous.removeAllListeners();previous.cancel();}
+        if(animationFrame!=null){Choreographer.getInstance().removeFrameCallback(animationFrame);animationFrame=null;}
         for(View child:incoming){child.setTranslationX(0);child.setAlpha(1);}incoming.clear();
         for(IncomingSurface surface:incomingSurfaces)surface.restore();incomingSurfaces.clear();
         // A data refresh may have replaced the normal children while a transition
@@ -193,7 +220,7 @@ final class PageCrossfade {
     }
     boolean active(){return image!=null||container.active();}
     boolean settingsActive(){return image!=null&&image.settings||container.active();}
-    boolean blocksIncomingInput(){return container.blocksInput()||image!=null&&image.settings&&image.progress<.20f;}
+    boolean blocksIncomingInput(){return container.blocksInput()||image!=null&&(image.afterFirstDraw!=null||image.startAfterLayers!=null||image.settings&&image.progress<.20f);}
     private static final class HeaderState {
         final View view;final float alpha;
         HeaderState(View view){this.view=view;alpha=view.getAlpha();}
@@ -213,7 +240,7 @@ final class PageCrossfade {
         boolean layersPrepared,firstDrawQueued;
         ViewTreeObserver firstDrawObserver;
         ViewTreeObserver.OnDrawListener firstDrawListener;
-        Runnable afterFirstDraw;
+        Runnable afterFirstDraw,startAfterLayers;
         Slide(Bitmap bitmap,boolean forward,int color,Drawable background,boolean settings){
             this.bitmap=bitmap;this.forward=settings&&host.getLayoutDirection()==View.LAYOUT_DIRECTION_RTL?!forward:forward;this.color=color;this.background=background;this.settings=settings;
             travel=host.getWidth()*(settings?SettingsTransitionMath.TRAVEL:1);
@@ -235,7 +262,8 @@ final class PageCrossfade {
             if(image!=this||afterFirstDraw!=null||layersPrepared)return;
             // The retained outgoing sheet is still opaque above these roots.
             // Draw the accepted incoming Views once before creating their caches.
-            for(View child:incoming)child.setAlpha(1);
+            for(View child:incoming){if(!settings)child.setTranslationX(0);child.setAlpha(1);}
+            for(IncomingSurface surface:incomingSurfaces)if(incoming.contains(surface.view))surface.blockInput(true);
             for(HeaderState header:incomingHeaders)header.apply(1);
             afterFirstDraw=new Runnable(){public void run(){
                 if(image!=Slide.this||afterFirstDraw!=this)return;
@@ -247,7 +275,8 @@ final class PageCrossfade {
                 prepareLayers(incoming);
                 if(image!=Slide.this)return;
                 position(0);
-                startAnimator(Slide.this);
+                if(progressListener==null)startAnimator(Slide.this);
+                else startAfterPreparedFrame();
             }};
             firstDrawObserver=host.getViewTreeObserver();
             firstDrawListener=()->{
@@ -263,6 +292,21 @@ final class PageCrossfade {
             if(firstDrawObserver!=null&&firstDrawListener!=null&&firstDrawObserver.isAlive())
                 firstDrawObserver.removeOnDrawListener(firstDrawListener);
             afterFirstDraw=null;firstDrawListener=null;firstDrawObserver=null;
+            if(startAfterLayers!=null)host.removeCallbacks(startAfterLayers);
+            startAfterLayers=null;
+        }
+        void startAfterPreparedFrame(){
+            startAfterLayers=new Runnable(){public void run(){
+                if(image!=Slide.this||startAfterLayers!=this)return;
+                startAfterLayers=null;
+                boolean replaced=incoming.size()!=host.getChildCount();
+                for(View child:incoming)replaced|=child.getParent()!=host;
+                if(replaced||!host.isAttachedToWindow()||width!=host.getWidth()||height!=host.getHeight()
+                        ||!ValueAnimator.areAnimatorsEnabled()){clear();return;}
+                // buildLayer ran in the preceding animation phase. Start with a fresh vsync time.
+                startAnimator(Slide.this);
+            }};
+            host.postOnAnimation(startAfterLayers);host.invalidate();
         }
         void prepareLayers(ArrayList<View> arriving){
             if(layersPrepared)return;layersPrepared=true;

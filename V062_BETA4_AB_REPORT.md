@@ -1,12 +1,14 @@
 # 0.6.2-beta.4 餐次管理容器A/B试验
 
+> 2026-11-12归档说明：证据链接改为所属ZIP，原路径与包内成员见[归档记录](ARCHIVE_REPORT_20261112.md)。源码归档已剔除生成物，原发布摘要仍为历史记录；中间Beta包按用户选择不保留。
+
 2026-11-06，Windows PowerShell、Java动态View，ADB魅族21普通包。
 
 ## 交付状态
 
 仅“其他设置→餐次管理”完成两套可切换视觉试验。保留beta.3已验证上下同步版为Baseline，源码默认和最终手机模式均为Baseline，等待用户选择。
 
-普通包为[EatRecord-0.6.2-beta.4-debug.apk](dist/EatRecord-0.6.2-beta.4-debug.apk)，code197，121212017 bytes，SHA256为`55d94f2467216437fe16fbcc2beaaaca7678b2fcc377f7066159c560cb75ea6c`。用户已授权同证书普通包保留数据安装及无损UI检查，安装测试沿用此授权。
+普通包为EatRecord-0.6.2-beta.4-debug.apk（历史中间包，按归档策略不保留），code197，121212017 bytes，SHA256为`55d94f2467216437fe16fbcc2beaaaca7678b2fcc377f7066159c560cb75ea6c`。用户已授权同证书普通包保留数据安装及无损UI检查，安装测试沿用此授权。
 
 线上server/dist更新清单仍为0.6.1/code193。当前main与本地origin/main仍为8cc26c5，先前dirty/untracked保留。本轮未执行提交、标签、推送、发布或上传。
 
@@ -59,22 +61,22 @@ B使用原有三张短期纹理和同一Layer，alpha交接时临时Canvas图层
 - 每段原始录屏8秒，顺序为进入、顶栏返回、再次进入、系统返回。录制前检查应用前台及通知遮挡，拒绝有顶部横幅的输入段。
 - 导出视频仅裁顶部100px系统状态栏，保留App标题和底栏。A254帧、B218帧，导出与原视频帧数相同，PTS最大差0，保持原速。全系统栏原始媒体分析完成后删除，仅保留摘要。
 
-A-app SHA256为`7dceaf4c10cadc01b822eaf9648f9520783ecbf21f888dc5f3e0c0a10edd5900`，B-app为`d3ecf06cba47783298c4080996ca2905d9e808c543bb9066c1092456add76a86`。原始媒体摘要和清理明细见[cleanup.json](build/v062b4-ab/cleanup.json)。
+A-app SHA256为`7dceaf4c10cadc01b822eaf9648f9520783ecbf21f888dc5f3e0c0a10edd5900`，B-app为`d3ecf06cba47783298c4080996ca2905d9e808c543bb9066c1092456add76a86`。原始媒体摘要和清理明细见[cleanup.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
-最终证据目录为[build/v062b4-ab](build/v062b4-ab)。
+最终证据目录为[build/v062b4-ab](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 | 用途 | 文件 |
 | --- | --- |
-| A完整操作 | [A-app.mp4](build/v062b4-ab/A-app.mp4) |
-| B完整操作 | [B-app.mp4](build/v062b4-ab/B-app.mp4) |
-| 进入25%/50%/75%，上A下B | [AB-push-25-50-75.jpg](build/v062b4-ab/AB-push-25-50-75.jpg) |
-| 系统返回25%/50%/75%，上A下B | [AB-system-pop-25-50-75.jpg](build/v062b4-ab/AB-system-pop-25-50-75.jpg) |
-| A进入六帧 | [A-push-keyframes.jpg](build/v062b4-ab/A-push-keyframes.jpg) |
-| B进入六帧 | [B-push-keyframes.jpg](build/v062b4-ab/B-push-keyframes.jpg) |
-| A顶栏返回六帧 | [A-top-pop-keyframes.jpg](build/v062b4-ab/A-top-pop-keyframes.jpg) |
-| B顶栏返回六帧 | [B-top-pop-keyframes.jpg](build/v062b4-ab/B-top-pop-keyframes.jpg) |
-| A系统返回六帧 | [A-system-pop-keyframes.jpg](build/v062b4-ab/A-system-pop-keyframes.jpg) |
-| B系统返回六帧 | [B-system-pop-keyframes.jpg](build/v062b4-ab/B-system-pop-keyframes.jpg) |
+| A完整操作 | [A-app.mp4](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| B完整操作 | [B-app.mp4](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| 进入25%/50%/75%，上A下B | [AB-push-25-50-75.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| 系统返回25%/50%/75%，上A下B | [AB-system-pop-25-50-75.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| A进入六帧 | [A-push-keyframes.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| B进入六帧 | [B-push-keyframes.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| A顶栏返回六帧 | [A-top-pop-keyframes.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| B顶栏返回六帧 | [B-top-pop-keyframes.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| A系统返回六帧 | [A-system-pop-keyframes.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| B系统返回六帧 | [B-system-pop-keyframes.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
 
 六帧均为约0%、10%、25%、50%、75%、100%。时刻由实际VFR录屏PTS及代码几何/局部像素拟合估计。A由被遮挡父列表文字估时，B由局部卡片上方间隙估时，B起点可能偏2–3帧。百分比为近似视觉阶段，未采集Animator/vsync遥测。
 
@@ -96,9 +98,9 @@ A-app SHA256为`7dceaf4c10cadc01b822eaf9648f9520783ecbf21f888dc5f3e0c0a10edd5900
 
 人工检查两张并排图及各方向六帧后，A的全页生长关系更完整，但巨大纸面阶段仍存在。B在此前始终保留来源与父列表参照，局部扩张明显、目标接入更克制，较适合此单开关页面。B的末段80ms整体交接观感较快，选择仍由用户决定。
 
-父列表边缘被容器覆盖时会有正常几何遮挡，A仍会截到相邻行，未发现闪烁或终态旧字残留。两版初态底栏轮廓下缘已经可见“恢复出厂”等父列表文字，A约75%消失，B随旧场景退出，100%目标页均消失。源码为content填满父容器、navHost叠于其上、pageScroll允许padding外绘制，这属于原设置父列表与浮动底栏的布局关系。本轮没有改动它，不能把它描述成host外泄漏。专门对照见[AB-bottom-initial-to-final.png](build/v062b4-ab/AB-bottom-initial-to-final.png)。
+父列表边缘被容器覆盖时会有正常几何遮挡，A仍会截到相邻行，未发现闪烁或终态旧字残留。两版初态底栏轮廓下缘已经可见“恢复出厂”等父列表文字，A约75%消失，B随旧场景退出，100%目标页均消失。源码为content填满父容器、navHost叠于其上、pageScroll允许padding外绘制，这属于原设置父列表与浮动底栏的布局关系。本轮没有改动它，不能把它描述成host外泄漏。专门对照见[AB-bottom-initial-to-final.png](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
-详细离线数据为[A-visual-analysis.json](build/v062b4-ab/A-visual-analysis.json)、[B-visual-analysis.json](build/v062b4-ab/B-visual-analysis.json)及[blank-and-identity-metrics.json](build/v062b4-ab/blank-and-identity-metrics.json)。
+详细离线数据为[A-visual-analysis.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)、[B-visual-analysis.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)及[blank-and-identity-metrics.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 ## 构建与回归
 
@@ -140,9 +142,9 @@ A-app SHA256为`7dceaf4c10cadc01b822eaf9648f9520783ecbf21f888dc5f3e0c0a10edd5900
 | CURRENT_TASK.md、PROJECT_CONTEXT.md、DECISIONS.md、RELEASE_PROCESS.md | 更新真实交接状态和实验边界 |
 | V062_BETA4_AB_REPORT.md | 本报告 |
 
-原根/底栏实现、V061_DELIVERY_REPORT及server/dist清单共12份文件摘要与修改前一致。MainActivity剔除本轮视觉适配行后与之前相同，PageCrossfade仅增selector、UiTokens仅增默认值。[protection-check.json](build/v062b4-ab/protection-check.json)保留检查结果。之前Git diff中的其他修改继续保留。
+原根/底栏实现、V061_DELIVERY_REPORT及server/dist清单共12份文件摘要与修改前一致。MainActivity剔除本轮视觉适配行后与之前相同，PageCrossfade仅增selector、UiTokens仅增默认值。[protection-check.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)保留检查结果。之前Git diff中的其他修改继续保留。
 
-修改前全部脏源码和文档、beta.3 APK保存在[before](build/v062b4-ab/before)，[before-manifest.json](build/v062b4-ab/before-manifest.json)含摘要。本轮从该快照生成[this-round.patch](build/v062b4-ab/this-round.patch)，只执行`git apply --reverse --check`验证，未应用。旧code196 APK仅留作证据，手机当前code197内切换视觉即可比较。
+修改前全部脏源码和文档、beta.3 APK保存在[before](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，[before-manifest.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)含摘要。本轮从该快照生成[this-round.patch](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，只执行`git apply --reverse --check`验证，未应用。旧code196 APK仅留作证据，手机当前code197内切换视觉即可比较。
 
 ## 独立切换
 

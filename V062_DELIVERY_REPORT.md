@@ -1,5 +1,7 @@
 # 0.6.2 正式版安装包交付
 
+> 2026-11-12归档说明：证据链接改为所属ZIP，原路径与包内成员见[归档记录](ARCHIVE_REPORT_20261112.md)。源码归档已剔除生成物，原发布摘要仍为历史记录；中间Beta包按用户选择不保留。
+
 2026-11-12。根据用户反馈修正容器过渡粗边框，并按用户要求转为正式版本号。随后用户授权发布，最终渠道及更新状态见[V062_PUBLISH_REPORT.md](V062_PUBLISH_REPORT.md)。
 
 ## 安装包
@@ -20,11 +22,11 @@ SettingsContainerTransform.measureSource改用newDrawable().mutate()，保留原
 
 ## 实际验证
 
-- PowerShell build.ps1 -NoUpload完整构建通过，见[build.log](build/v062-final/build.log)。
-- 完整JVM回归通过，含容器61678项、A/B52937项、设置6219项、底栏365项、来源历史145项和根页1160项，见[jvm.log](build/v062-final/jvm.log)。
-- Android QA增加实际Session描边直边像素厚度检查，期望与普通1dp线宽一致。revision-v062b8使用最终classes编译通过，见[qa-compile.log](build/v062-final/qa-compile.log)。
-- 验包通过4模型、双ARM共8个原生库、固定运行库、字体、许可、QA隔离及包体检查，见[apk.json](build/v062-final/apk.json)。版本、签名及交付摘要见[delivery.json](build/v062-final/delivery.json)。
-- git diff --check及独立修改补丁反向适用检查通过，开始前48份文件已保存于[before](build/v062-final/before)。
+- PowerShell build.ps1 -NoUpload完整构建通过，见[build.log](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
+- 完整JVM回归通过，含容器61678项、A/B52937项、设置6219项、底栏365项、来源历史145项和根页1160项，见[jvm.log](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
+- Android QA增加实际Session描边直边像素厚度检查，期望与普通1dp线宽一致。revision-v062b8使用最终classes编译通过，见[qa-compile.log](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
+- 验包通过4模型、双ARM共8个原生库、固定运行库、字体、许可、QA隔离及包体检查，见[apk.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。版本、签名及交付摘要见[delivery.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
+- git diff --check及独立修改补丁反向适用检查通过，开始前48份文件已保存于[before](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 ADB设备列表为空，本轮Android QA只完成编译，细边框的实际高密度手机观感及进入/返回仍待用户安装验收。
 
@@ -32,4 +34,4 @@ ADB设备列表为空，本轮Android QA只完成编译，细边框的实际高�
 
 SettingsContainerTransform.java修正轮廓克隆和外影，UpgradeSmoke.java增加像素回归检查，AndroidManifest.xml与ReleaseNotes.java转为0.6.2/code202，CURRENT_TASK.md、DECISIONS.md及本报告记录交接。
 
-通用接入清单见[V062_BETA8_NAVIGATION_REPORT.md](V062_BETA8_NAVIGATION_REPORT.md)。本轮补丁和保护核对见[final-audit.json](build/v062-final/final-audit.json)。
+通用接入清单见[V062_BETA8_NAVIGATION_REPORT.md](V062_BETA8_NAVIGATION_REPORT.md)。本轮补丁和保护核对见[final-audit.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。

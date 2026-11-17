@@ -10,7 +10,8 @@ final class GestureSpring implements Choreographer.FrameCallback {
     private final float responseSeconds;
     private boolean running;
     private float value, velocity, target, origin, initialVelocity;
-    private long startNanos;
+    private final AnimationFrameClock frameClock=new AnimationFrameClock(AnimationFrameClock.MAX_PRESENTED_SECONDS);
+    private double presentedSeconds;
     private long generation;
 
     GestureSpring(Listener listener) { this(listener,UiTokens.GESTURE_RESPONSE_SECONDS); }
@@ -33,7 +34,8 @@ final class GestureSpring implements Choreographer.FrameCallback {
         target = destination;
         velocity = initialVelocity = velocityPerSecond;
         // Do not spend the first display frame reporting the unchanged release position.
-        startNanos = System.nanoTime();
+        frameClock.start(System.nanoTime());
+        presentedSeconds = 0;
         long token = generation;
         if (!ValueAnimator.areAnimatorsEnabled()
                 || Math.abs(value - target) < .001f && Math.abs(velocity) < .001f) {
@@ -50,7 +52,8 @@ final class GestureSpring implements Choreographer.FrameCallback {
     @Override public void doFrame(long frameTimeNanos) {
         if (!running) return;
         long token = generation;
-        double seconds = Math.max(0d,(frameTimeNanos - startNanos) / 1_000_000_000d);
+        presentedSeconds += frameClock.advance(frameTimeNanos);
+        double seconds = presentedSeconds;
         // Damping ratio 1.0: no decorative overshoot or fixed-duration restart.
         double omega = 2d * Math.PI / responseSeconds;
         double displacement = origin - target;

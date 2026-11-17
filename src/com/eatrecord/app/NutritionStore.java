@@ -69,6 +69,19 @@ public final class NutritionStore {
         } catch (JSONException ignored) { }
         return total;
     }
+    /** Shared by home, calendar and cached diary projections. */
+    public static int displayDayCalories(JSONObject day) {
+        if(day==null)return 0;
+        if(day.optBoolean("manualCaloriesOverride")){
+            if(day.optBoolean("manualCaloriesByMeal")){
+                double total=0;for(String key:MEALS){double value=displayMealCalories(day,key);if(Double.isFinite(value))total+=value;}return (int)Math.round(total);
+            }
+            if(day.optInt("manualCaloriesTotal")>0)return day.optInt("manualCaloriesTotal");
+            int total=0;for(String key:MEALS){JSONObject meal=day.optJSONObject(key);if(meal!=null&&!meal.optBoolean("skipped"))total+=Math.max(0,meal.optInt("manualCalories"));}return total;
+        }
+        JSONObject total=totals(day);
+        return total.optInt("count")>0?(int)Math.round(total.optDouble("caloriesKcal")):Math.max(0,day.optInt("calories"));
+    }
     /** Read-only meal projection. NaN means unknown, rather than a measured zero. */
     public static double displayMealCalories(JSONObject day, String key) {
         JSONObject meal = day == null ? null : day.optJSONObject(key);

@@ -1,5 +1,7 @@
 # 0.6.2-beta.7 夜间设置卡片颜色一致性
 
+> 2026-11-12归档说明：证据链接改为所属ZIP，原路径与包内成员见[归档记录](ARCHIVE_REPORT_20261112.md)。源码归档已剔除生成物，原发布摘要仍为历史记录；中间Beta包按用户选择不保留。
+
 2026-11-11。首次进入“其他设置”、子页返回和重新进入均已显示原暖暗色。普通包已保留数据安装到魅族21。
 
 ## 原因与修改
@@ -23,17 +25,17 @@ PageCrossfade的普通settings路径现先在旧页不透明覆盖下，让已�
 | 两次日→夜循环后进入 | 曾不一致 | 43/38/34 |
 | 动画0的首次进入与返回 | 本轮新增检查 | 43/38/34 |
 
-暖暗色对应原主题`#2B2622`。日间两次循环均为原卡片色255/253/247。最终11张截图的采样值与各自主题预期一致，数据见[color-final.json](build/v062b7-night/color-final.json)。
+暖暗色对应原主题`#2B2622`。日间两次循环均为原卡片色255/253/247。最终11张截图的采样值与各自主题预期一致，数据见[color-final.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
-- [修复前后对照，左前右后](build/v062b7-night/before-after.png)
-- [最终首次进入](build/v062b7-night/final-other-first.png)
-- [最终我页卡片](build/v062b7-night/final-me-card.png)
-- [冷启动首次进入](build/v062b7-night/after-cold-first.png)
-- [餐次返回](build/v062b7-night/after-top-return.png)
-- [普通子页返回](build/v062b7-night/after-ordinary-return.png)
-- [夜间餐次进退录像](build/v062b7-night/night-app.mp4)
+- [修复前后对照，左前右后](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [最终首次进入](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [最终我页卡片](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [冷启动首次进入](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [餐次返回](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [普通子页返回](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [夜间餐次进退录像](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
 
-录像只裁顶部100px系统栏，249帧，导出前后逐帧PTS差0，保持原速。摘要为[media-final.json](build/v062b7-night/media-final.json)。
+录像只裁顶部100px系统栏，249帧，导出前后逐帧PTS差0，保持原速。摘要为[media-final.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 ## 回归与构建
 
@@ -45,15 +47,15 @@ PageCrossfade的普通settings路径现先在旧页不透明覆盖下，让已�
 - 验包通过，模型4个、双ARM共8库、固定运行库摘要6份、字体/许可及QA隔离有效，普通包无debuggable。
 - v2/v3原证书有效，证书SHA256为`7a279f9102fa24c73e03f8cbe94eef79eeb9276a552acf505e8c6abc9d0a71ee`。
 
-产物为[EatRecord-0.6.2-beta.7-debug.apk](dist/EatRecord-0.6.2-beta.7-debug.apk)，code200，121216113 bytes，min26/target37，SHA256为`b328ef95815089aaf6b0259096797d8613453aca62efa4b9e6c63289a62d07ba`。
+产物为EatRecord-0.6.2-beta.7-debug.apk（历史中间包，按归档策略不保留），code200，121216113 bytes，min26/target37，SHA256为`b328ef95815089aaf6b0259096797d8613453aca62efa4b9e6c63289a62d07ba`。
 
-非录屏四组普通设置往返采样446帧，deadline jank为33次、7.40%，p50/p90/p95/p99为9/21/53/101ms。该单轮采样仍有慢帧，日志为[gfx-final.txt](build/v062b7-night/gfx-final.txt)。直接取消缓存的诊断采样为19.15%，两次帧数和运行状态不同，保留为本机观察。
+非录屏四组普通设置往返采样446帧，deadline jank为33次、7.40%，p50/p90/p95/p99为9/21/53/101ms。该单轮采样仍有慢帧，日志为[gfx-final.txt](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。直接取消缓存的诊断采样为19.15%，两次帧数和运行状态不同，保留为本机观察。
 
 ## 交接与范围
 
-生产修改为PageCrossfade的首次绘制与建缓存时序、Manifest/ReleaseNotes的beta.7/code200。测试修改仅UpgradeSmoke。餐次A、底栏、根Tab及业务源码的本轮前摘要校验见[protection-final.json](build/v062b7-night/protection-final.json)。
+生产修改为PageCrossfade的首次绘制与建缓存时序、Manifest/ReleaseNotes的beta.7/code200。测试修改仅UpgradeSmoke。餐次A、底栏、根Tab及业务源码的本轮前摘要校验见[protection-final.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
-本轮开始前43份文件与beta.6普通APK保存在[before](build/v062b7-night/before)。修改补丁为[this-round.patch](build/v062b7-night/this-round.patch)，只检查反向适用性，最终检查为[final-audit.json](build/v062b7-night/final-audit.json)。
+本轮开始前43份文件与beta.6普通APK保存在[before](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。修改补丁为[this-round.patch](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，只检查反向适用性，最终检查为[final-audit.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 原设置动效关闭开关和异常归位路径继续可用。当前main及本地origin/main为8cc26c5，正式更新清单仍为0.6.1/code193，交付保持本地Beta及未提交工作区。
 

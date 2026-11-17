@@ -39,8 +39,8 @@ public final class UiTokens {
     static float weekWaterFrequency(int weekday){return WEEK_WATER_FREQUENCY[Math.floorMod(weekday,7)];}
     static float weekWaterPhase(int weekday){return WEEK_WATER_PHASE[Math.floorMod(weekday,7)];}
     public static final int SOFT_PAGE_SHIFT_DP = 16;
-    public static final int BOOK_OPEN_MS = 1000;
-    public static final int BOOK_CLOSE_MS = 800;
+    public static final int BOOK_OPEN_MS = 620;
+    public static final int BOOK_CLOSE_MS = 520;
     public static final int NOTEBOOK_RADIUS_DP = 24;
     public static final int BOOK_COVER_RADIUS_DP = 18;
     public static final float GESTURE_RESPONSE_SECONDS = .4f;

@@ -122,8 +122,6 @@ public final class ProfileSettingIcon extends View {
             path.moveTo(12, 2); path.quadTo(13.5f, 9.5f, 21, 11);
             path.quadTo(13.5f, 12.5f, 12, 20); path.quadTo(10.5f, 12.5f, 3, 11);
             path.quadTo(10.5f, 9.5f, 12, 2); path.close(); canvas.drawPath(path, paint);
-            line(canvas, 20, 2, 20, 6); line(canvas, 18, 4, 22, 4);
-            dot(canvas, 4, 20, 1.2f);
         } else if ("switch".equals(kind)) {
             line(canvas,3,7,21,7);path.moveTo(16,2);path.lineTo(21,7);path.lineTo(16,12);canvas.drawPath(path,paint);
             line(canvas,21,17,3,17);path.reset();path.moveTo(8,12);path.lineTo(3,17);path.lineTo(8,22);canvas.drawPath(path,paint);

@@ -27,6 +27,7 @@ import android.widget.TextView;
 import org.json.JSONObject;
 import java.io.File;
 import java.lang.ref.WeakReference;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -53,6 +54,8 @@ public final class TodayPaperView extends LinearLayout {
     private final Activity activity;
     private final boolean night;
     private final Listener listener;
+    private final List<View> mediaRows = new ArrayList<>();
+    private int viewportHeight;
 
     public TodayPaperView(Activity activity, boolean night, JSONObject day, Listener listener) {
         super(activity);
@@ -76,24 +79,19 @@ public final class TodayPaperView extends LinearLayout {
     private void addEmptyGuide(){
         LinearLayout guide=new LinearLayout(activity);guide.setOrientation(VERTICAL);guide.setGravity(Gravity.CENTER);
         guide.setTag("day_empty_guide");guide.setPadding(0,dp(16),0,dp(16));guide.setMinimumHeight(dp(230));
-        // This is a hint, not an overlapping add target: only the bottom star adds a photo.
+        // The dock menu owns capture and writing actions. The empty guide stays informational.
         guide.setFocusable(false);guide.setClickable(false);
         guide.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
-        guide.setContentDescription("还没有餐食，点击下方星标可以添加美食喔");
+        guide.setContentDescription("还没有餐食，点击右下角餐食按钮添加美食");
         View doodle=new View(activity){private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);private final Path path=new Path();
             @Override protected void onDraw(Canvas c){float x=getWidth()/2f,y=getHeight()*.43f,s=dp(1);p.setColor(UiTokens.secondary(night));p.setAlpha(85);p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(dp(2));p.setStrokeCap(Paint.Cap.ROUND);
                 path.reset();path.moveTo(x-35*s,y);path.cubicTo(x-30*s,y+40*s,x+30*s,y+40*s,x+35*s,y);path.close();c.drawPath(path,p);
                 for(int i=-1;i<=1;i++){path.reset();path.moveTo(x+i*15*s,y-9*s);path.cubicTo(x+(i*15-8)*s,y-20*s,x+(i*15+8)*s,y-23*s,x+i*15*s,y-34*s);c.drawPath(path,p);}
             }};
         doodle.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);guide.addView(doodle,new LayoutParams(dp(110),dp(90)));
-        TextView instruction=text("点击下方星标可以添加美食喔",17,UiTokens.secondary(night));
+        TextView instruction=text("点击右下角餐食按钮添加美食",17,UiTokens.secondary(night));
         instruction.setTag("day_empty_instruction");
         guide.addView(instruction,new LayoutParams(-1,-2));
-        View arrow=new View(activity){private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);private final Path path=new Path();
-            @Override protected void onDraw(Canvas c){float x=getWidth()/2f,y=dp(8);p.setColor(UiTokens.secondary(night));p.setAlpha(85);p.setStyle(Paint.Style.STROKE);p.setStrokeWidth(dp(2));p.setStrokeCap(Paint.Cap.ROUND);p.setStrokeJoin(Paint.Join.ROUND);
-                path.reset();path.moveTo(x+dp(6),y);path.cubicTo(x+dp(35),y+dp(30),x-dp(29),y+dp(29),x,y+dp(64));path.moveTo(x-dp(10),y+dp(59));path.lineTo(x,y+dp(64));path.lineTo(x+dp(4),y+dp(53));c.drawPath(path,p);
-            }};
-        arrow.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);guide.addView(arrow,new LayoutParams(dp(90),dp(80)));
         // ScrollView.fillViewport measures the paper to its visible height. The
         // guide receives the space below the summary and centers as one group.
         addView(guide,new LayoutParams(-1,0,1f));
@@ -102,7 +100,12 @@ public final class TodayPaperView extends LinearLayout {
     public FrameLayout wrapInViewport(ScrollView scroll) {
         Drawable paper = getBackground();
         setBackground(null); setMinimumHeight(0); setClipToOutline(false);
-        FrameLayout viewport = new FrameLayout(activity);
+        FrameLayout viewport = new FrameLayout(activity) {
+            @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                viewportHeight = MeasureSpec.getSize(heightSpec);
+                super.onMeasure(widthSpec, heightSpec);
+            }
+        };
         viewport.setTag("today_paper_viewport"); viewport.setBackground(paper); viewport.setClipToOutline(true);
         scroll.setTag("today_paper_scroll"); scroll.setFillViewport(true);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER); scroll.setVerticalScrollBarEnabled(false);
@@ -110,6 +113,25 @@ public final class TodayPaperView extends LinearLayout {
         scroll.addView(this, new ScrollView.LayoutParams(-1, -2));
         viewport.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
         return viewport;
+    }
+    @Override protected void onMeasure(int widthSpec, int heightSpec) {
+        super.onMeasure(widthSpec, heightSpec);
+        if (viewportHeight <= 0 || mediaRows.isEmpty()) return;
+        View summary = findViewWithTag("today_summary");
+        int summaryHeight = summary == null ? 0 : summary.getMeasuredHeight();
+        LayoutParams first = (LayoutParams) mediaRows.get(0).getLayoutParams();
+        // Keep one meal prominent while shortening the swipe distance to its neighbour.
+        // Intrinsic image and text height still wins in a short or large-type window.
+        int rowHeight = Math.max(dp(64), viewportHeight - getPaddingTop() - getPaddingBottom()
+                - summaryHeight - first.topMargin - dp(56));
+        boolean changed = false;
+        for (View row : mediaRows) {
+            if (row.getMinimumHeight() != rowHeight) {
+                row.setMinimumHeight(rowHeight);
+                changed = true;
+            }
+        }
+        if (changed) super.onMeasure(widthSpec, heightSpec);
     }
     private TextView text(String value, float size, int color) {
         TextView label = PaperComponents.text(activity, value, size, color, false);
@@ -133,11 +155,13 @@ public final class TodayPaperView extends LinearLayout {
         row.setTag((entry.isFood()?"day_food_":"day_legacy_") + entry.mealKey + "_" + id);
         if(!entry.isFood())row.setBackground(pressBackground());
         if (!entry.fileName.isEmpty()) {
+            row.setGravity(Gravity.CENTER);
+            mediaRows.add(row);
             FoodImage image = new FoodImage(activity, entry.fileName, entry.fallbackFile, entry.sticker, night);
             image.setMediaRotation(NutritionStore.displayRotation(entry.item));
             image.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
             View media = listener == null ? image : listener.editableMedia(entry, image);
-            LayoutParams imageParams = new LayoutParams(dp(entry.sticker ? 184 : 172), dp(entry.sticker ? 184 : 172));
+            LayoutParams imageParams = new LayoutParams(dp(entry.sticker ? 204 : 192), dp(entry.sticker ? 204 : 192));
             imageParams.bottomMargin = dp(10);
             row.addView(media, imageParams);
         }
@@ -189,15 +213,21 @@ public final class TodayPaperView extends LinearLayout {
     /** Faint ruling belongs to the paper, not to individual food components. */
     private final class JournalPaper extends Drawable {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF paperBounds = new RectF();
+        private final Path clip = new Path();
+        @Override protected void onBoundsChange(Rect bounds) {
+            paperBounds.set(bounds.left + .5f, bounds.top + .5f, bounds.right - .5f, bounds.bottom - .5f);
+            clip.reset();
+            clip.addRoundRect(paperBounds, dp(UiTokens.CARD_RADIUS), dp(UiTokens.CARD_RADIUS), Path.Direction.CW);
+        }
         @Override public void draw(Canvas canvas) {
             Rect b = getBounds();
-            RectF bounds = new RectF(b.left + .5f, b.top + .5f, b.right - .5f, b.bottom - .5f);
             float radius = dp(UiTokens.CARD_RADIUS);
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(UiTokens.card(night));
-            canvas.drawRoundRect(bounds, radius, radius, paint);
+            canvas.drawRoundRect(paperBounds, radius, radius, paint);
             canvas.save();
-            Path clip = new Path(); clip.addRoundRect(bounds, radius, radius, Path.Direction.CW); canvas.clipPath(clip);
+            canvas.clipPath(clip);
             paint.setColor(night ? Color.argb(19, 220, 199, 170) : Color.argb(28, 175, 148, 115));
             paint.setStrokeWidth(Math.max(.5f, dp(1) * .4f));
             for (float y = b.top + dp(120); y < b.bottom - dp(18); y += dp(38))
@@ -206,7 +236,7 @@ public final class TodayPaperView extends LinearLayout {
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(Math.max(1f, dp(1) * .7f));
             paint.setColor(UiTokens.line(night));
-            canvas.drawRoundRect(bounds, radius, radius, paint);
+            canvas.drawRoundRect(paperBounds, radius, radius, paint);
             paint.setStyle(Paint.Style.FILL);
         }
         @Override public void getOutline(android.graphics.Outline outline) {
@@ -229,6 +259,7 @@ public final class TodayPaperView extends LinearLayout {
         private final boolean sticker, night;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final RectF destination = new RectF();
+        private final Path imageClip = new Path();
         private final FoodImageGeometry geometry = new FoodImageGeometry();
         private Bitmap bitmap;
         private Future<?> request;
@@ -351,10 +382,10 @@ public final class TodayPaperView extends LinearLayout {
             canvas.save();
             canvas.rotate(displayRotation, getWidth() / 2f, getHeight() / 2f);
             if (!renderedSticker) {
-                Path clip = new Path();
                 float radius = PaperComponents.dp(getContext(), 16);
-                clip.addRoundRect(destination, radius, radius, Path.Direction.CW);
-                canvas.clipPath(clip);
+                imageClip.reset();
+                imageClip.addRoundRect(destination, radius, radius, Path.Direction.CW);
+                canvas.clipPath(imageClip);
             }
             canvas.drawBitmap(bitmap, null, destination, paint);
             canvas.restore();

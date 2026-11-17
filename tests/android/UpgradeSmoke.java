@@ -1670,7 +1670,7 @@ public final class UpgradeSmoke extends Instrumentation {
         if(!"08:05".equals(NutritionStore.read(prefs,NutritionStore.PROFILE).optString("breakfastNotificationTime")))throw new Exception("Cancelling manual reminder persisted the draft time");
         // An empty new home has one gentle guide and the same real recognition button.
         uiAssert(()->{setMainField(screen,"days",new JSONObject());prefs.edit().putString(NutritionStore.DAYS,"{}").commit();setMainField(screen,"homeDateKey",date);setMainField(screen,"homeCalendarExpanded",false);invoke(screen,"showTab",new Class[]{int.class,boolean.class},0,false);});waitForIdleSync();Thread.sleep(250);
-        uiAssert(()->{View decor=screen.getWindow().getDecorView(),guide=decor.findViewWithTag("day_empty_guide");if(guide==null||guide.isClickable()||!visibleText(guide).contains("点击下方星标可以添加美食喔")||guide.performClick())throw new Exception("Empty paper hint still acts as an accidental add target");revisionRecognitionGlyph(screen,c);if(visibleText(decor).contains("添加第一张餐图")||visibleText(guide).contains("或轻点下方的识别星标"))throw new Exception("Duplicate old empty-page add component remains");assertRenderPure(screen,prefs,"{}");((View)field(screen,"fab")).performClick();});
+        uiAssert(()->{View decor=screen.getWindow().getDecorView(),guide=decor.findViewWithTag("day_empty_guide");if(guide==null||guide.isClickable()||!visibleText(guide).contains("点击右下角餐食按钮添加美食")||guide.performClick())throw new Exception("Empty paper hint still acts as an accidental add target");revisionRecognitionGlyph(screen,c);if(visibleText(decor).contains("添加第一张餐图")||visibleText(guide).contains("或轻点下方的识别星标"))throw new Exception("Duplicate old empty-page add component remains");assertRenderPure(screen,prefs,"{}");((View)field(screen,"fab")).performClick();});
         waitForIdleSync();Thread.sleep(100);
         if(node("早餐")==null||node("午餐")==null||node("晚餐")==null)throw new Exception("Bottom star no longer opens the meal selection");screenshot(name+"-empty-guide-meal-choice");sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);waitForIdleSync();screenshot(name+"-empty-guide");
         uiAssert(()->{setMainField(screen,"days",fixture);prefs.edit().putString(NutritionStore.DAYS,before).commit();invoke(screen,"renderCurrent",new Class[]{});assertRenderPure(screen,prefs,before);});
@@ -3942,7 +3942,7 @@ public final class UpgradeSmoke extends Instrumentation {
             View root=currentRootV33(screen).page(0),instruction=root.findViewWithTag("day_empty_instruction");
             ViewGroup paper=(ViewGroup)root.findViewWithTag("today_paper"),guide=(ViewGroup)root.findViewWithTag("day_empty_guide");
             if(guide==null||paper==null||instruction==null||guide.isClickable()||guide.isLongClickable()||guide.isFocusable()||guide.performClick())throw new Exception("Empty hint still accepts the accidental add click");
-            String text=visibleText(guide);if(!text.trim().equals("点击下方星标可以添加美食喔")||guide.getChildCount()!=3)throw new Exception("Empty hint has duplicate/old explanatory text");
+            String text=visibleText(guide);if(!text.trim().equals("点击右下角餐食按钮添加美食")||guide.getChildCount()!=2)throw new Exception("Empty hint has duplicate/old explanatory text");
             if(guide.getParent()!=paper||paper.indexOfChild(guide)!=1||guide.getHeight()<=0)throw new Exception("Empty guide is not the body below the actual summary");
             float center=(guide.getChildAt(0).getTop()+guide.getChildAt(guide.getChildCount()-1).getBottom())*.5f;
             if(Math.abs(center-guide.getHeight()*.5f)>PaperComponents.dp(c,3))throw new Exception("Visible empty hint group is not vertically centered inside its real remaining body");
@@ -6467,6 +6467,2465 @@ public final class UpgradeSmoke extends Instrumentation {
         if(requests.get()!=0)throw new Exception("Generic navigation made a service request");
         Bundle result=new Bundle();result.putString("stream","PASS generic A navigation fixture: real click origins, accepted route/Entry identities, long-page text metadata, nested and skipped parents, alternate Favorites origins, cross-entry fallback and stale completion, visual cleanup and unchanged fixture; HTTP(S)=0. Isolated QA only; not visual acceptance.\n");finish(Activity.RESULT_OK,result);
     }
+    private void rootExitTimelineV063(MainActivity screen,int target)throws Exception {
+        boolean beta2="revision-v063b2".equals(args.getString("scenario"));
+        final RootPagePager[] cached={null};
+        final boolean[] dirty={false};
+        final int[] imageGeneration={-1};
+        if(beta2&&target==0)uiAssert(()->{
+            cached[0]=(RootPagePager)field(screen,"rootPager");
+            dirty[0]=(Boolean)field(screen,"rootPagesDirty");
+            View image=cached[0].page(0).findViewWithTag("day_entry_image");
+            if(image!=null)imageGeneration[0]=(Integer)ownField(image,"generation");
+        });
+        uiAssert(()->((View)invoke(screen,"findNavItem",new Class[]{int.class},target)).performClick());
+        if(!android.animation.ValueAnimator.areAnimatorsEnabled()){
+            settleV15();
+            uiAssert(()->{
+                if((int)field(screen,"currentTab")!=target||Boolean.TRUE.equals(field(screen,"inBookDetail")))
+                    throw new Exception("No-animation root exit lost its destination");
+            });
+            return;
+        }
+        final android.animation.ValueAnimator[] clock={null};
+        long deadline=android.os.SystemClock.uptimeMillis()+3000;
+        do {
+            uiAssert(()->{
+                PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");
+                if(flow==null||ownField(flow,"animator")==null)return;
+                Object slide=ownField(flow,"image");
+                if(slide==null)return;
+                if(ownField(ownField(flow,"container"),"current")!=null)
+                    throw new Exception("Bottom navigation used a child container origin");
+                View host=(View)field(screen,"content");
+                if(Math.abs(((Number)ownField(slide,"travel")).floatValue()-host.getWidth())>1)
+                    throw new Exception("Root exit lost the full-width sheet motion");
+                clock[0]=(android.animation.ValueAnimator)ownField(flow,"animator");
+                clock[0].pause();clock[0].setCurrentPlayTime(clock[0].getDuration()/2);
+                if(host instanceof android.view.ViewGroup&&((android.view.ViewGroup)host).getChildCount()>0){
+                    View arriving=((android.view.ViewGroup)host).getChildAt(0);
+                    if(Math.abs(arriving.getTranslationX())<1||arriving.getAlpha()!=1)
+                        throw new Exception("Bottom navigation jumped instead of moving the real target");
+                }
+                if(!Boolean.TRUE.equals(field(screen,"navPageTransition")))
+                    throw new Exception("Root exit lost its navigation owner");
+                if(beta2&&target==0){
+                    RootPagePager accepted=(RootPagePager)field(screen,"rootPager");
+                    if((accepted==cached[0])==dirty[0])throw new Exception("Today reuse ignored clean/dirty ownership");
+                    View day=accepted.page(0).findViewWithTag("today_day_pager");
+                    if(accepted.ownsView(day)||Boolean.TRUE.equals(ownField(day,"rootActive")))
+                        throw new Exception("Today activated while the outer page was still moving");
+                    BottomNavIndicator nav=(BottomNavIndicator)field(screen,"bottomNavMotion");
+                    if(Boolean.TRUE.equals(ownField(nav,"preparingPage")))
+                        throw new Exception("Prepared animator did not release the bottom-bar clock");
+                }
+            });
+            if(clock[0]==null)Thread.sleep(5);
+        }while(clock[0]==null&&android.os.SystemClock.uptimeMillis()<deadline);
+        if(clock[0]==null)throw new Exception("Bottom navigation did not create an animator");
+        uiAssert(()->clock[0].end());settleV15();
+        uiAssert(()->{
+            if((int)field(screen,"currentTab")!=target||Boolean.TRUE.equals(field(screen,"inBookDetail")))
+                throw new Exception("Root exit committed the wrong destination");
+            if(((PageCrossfade)field(screen,"pageCrossfade")).active()
+                    ||Boolean.TRUE.equals(field(screen,"navPageTransition")))
+                throw new Exception("Root exit did not release its visual owner");
+            if(beta2&&target==0){
+                RootPagePager accepted=(RootPagePager)field(screen,"rootPager");
+                if(!accepted.ownsView(accepted.page(0).findViewWithTag("today_day_pager")))
+                    throw new Exception("Today ownership did not resume after the outer page");
+                View image=accepted.page(0).findViewWithTag("day_entry_image");
+                if(image==null)throw new Exception("Today media disappeared after reattachment");
+                Bitmap bitmap=(Bitmap)ownField(image,"bitmap");
+                if(bitmap==null||bitmap.isRecycled())throw new Exception("Today media did not reload after reattachment");
+                if(!dirty[0]&&(Integer)ownField(image,"generation")<=imageGeneration[0])
+                    throw new Exception("Retained Today media did not restart its attachment generation");
+            }
+        });
+    }
+
+    /** Synthetic data writer for an independent QA device. Local delivery only compiles this scenario. */
+    private void revisionV063b1(Context context,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(context);
+        java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        String date="2000-03-08";
+        JSONObject fixture=new JSONObject().put(date,new JSONObject().put("breakfast",new JSONObject().put("text","导航测试餐食")));
+        if("revision-v063b2".equals(args.getString("scenario"))){
+            Bitmap image=Bitmap.createBitmap(48,48,Bitmap.Config.ARGB_8888);image.eraseColor(Color.GREEN);
+            try(FileOutputStream output=new FileOutputStream(new File(context.getFilesDir(),"qa-v063b2.png"))){
+                image.compress(Bitmap.CompressFormat.PNG,100,output);
+            }finally{image.recycle();}
+            fixture.getJSONObject(date).getJSONObject("breakfast").put("photos",new JSONArray().put("qa-v063b2.png"));
+        }
+        String before=fixture.toString();
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("autoCloudSync",false)
+                .put("aiAnalysisEnabled",false).put("foodRecognitionOnboardingSeen",true).put("nightMode",true)
+                .put("seenAnnouncementVersion",context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit())
+            throw new Exception("Cannot prepare isolated 0.6.3 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        if("revision-v063b2".equals(args.getString("scenario")))uiAssert(()->setMainField(screen,"homeDateKey",date));
+        settleV15();rootTabV33(screen,3);
+        clickNavigationV062b8(screen,"其他设置",null,"preferences");
+        rootExitTimelineV063(screen,0);
+        for(int target:new int[]{0,3}) {
+            rootTabV33(screen,1);
+            uiAssert(()->{
+                View content=(View)field(screen,"content");
+                View cover=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},content,date);
+                invoke(screen,"openBookDetail",new Class[]{String.class,View.class},date,cover);
+                Object opening=field(screen,"bookOpeningOverlay");
+                if(!android.animation.ValueAnimator.areAnimatorsEnabled())return;
+                Bitmap background=(Bitmap)ownField(opening,"outgoingScreen");
+                if(background==null||background.getPixel(0,0)!=UiTokens.paper(true))
+                    throw new Exception("Night opening snapshot rewrote the theme paper pixel");
+                if(android.os.Build.VERSION.SDK_INT>=29&&((View)opening).isForceDarkAllowed())
+                    throw new Exception("Opening bitmap can receive duplicate ForceDark");
+            });
+            settleV15();
+            rootExitTimelineV063(screen,target);
+        }
+        if("revision-v063b2".equals(args.getString("scenario"))){
+            rootTabV33(screen,1);
+            uiAssert(()->invoke(screen,"openBookDetail",new Class[]{String.class},date));settleV15();
+            uiAssert(()->setMainField(screen,"rootPagesDirty",true));
+            rootExitTimelineV063(screen,0);
+        }
+        rootTabV33(screen,1);
+        uiAssert(()->{
+            View nav=(View)invoke(screen,"findNavItem",new Class[]{int.class},1);
+            if(!"足迹".contentEquals(nav.getContentDescription()))throw new Exception("Bottom navigation label was not updated");
+            invoke(screen,"openBookDetail",new Class[]{String.class},date);
+            Object old=field(screen,"bookOpeningOverlay");
+            invoke(screen,"showTab",new Class[]{int.class,boolean.class},0,true);
+            if(old==null&&!android.animation.ValueAnimator.areAnimatorsEnabled())return;
+            if(ownField(old,"firstDrawObserver")!=null||ownField(old,"prepareAfterDraw")!=null
+                    ||ownField(old,"outgoingScreen")!=null)throw new Exception("Opening cancellation retained preparation resources");
+        });
+        settleV15();rootTabV33(screen,3);
+        uiAssert(()->invoke(screen,"openAboutSoftwarePage",new Class[]{}));settleV15();
+        uiAssert(()->{
+            if(((View)field(screen,"content")).findViewWithTag("setting_row_GitHub")==null)
+                throw new Exception("About page lost the GitHub entry");
+            assertRenderPure(screen,prefs,before);
+        });
+        if(requests.get()!=0)throw new Exception("UI scenario issued a network request");
+        Bundle result=new Bundle();result.putString("stream","PASS 0.6.3 navigation fixture: full-width settings/book root exits, mid-clock translation, night snapshot base, opening cancellation, Footprints label, GitHub entry and unchanged synthetic diary. Device visual acceptance is separate.\n");finish(Activity.RESULT_OK,result);
+    }
+
+    private JSONObject fixtureMealV063b4(Context context,String key,int color)throws Exception {
+        String source="qa-v063b4-"+key+"-source.png",cutout="qa-v063b4-"+key+"-cutout.png";
+        Bitmap image=Bitmap.createBitmap(384,384,Bitmap.Config.ARGB_8888);
+        try{
+            Canvas canvas=new Canvas(image);Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
+            paint.setColor(Color.WHITE);canvas.drawCircle(192,192,162,paint);
+            paint.setColor(color);canvas.drawCircle(192,192,126,paint);
+            paint.setColor(Color.rgb(85,140,70));canvas.drawCircle(152,156,32,paint);canvas.drawCircle(236,218,39,paint);
+            for(String file:new String[]{source,cutout})try(OutputStream output=new FileOutputStream(new File(context.getFilesDir(),file))){image.compress(Bitmap.CompressFormat.PNG,100,output);}
+        }finally{image.recycle();}
+        JSONObject food=FoodAnalysisResult.parse(RESPONSE).value;
+        food.put("id","qa-v063b4-"+key).put("sourcePhoto",source).put("cutoutFile",cutout)
+                .put("dishName","合成"+DayFoodEntries.mealTitle(key)+"餐图").put("status","completed")
+                .put("analysisStatus","completed").put("createdAt",1000L).put("userEdited",false);
+        return new JSONObject().put("foodItems",new JSONArray().put(food))
+                .put("photos",new JSONArray().put(source)).put("stickers",new JSONArray().put(cutout));
+    }
+
+    private int composePulseV063b4(ComposeBottomBar bar,String name)throws Exception {
+        Method getter=ComposeBottomBar.class.getDeclaredMethod("getAppearance");getter.setAccessible(true);
+        return ((Number)ownField(getter.invoke(bar),name)).intValue();
+    }
+
+    /** Resolve semantics before input, then inject once so a stale action result cannot toggle twice. */
+    private void tapComposeDescriptionV063b4(String description)throws Exception {
+        long deadline=android.os.SystemClock.elapsedRealtime()+3000;
+        do{
+            waitForIdleSync();
+            android.view.accessibility.AccessibilityNodeInfo target=descriptionNode(description);
+            if(target!=null&&target.isVisibleToUser()&&target.isEnabled()&&target.isClickable()){
+                Rect bounds=new Rect();target.getBoundsInScreen(bounds);
+                if(!bounds.isEmpty()){
+                    tapPointV21(bounds.exactCenterX(),bounds.exactCenterY());
+                    return;
+                }
+            }
+            Thread.sleep(100);
+        }while(android.os.SystemClock.elapsedRealtime()<deadline);
+        screenshotNowV15("v063b4-missing-compose-target");
+        throw new Exception("Missing visible Compose target before physical tap: "+description);
+    }
+
+    /** Writes only synthetic fixtures on the explicitly selected independent QA device. */
+    private void revisionV063b4(Context context,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(context);FoodDraftStore.discard(context,FoodDraftStore.pendingSources(context));
+        java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        String date=new SimpleDateFormat("yyyy-MM-dd",Locale.ROOT).format(new Date());
+        JSONObject lunch=fixtureMealV063b4(context,"lunch",Color.rgb(219,149,55));
+        JSONObject dinner=fixtureMealV063b4(context,"dinner",Color.rgb(194,103,69));
+        JSONObject day=new JSONObject().put("lunch",lunch).put("dinner",dinner).put("favorite",true);
+        String before=new JSONObject().put(date,day).toString(),totals=NutritionStore.totals(day).toString();
+        JSONObject original=new JSONObject(lunch.getJSONArray("foodItems").getJSONObject(0).toString());
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("foodAutoAnalyze",false)
+                .put("foodPhotoConsent",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false)
+                .put("mealNotificationsEnabled",false).put("foodRecognitionOnboardingSeen",true)
+                .put("nightMode","true".equals(args.getString("night")))
+                .put("seenAnnouncementVersion",context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit())
+            throw new Exception("Cannot prepare isolated 0.6.3-beta.4 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        settleV15();
+        uiAssert(()->{
+            RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+            TodayDayPager days=pager.page(0).findViewWithTag("today_day_pager");
+            View today=days.currentPage(),paper=today.findViewWithTag("today_paper"),viewport=today.findViewWithTag("today_paper_viewport");
+            if(paper==null||viewport==null)throw new Exception("Today paper is missing");
+            View first=paper.findViewWithTag("day_food_lunch_qa-v063b4-lunch"),second=paper.findViewWithTag("day_food_dinner_qa-v063b4-dinner");
+            if(first==null||second==null)throw new Exception("Synthetic two-meal fixture was not projected");
+            Rect window=screenRect(viewport),firstBounds=screenRect(first),secondBounds=screenRect(second);
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            int gap=dock.contentTopOnScreen()-window.bottom;
+            if(gap<PaperComponents.dp(context,8))throw new Exception("Today paper overlaps the dock: gap="+gap);
+            if(firstBounds.top<window.top||firstBounds.bottom>window.bottom+2)
+                throw new Exception("First meal does not fit its initial viewport: "+firstBounds+" in "+window);
+            if(secondBounds.top<window.bottom-2)throw new Exception("Second meal is exposed before scrolling");
+            View image=first.findViewWithTag("day_entry_image"),frame=(View)image.getParent();
+            if(frame.getWidth()<PaperComponents.dp(context,192)||frame.getWidth()>PaperComponents.dp(context,224))
+                throw new Exception("Food image enlargement exceeds the intended modest range");
+            if(first.findViewWithTag("day_entry_label").isClickable())throw new Exception("Home meal prefix is editable outside details");
+            View header=(View)field(screen,"activeStickyHeader");
+            if(header!=null&&visibleText(header).contains("周报"))throw new Exception("Duplicate Today weekly header remains");
+            assertRenderPure(screen,prefs,before);
+            ((android.widget.ScrollView)paper.getParent()).fullScroll(View.FOCUS_DOWN);
+        });
+        screenshot("v063b4-today-second-meal");
+        uiAssert(()->{
+            RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+            TodayDayPager days=pager.page(0).findViewWithTag("today_day_pager");View today=days.currentPage();
+            View paper=today.findViewWithTag("today_paper"),viewport=today.findViewWithTag("today_paper_viewport");
+            View second=paper.findViewWithTag("day_food_dinner_qa-v063b4-dinner");
+            Rect last=screenRect(second.findViewWithTag("day_entry_label")),window=screenRect(viewport);
+            if(last.top<window.top||last.bottom>window.bottom)throw new Exception("Second meal label cannot be reached by scrolling");
+            ((android.widget.ScrollView)paper.getParent()).scrollTo(0,0);
+        });
+        screenshot("v063b4-today-first-meal");
+
+        final int[] pulse={0,0};
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            pulse[0]=composePulseV063b4(dock,"pulse");pulse[1]=composePulseV063b4(dock,"mainPulse");
+        });
+        tapComposeDescriptionV063b4("添加餐食");Thread.sleep(120);screenshotNowV15("v063b4-main-button-feedback");
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            if(composePulseV063b4(dock,"pulse")!=pulse[0]||composePulseV063b4(dock,"mainPulse")!=pulse[1]+1)
+                throw new Exception("Meal menu feedback still drives the selected Tab swell");
+        });
+        Thread.sleep(700);String textMeal=MealTime.currentMeal();tapComposeDescriptionV063b4("手写记录餐食");
+        uiAssert(()->{
+            View dialog=dialogRootV15("manual_food_text");
+            if(!visibleText(dialog).contains("记录"+DayFoodEntries.mealTitle(textMeal)))
+                throw new Exception("Text action did not open the current-time meal editor directly");
+        });
+        screenshot("v063b4-direct-text-entry");click("取消");settleV15();
+        uiAssert(()->assertRenderPure(screen,prefs,before));
+
+        ActivityMonitor monitor=new ActivityMonitor(FoodCaptureActivity.class.getName(),null,false);addMonitor(monitor);
+        FoodCaptureActivity capture=null;
+        try{
+            tapComposeDescriptionV063b4("添加餐食");Thread.sleep(700);String captureMeal=MealTime.currentMeal();
+            tapComposeDescriptionV063b4("拍照或相册添加食物");capture=(FoodCaptureActivity)waitForMonitorWithTimeout(monitor,8000);
+            if(capture==null)throw new Exception("Photo action did not open the in-app capture Activity directly");
+            final FoodCaptureActivity opened=capture;
+            uiAssert(()->{
+                if(!captureMeal.equals(opened.getIntent().getStringExtra(FoodCaptureActivity.EXTRA_MEAL))
+                        ||!date.equals(opened.getIntent().getStringExtra(FoodCaptureActivity.EXTRA_DATE)))
+                    throw new Exception("Capture action lost its automatic meal or selected date");
+                android.widget.TextView title=opened.getWindow().getDecorView().findViewWithTag("food_capture_title");
+                if(!("添加"+DayFoodEntries.mealTitle(captureMeal)).contentEquals(title.getText()))
+                    throw new Exception("Capture title does not match its automatic meal");
+                opened.getWindow().getDecorView().findViewWithTag("food_capture_cancel").performClick();
+            });
+        }finally{
+            removeMonitor(monitor);
+            if(capture!=null){final FoodCaptureActivity opened=capture;uiAssert(()->{if(!opened.isFinishing())opened.finish();});}
+        }
+        settleV15();uiAssert(()->assertRenderPure(screen,prefs,before));
+
+        final AlertDialog[] detail={null};
+        uiAssert(()->detail[0]=((FoodUi)invoke(screen,"foodUi",new Class[]{})).details(date,"lunch",original));
+        waitForIdleSync();screenshot("v063b4-detail-initial-lunch");
+        final View[] prefix={null};uiAssert(()->{
+            prefix[0]=detail[0].getWindow().getDecorView().findViewWithTag("food_detail_meal");
+            if(!(prefix[0] instanceof android.widget.TextView)||!"午".contentEquals(((android.widget.TextView)prefix[0]).getText()))
+                throw new Exception("Detail meal prefix is missing or incorrect");
+        });
+        for(String target:new String[]{"breakfast","snack","dinner","lunch"}){
+            uiAssert(()->{
+                if(!prefix[0].performClick())throw new Exception("Detail meal prefix is not clickable");
+                if(!detail[0].isShowing()||detail[0].getWindow().getDecorView().findViewWithTag("food_detail_meal")!=prefix[0])
+                    throw new Exception("Meal reassignment replaced or dismissed its detail dialog");
+                if(!DayFoodEntries.prefix(target).contentEquals(((android.widget.TextView)prefix[0]).getText()))
+                    throw new Exception("Detail meal cycle has the wrong order for "+target);
+                JSONObject saved=NutritionStore.read(prefs,NutritionStore.DAYS),currentDay=saved.getJSONObject(date);
+                JSONObject moved=NutritionStore.find(NutritionStore.meal(saved,date,target),original.getString("id"));
+                if(moved==null)throw new Exception("Detail meal change was not persisted for "+target);
+                int copies=0;for(String meal:NutritionStore.MEALS){JSONObject row=NutritionStore.meal(saved,date,meal);if(NutritionStore.find(row,original.getString("id"))!=null)copies++;}
+                if(copies!=1||!totals.equals(NutritionStore.totals(currentDay).toString())||!currentDay.optBoolean("favorite"))
+                    throw new Exception("Meal reassignment duplicates food or changes daily nutrition/metadata");
+                for(String key:new String[]{"sourcePhoto","cutoutFile","nutrients"})if(!String.valueOf(original.get(key)).equals(String.valueOf(moved.get(key))))
+                    throw new Exception("Meal reassignment changed food field "+key);
+            });
+            waitForIdleSync();
+        }
+        screenshot("v063b4-detail-cycle-returned-lunch");uiAssert(()->detail[0].dismiss());settleV15();
+
+        uiAssert(()->invoke(screen,"showTab",new Class[]{int.class,boolean.class},3,false));settleV15();
+        clickSetting("其他设置");settleV15();
+        uiAssert(()->{
+            View content=(View)field(screen,"content");
+            if(content.findViewWithTag("meal_management_entry")!=null||visibleText(content).contains("餐次管理"))
+                throw new Exception("Obsolete meal-management entry remains reachable");
+        });
+        screenshot("v063b4-settings-without-meal-management");
+        uiAssert(()->invoke(screen,"showTab",new Class[]{int.class,boolean.class},1,false));settleV15();
+        uiAssert(()->{
+            if(((View)field(screen,"content")).findViewWithTag("v2_week_report")==null)
+                throw new Exception("Footprints lost its retained weekly-report entry");
+        });
+        uiAssert(()->invoke(screen,"renderBookDetail",new Class[]{String.class,boolean.class},date,false));settleV15();
+        uiAssert(()->{
+            View paper=((View)field(screen,"content")).findViewWithTag("book_detail_notebook_page");
+            if(paper==null)throw new Exception("Notebook detail paper is missing");
+            View parent=(View)paper.getParent();Rect bounds=screenRect(paper),stage=screenRect(parent);
+            float expected=(stage.top+parent.getPaddingTop()+stage.bottom-parent.getPaddingBottom())/2f;
+            if(Math.abs(bounds.exactCenterY()-expected)>2)
+                throw new Exception("Notebook is not centered in its header/dock-safe viewport");
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            if(bounds.bottom>dock.contentTopOnScreen()-PaperComponents.dp(context,8))
+                throw new Exception("Notebook extends into the bottom dock");
+        });
+        screenshot("v063b4-notebook-centered");
+        uiAssert(()->invoke(screen,"showTab",new Class[]{int.class,boolean.class},0,false));settleV15();
+        if(requests.get()!=0)throw new Exception("Synthetic UI scenario attempted an HTTP(S) request");
+        Bundle result=new Bundle();result.putString("stream","PASS 0.6.3-beta.4 isolated fixture: one initial meal and scrollable second meal, paper/dock gap, modest image sizing, removed Today weekly header, separate main-button feedback ownership, direct automatic text/capture entries with cancel purity, same-dialog lunch/breakfast/snack/dinner/lunch reassignment with one durable item and unchanged nutrition/media, removed meal management and centered notebook. HTTP(S)=0. Images and nutrition are synthetic QA data.\n");finish(Activity.RESULT_OK,result);
+    }
+
+    private final class DrawTimelineV063b5 implements android.view.ViewTreeObserver.OnDrawListener {
+        final MainActivity screen;
+        final View host;
+        final String name;
+        final boolean injectStall;
+        final long[] times=new long[1024];
+        final float[] fractions=new float[1024];
+        final float[] translations=new float[1024];
+        int count;
+        boolean stalled;
+        Throwable failure;
+        DrawTimelineV063b5(MainActivity screen,String name,boolean injectStall)throws Exception {
+            this.screen=screen;this.name=name;this.injectStall=injectStall;host=(View)field(screen,"content");
+            host.getViewTreeObserver().addOnDrawListener(this);
+        }
+        @Override public void onDraw(){
+            try{
+                PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");
+                Object slide=flow==null?null:ownField(flow,"image");
+                if(slide==null||count>=times.length)return;
+                float fraction=((Number)ownField(slide,"progress")).floatValue();
+                ViewGroup group=(ViewGroup)host;
+                times[count]=System.nanoTime();fractions[count]=fraction;
+                translations[count]=group.getChildCount()==0?0:group.getChildAt(0).getTranslationX();count++;
+                if(injectStall&&!stalled&&fraction>.10f&&fraction<.50f){
+                    stalled=true;host.post(()->android.os.SystemClock.sleep(240));
+                }
+            }catch(Throwable error){failure=error;}
+        }
+        JSONObject finish()throws Exception {
+            uiAssert(()->{if(host.getViewTreeObserver().isAlive())host.getViewTreeObserver().removeOnDrawListener(this);});
+            if(failure!=null)throw new Exception("Draw timeline failed",failure);
+            float maximumStep=0;double maximumWallGap=0;int moving=0;
+            JSONArray frames=new JSONArray();
+            for(int i=0;i<count;i++){
+                if(fractions[i]>0&&fractions[i]<1&&Math.abs(translations[i])>1)moving++;
+                if(i>0){
+                    if(fractions[i]+.0001f<fractions[i-1])throw new Exception("Page timeline rewound in "+name);
+                    maximumStep=Math.max(maximumStep,fractions[i]-fractions[i-1]);
+                    maximumWallGap=Math.max(maximumWallGap,(times[i]-times[i-1])/1_000_000d);
+                }
+                frames.put(new JSONObject().put("wallNs",times[i]).put("fraction",fractions[i]).put("incomingX",translations[i]));
+            }
+            JSONObject result=new JSONObject().put("name",name).put("movingDraws",moving)
+                    .put("maximumFractionStep",maximumStep).put("maximumWallGapMs",maximumWallGap)
+                    .put("injectedMainThreadStall",stalled).put("frames",frames);
+            writeJsonV063b5(name+"-timeline.json",result);
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+                if(moving<5)throw new Exception("Too few actual intermediate page draws in "+name+": "+moving);
+                if(maximumStep>.16f)throw new Exception("Page caught up by jumping after a stall in "+name+": "+maximumStep);
+                if(injectStall&&(!stalled||maximumWallGap<180))throw new Exception("Stall regression did not actually block a moving frame");
+            }
+            return result;
+        }
+    }
+
+    private void writeJsonV063b5(String name,JSONObject value)throws Exception {
+        File dir=new File(getTargetContext().getExternalFilesDir(null),"qa");dir.mkdirs();
+        try(Writer writer=new OutputStreamWriter(new FileOutputStream(new File(dir,name)),"UTF-8")){writer.write(value.toString(2));}
+    }
+
+    private void rootTabV063b5(MainActivity screen,int tab)throws Exception {
+        uiAssert(()->{setMainField(screen,"resumePreferencesOnMe",false);invoke(screen,"showTab",new Class[]{int.class,boolean.class},tab,false);});
+        settleV15();
+        uiAssert(()->{
+            RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+            if(((Number)field(screen,"currentTab")).intValue()!=tab||pager==null||pager.isInteracting()
+                    ||!pager.ownsView(pager.selectedPage()))throw new Exception("Root setup did not settle for Beta5");
+        });
+    }
+
+    private void waitOuterNavigationV063b5(MainActivity screen)throws Exception {
+        long deadline=android.os.SystemClock.uptimeMillis()+12000;final boolean[] resting={false};
+        do{
+            uiAssert(()->{
+                PageCrossfade flow=(PageCrossfade)field(screen,"pageCrossfade");
+                resting[0]=!Boolean.TRUE.equals(field(screen,"navPageTransition"))&&(flow==null||!flow.active());
+            });
+            if(resting[0])return;
+            Thread.sleep(30);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        throw new Exception("Outer navigation did not settle");
+    }
+
+    private JSONObject dockExitV063b5(MainActivity screen,int target,String name,boolean stall)throws Exception {
+        final RootPagePager[] cached={null};final DrawTimelineV063b5[] timeline={null};
+        uiAssert(()->{
+            cached[0]=(RootPagePager)field(screen,"rootPager");
+            if(Boolean.TRUE.equals(field(screen,"rootPagesDirty")))throw new Exception("Clean-root reuse fixture is dirty before "+name);
+            timeline[0]=new DrawTimelineV063b5(screen,name,stall);
+        });
+        tapComposeDescriptionV063b4(target==0?"今日":target==1?"足迹":"我");
+        waitOuterNavigationV063b5(screen);
+        JSONObject result=timeline[0].finish();
+        uiAssert(()->{
+            if(((Number)field(screen,"currentTab")).intValue()!=target||Boolean.TRUE.equals(field(screen,"inBookDetail")))
+                throw new Exception("Wrong final root after "+name);
+            if(field(screen,"rootPager")!=cached[0])throw new Exception("Clean retained roots were rebuilt for "+name);
+            RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+            if(!pager.ownsView(pager.selectedPage()))throw new Exception("Target root input did not resume after "+name);
+        });
+        screenshot("v063b5-"+name);return result;
+    }
+
+    private void openBookV063b5(MainActivity screen,String date)throws Exception {
+        rootTabV063b5(screen,1);final Rect[] coverBounds={null};
+        final View root=(View)field(screen,"root");
+        final float[] maximumBend={0};final int[] sampled={0};final Throwable[] failure={null};
+        final Object[] textures={null,null};
+        final Runnable afterDraw=()->{
+            try{
+                Object opening=field(screen,"bookOpeningOverlay");if(opening==null)return;
+                float progress=((Number)ownField(opening,"progress")).floatValue();
+                if(progress<.36f||progress>.80f)return;
+                Object cover=ownField(opening,"coverImage"),paper=ownField(opening,"pageImage");
+                if(cover==null||paper==null)return;
+                if(textures[0]==null){textures[0]=cover;textures[1]=paper;}
+                else if(textures[0]!=cover||textures[1]!=paper)throw new Exception("Opening replaced its textures during motion");
+                float[] edge=(float[])ownField(opening,"coverDestination"),strip=(float[])ownField(opening,"stripDestination");
+                float dx=edge[2]-edge[0],dy=edge[3]-edge[1];
+                double length=Math.hypot(dx,dy);
+                if(length<=0)return;
+                float distance=(float)(Math.abs(dy*strip[0]-dx*strip[1]+edge[2]*edge[1]-edge[3]*edge[0])/length);
+                float width=((RectF)ownField(opening,"localPaper")).width();
+                maximumBend[0]=Math.max(maximumBend[0],distance/Math.max(1,width));sampled[0]++;
+            }catch(Throwable error){failure[0]=error;}
+        };
+        final android.view.ViewTreeObserver.OnDrawListener observer=()->root.post(afterDraw);
+        uiAssert(()->{
+            View cover=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},(View)field(screen,"content"),date);
+            if(cover==null)throw new Exception("Synthetic book cover is missing");
+            coverBounds[0]=screenRect(cover);
+            root.getViewTreeObserver().addOnDrawListener(observer);
+        });
+        try{
+            tapPointV21(coverBounds[0].exactCenterX(),coverBounds[0].exactCenterY());
+            long deadline=android.os.SystemClock.uptimeMillis()+9000;final boolean[] opened={false};boolean captured=false;
+            do{
+                uiAssert(()->opened[0]=Boolean.TRUE.equals(field(screen,"inBookDetail"))&&field(screen,"bookOpeningOverlay")==null);
+                if(maximumBend[0]>.001f&&!captured){screenshotNowV15("v063b5-cover-curved");captured=true;}
+                if(opened[0]){
+                    if(failure[0]!=null)throw new Exception("Opening sample failed",failure[0]);
+                    if(android.animation.ValueAnimator.areAnimatorsEnabled()&&(sampled[0]<2||maximumBend[0]<=.001f))
+                        throw new Exception("Actual cover draw remained a rigid plane: "+maximumBend[0]);
+                    writeJsonV063b5("v063b5-cover-geometry.json",new JSONObject().put("actualWindowDrawSamples",sampled[0])
+                            .put("maximumCurveDistancePerWidth",maximumBend[0]).put("texturesRetained",textures[0]!=null));
+                    return;
+                }
+                Thread.sleep(30);
+            }while(android.os.SystemClock.uptimeMillis()<deadline);
+            throw new Exception("Actual cover tap did not finish opening the notebook");
+        }finally{
+            uiAssert(()->{if(root.getViewTreeObserver().isAlive())root.getViewTreeObserver().removeOnDrawListener(observer);root.removeCallbacks(afterDraw);});
+        }
+    }
+
+    private int dockLumaV063b5(MainActivity screen)throws Exception {
+        final int[] top={0};uiAssert(()->top[0]=((ComposeBottomBar)field(screen,"composeBottomBar")).contentTopOnScreen());
+        Bitmap snapshot=getUiAutomation().takeScreenshot();if(snapshot==null)throw new Exception("Dock pixels unavailable");
+        try{
+            int center=snapshot.getWidth()/2+PaperComponents.dp(screen,30),y=Math.min(snapshot.getHeight()-1,top[0]+PaperComponents.dp(screen,8));
+            int sum=0,count=0;
+            for(int x=center-5;x<=center+5;x++)for(int row=y;row<=Math.min(y+3,snapshot.getHeight()-1);row++){
+                int color=snapshot.getPixel(x,row);sum+=(Color.red(color)*3+Color.green(color)*6+Color.blue(color))/10;count++;
+            }
+            return sum/count;
+        }finally{snapshot.recycle();}
+    }
+
+    private void themeCyclesV063b5(MainActivity screen,android.content.SharedPreferences prefs,String before)throws Exception {
+        rootTabV063b5(screen,3);
+        for(int cycle=0;cycle<4;cycle++){
+            boolean night=cycle%2==0;
+            int old=dockLumaV063b5(screen);final Rect[] toggle={null};
+            uiAssert(()->toggle[0]=screenRect(screen.getWindow().getDecorView().findViewWithTag("theme_mode_toggle")));
+            tapPointV21(toggle[0].exactCenterX(),toggle[0].exactCenterY());Thread.sleep(100);
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+                int early=dockLumaV063b5(screen);
+                if(Math.abs(early-old)>45)throw new Exception("Dock theme jumped before the circular reveal reached it");
+                screenshotNowV15("v063b5-theme-"+cycle+"-early");
+            }
+            long deadline=android.os.SystemClock.uptimeMillis()+9000;final boolean[] ended={false};
+            do{
+                uiAssert(()->ended[0]=field(screen,"circularThemeReveal")==null);
+                if(ended[0])break;
+                Thread.sleep(40);
+            }while(android.os.SystemClock.uptimeMillis()<deadline);
+            if(!ended[0])throw new Exception("Theme reveal did not finish");
+            Thread.sleep(160);
+            int settled=dockLumaV063b5(screen);
+            if(night?settled>125:settled<180)throw new Exception("Dock retained the wrong theme without restarting: "+settled);
+            final boolean expected=night;
+            uiAssert(()->{
+                if(Boolean.TRUE.equals(invoke(screen,"nightDecoration",new Class[]{}))!=expected)throw new Exception("Theme state did not persist");
+                if(screen.isFinishing()||screen.isDestroyed())throw new Exception("Theme switch replaced the live Activity");
+                assertRenderPure(screen,prefs,before);
+            });
+            screenshot("v063b5-theme-"+cycle+"-settled");
+        }
+    }
+
+    private void revisionV063b5(Context context,android.content.SharedPreferences prefs)throws Exception {
+        FoodAnalysisJobService.cancelAll(context);FoodDraftStore.discard(context,FoodDraftStore.pendingSources(context));
+        java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        String date=HomeCalendarDates.key(Calendar.getInstance());
+        JSONObject fixture=new JSONObject().put(date,new JSONObject()
+                .put("lunch",fixtureMealV063b4(context,"lunch",Color.rgb(219,149,55)))
+                .put("dinner",fixtureMealV063b4(context,"dinner",Color.rgb(194,103,69))));
+        String before=fixture.toString();
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("foodAutoAnalyze",false)
+                .put("foodPhotoConsent",false).put("autoCloudSync",false).put("aiAnalysisEnabled",false)
+                .put("mealNotificationsEnabled",false).put("foodRecognitionOnboardingSeen",true).put("nightMode",false)
+                .put("seenAnnouncementVersion",context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit())
+            throw new Exception("Cannot prepare independent Beta5 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        settleV15();
+        final TodayDayPager[] home={null};final Rect[] homeBounds={null},paperBounds={null};
+        final JSONObject homeLayout=new JSONObject();
+        uiAssert(()->{
+            RootPagePager roots=(RootPagePager)field(screen,"rootPager");
+            home[0]=roots.page(0).findViewWithTag("today_day_pager");
+            View viewport=home[0].currentPage(),paper=viewport.findViewWithTag("today_paper");
+            View calendar=roots.page(0).findViewWithTag("home_calendar");
+            homeBounds[0]=screenRect(home[0]);paperBounds[0]=screenRect(viewport);
+            int calendarGap=homeBounds[0].top-screenRect(calendar).bottom;
+            int dockGap=((ComposeBottomBar)field(screen,"composeBottomBar")).contentTopOnScreen()-paperBounds[0].bottom;
+            if(home[0].getWidth()!=((View)home[0].getParent()).getWidth()
+                    ||viewport.getWidth()!=home[0].getWidth()-home[0].getPaddingLeft()-home[0].getPaddingRight())
+                throw new Exception("Date sheet no longer uses a full-width frame and inset card");
+            if(calendarGap<PaperComponents.dp(context,24)||dockGap<PaperComponents.dp(context,24))
+                throw new Exception("Home paper gaps are too tight: "+calendarGap+" / "+dockGap);
+            View[] sheets=(View[])ownField(home[0],"pages");
+            if(screenRect(sheets[0]).right>homeBounds[0].left||screenRect(sheets[2]).left<homeBounds[0].right)
+                throw new Exception("Cached neighbour sheets peek through at rest");
+            View first=tagged(paper,"day_food_").get(0),summary=paper.findViewWithTag("today_summary");
+            android.widget.LinearLayout.LayoutParams row=(android.widget.LinearLayout.LayoutParams)first.getLayoutParams();
+            int available=viewport.getHeight()-paper.getPaddingTop()-paper.getPaddingBottom()-summary.getHeight()-row.topMargin;
+            if(first.getMinimumHeight()!=Math.max(PaperComponents.dp(context,64),available-PaperComponents.dp(context,56)))
+                throw new Exception("Media rows retain the old full-viewport separation");
+            Rect label=screenRect(first.findViewWithTag("day_entry_label"));
+            if(label.top<paperBounds[0].top||label.bottom>paperBounds[0].bottom)
+                throw new Exception("First food label does not fit the shorter paper");
+            homeLayout.put("calendarGapPx",calendarGap).put("dockGapPx",dockGap)
+                    .put("frameWidthPx",home[0].getWidth()).put("cardWidthPx",viewport.getWidth())
+                    .put("mediaMinimumHeightPx",first.getMinimumHeight()).put("restingNeighboursHidden",true);
+        });
+        screenshot("v063b5-home-layout");
+        if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+            long dragDown=android.os.SystemClock.uptimeMillis();
+            float x=paperBounds[0].exactCenterX(),y=paperBounds[0].top+PaperComponents.dp(context,72);
+            pointerV15(dragDown,MotionEvent.ACTION_DOWN,x,y);
+            movesV15(dragDown,x,y,x+PaperComponents.dp(context,110),y,4);
+            try{
+                uiAssert(()->{
+                    RootPagePager roots=(RootPagePager)field(screen,"rootPager");
+                    if(!home[0].isInteracting()||roots.isDragging())throw new Exception("Date drag lost nested gesture ownership");
+                    View previous=((View[])ownField(home[0],"pages"))[0];
+                    android.graphics.drawable.Drawable original=previous.getBackground();
+                    View root=(View)field(screen,"root");Rect origin=screenRect(root);
+                    Bitmap sentinel=Bitmap.createBitmap(root.getWidth(),root.getHeight(),Bitmap.Config.ARGB_8888);
+                    try{
+                        previous.setBackgroundColor(Color.CYAN);
+                        invoke(screen,"drawRootSnapshot",new Class[]{Canvas.class},new Canvas(sentinel));
+                        int pixel=sentinel.getPixel(homeBounds[0].left+PaperComponents.dp(context,8)-origin.left,
+                                paperBounds[0].centerY()-origin.top);
+                        if(pixel!=Color.CYAN)throw new Exception("Date sheet is still occluded in the side inset: "+Integer.toHexString(pixel));
+                        homeLayout.put("sideInsetSentinelArgb",pixel);
+                    }finally{previous.setBackground(original);sentinel.recycle();}
+                });
+                screenshotNowV15("v063b5-home-date-edge");
+            }finally{pointerV15(dragDown,MotionEvent.ACTION_CANCEL,x+PaperComponents.dp(context,110),y);}
+            settleV15();
+            uiAssert(()->{if(home[0].isInteracting()||!date.equals(HomeCalendarDates.key(home[0].currentDate())))
+                throw new Exception("Cancelling the date drag changed the selected date");});
+            long marginDown=android.os.SystemClock.uptimeMillis();
+            x=homeBounds[0].right-home[0].getPaddingRight()/2f;
+            // Probe app routing directly because Android's edge-back gesture owns this narrow strip.
+            MainActivity previousPointerOwner=gestureScreenV20;gestureScreenV20=screen;
+            try{
+                pointerV15(marginDown,MotionEvent.ACTION_DOWN,x,y);
+                movesV15(marginDown,x,y,x-PaperComponents.dp(context,90),y,4);
+                uiAssert(()->{
+                    RootPagePager roots=(RootPagePager)field(screen,"rootPager");
+                    if(!roots.isDragging()||home[0].isInteracting())throw new Exception("Outer-margin app dispatch lost root ownership"
+                            +" rootDragging="+roots.isDragging()+" dateInteracting="+home[0].isInteracting()
+                            +" peerTracking="+field(screen,"peerTracking")+" peerDragging="+field(screen,"peerDragging")
+                            +" rootPosition="+roots.position());
+                });
+            }finally{
+                try{pointerV15(marginDown,MotionEvent.ACTION_CANCEL,x-PaperComponents.dp(context,90),y);}
+                finally{gestureScreenV20=previousPointerOwner;}
+            }
+            settleV15();
+            uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Cancelled margin swipe selected another root");});
+            homeLayout.put("dateCancelPreservesSelection",true).put("outerMarginRootOwnershipAppDispatch",true);
+        }
+        uiAssert(()->assertRenderPure(screen,prefs,before));
+        writeJsonV063b5("v063b5-home-layout.json",homeLayout);
+        android.os.HandlerThread metricsThread=new android.os.HandlerThread("qa-frame-metrics");metricsThread.start();
+        final ArrayList<long[]> durations=new ArrayList<>();
+        Window.OnFrameMetricsAvailableListener metrics=(window,frame,dropped)->{
+            synchronized(durations){durations.add(new long[]{frame.getMetric(android.view.FrameMetrics.TOTAL_DURATION),
+                    frame.getMetric(android.view.FrameMetrics.DRAW_DURATION),frame.getMetric(android.view.FrameMetrics.LAYOUT_MEASURE_DURATION),
+                    frame.getMetric(android.view.FrameMetrics.ANIMATION_DURATION),dropped});}
+        };
+        uiAssert(()->screen.getWindow().addOnFrameMetricsAvailableListener(metrics,new android.os.Handler(metricsThread.getLooper())));
+        JSONArray timelines=new JSONArray();
+        try{
+            rootTabV063b5(screen,3);clickSetting("其他设置");settleV15();
+            timelines.put(dockExitV063b5(screen,0,"settings-to-today",true));
+            openBookV063b5(screen,date);timelines.put(dockExitV063b5(screen,0,"book-to-today",false));
+            openBookV063b5(screen,date);timelines.put(dockExitV063b5(screen,3,"book-to-me",false));
+            rootTabV063b5(screen,3);clickSetting("其他设置");settleV15();
+            tapComposeDescriptionV063b4("今日");Thread.sleep(60);tapComposeDescriptionV063b4("我");Thread.sleep(60);tapComposeDescriptionV063b4("今日");
+            waitOuterNavigationV063b5(screen);
+            uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Interrupted outer navigation lost the latest target");assertRenderPure(screen,prefs,before);});
+            themeCyclesV063b5(screen,prefs,before);
+            if(requests.get()!=0)throw new Exception("Synthetic motion fixture attempted HTTP(S)");
+        }finally{
+            uiAssert(()->screen.getWindow().removeOnFrameMetricsAvailableListener(metrics));metricsThread.quitSafely();metricsThread.join(3000);
+            JSONArray frames=new JSONArray();synchronized(durations){for(long[] row:durations)frames.put(new JSONArray().put(row[0]).put(row[1]).put(row[2]).put(row[3]).put(row[4]));}
+            writeJsonV063b5("v063b5-frame-metrics.json",new JSONObject().put("fields",new JSONArray().put("totalNs").put("drawNs").put("layoutMeasureNs").put("animationNs").put("listenerDropped"))
+                    .put("includesInjected240msMainThreadStall",true).put("frames",frames).put("navigation",timelines));
+        }
+        Bundle result=new Bundle();result.putString("stream","PASS Beta5 independent synthetic fixture: actual-draw outer-page timelines with an injected 240ms stall, clean-root reuse, actual cover opening, book/settings dock exits and rapid retarget, four live theme cycles including early/settled dock pixels, unchanged diary and HTTP(S)=0. FrameMetrics are emulator measurements, with injected stalls explicitly marked.\n");finish(Activity.RESULT_OK,result);
+    }
+
+    private boolean iconPixelV063b6(int color,int expected){
+        return Color.alpha(color)>235&&Math.abs(Color.red(color)-Color.red(expected))
+                +Math.abs(Color.green(color)-Color.green(expected))+Math.abs(Color.blue(color)-Color.blue(expected))<=24;
+    }
+
+    private JSONArray iconBoundsV063b6(Bitmap image,RectF bar,float offsetX,float offsetY,
+                                      float density,int selected,boolean night)throws Exception {
+        JSONArray records=new JSONArray();
+        for(int index=0;index<3;index++){
+            float cx=offsetX+bar.left+bar.width()*(index+.5f)/3,cy=offsetY+bar.centerY();
+            int expected=index==selected?UiTokens.ink(night):UiTokens.secondary(night);
+            int left=Math.max(0,Math.round(cx-18*density)),right=Math.min(image.getWidth()-1,Math.round(cx+18*density));
+            int top=Math.max(0,Math.round(cy-17*density)),bottom=Math.min(image.getHeight()-1,Math.round(cy+28*density));
+            int minX=right,maxX=left,minY=bottom,maxY=top,count=0,labelPixels=0;
+            for(int y=top;y<=bottom;y++)for(int x=left;x<=right;x++){
+                if(!iconPixelV063b6(image.getPixel(x,y),expected))continue;
+                if(y>=cy+16*density)labelPixels++;
+                minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);count++;
+            }
+            if(count<12)throw new Exception("Bottom icon ink is missing for "+index);
+            float error=(minY+maxY)/2f-cy;
+            if(Math.abs(error)>2*density)throw new Exception("Bottom icon is not vertically centered: "+index+" error="+error);
+            if(labelPixels!=0)throw new Exception("Visible label ink remains under bottom icon "+index+": "+labelPixels);
+            records.put(new JSONObject().put("index",index).put("centerErrorPx",error).put("inkPixels",count)
+                    .put("lowerLabelBandPixels",labelPixels).put("bounds",new JSONArray().put(minX).put(minY).put(maxX).put(maxY)));
+        }
+        return records;
+    }
+
+    private JSONObject checkIconDockV063b6(MainActivity screen,String name)throws Exception {
+        final RectF[] actual={null};final int[] location=new int[2],selected={0};final boolean[] night={false};
+        final JSONArray[] software={null};final float density=screen.getResources().getDisplayMetrics().density;
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            actual[0]=new RectF((RectF)ownField(dock,"hitBar"));actual[0].inset(9*density,12*density);
+            dock.getLocationOnScreen(location);int tab=((Number)field(screen,"currentTab")).intValue();selected[0]=tab==3?2:tab;
+            night[0]=Boolean.TRUE.equals(invoke(screen,"nightDecoration",new Class[]{}));
+            Bitmap snapshot=Bitmap.createBitmap(dock.getWidth(),dock.getHeight(),Bitmap.Config.ARGB_8888);
+            try{dock.drawCurrentFrame(new Canvas(snapshot));software[0]=iconBoundsV063b6(snapshot,actual[0],0,0,density,selected[0],night[0]);}
+            finally{snapshot.recycle();}
+        });
+        for(String label:new String[]{"今日","足迹","我"}){
+            long deadline=android.os.SystemClock.uptimeMillis()+3000;
+            while(descriptionNode(label)==null&&android.os.SystemClock.uptimeMillis()<deadline)Thread.sleep(40);
+            if(descriptionNode(label)==null){
+                screenshotNowV15("v063b6-missing-semantics");
+                throw new Exception("Icon-only navigation lost its accessibility label: "+label);
+            }
+        }
+        Bitmap hardware=getUiAutomation().takeScreenshot();if(hardware==null)throw new Exception("No live icon-only screenshot");
+        JSONArray live;
+        try{live=iconBoundsV063b6(hardware,actual[0],location[0],location[1],density,selected[0],night[0]);saveFrameV24(hardware,name);}
+        finally{hardware.recycle();}
+        return new JSONObject().put("name",name).put("software",software[0]).put("hardware",live);
+    }
+
+    /** Infer the actual drawn cover angle from its retained perspective endpoints. */
+    private double drawnCoverAngleV063b6(Object opening)throws Exception {
+        RectF paper=(RectF)ownField(opening,"localPaper");float[] edge=(float[])ownField(opening,"coverDestination");
+        if(paper.width()<=0||paper.height()<=0)throw new Exception("Cover draw has no page dimensions");
+        double scale=1-2*edge[3]/paper.height();
+        if(scale<=0)throw new Exception("Invalid cover perspective scale");
+        double depth=3*paper.width()*(1-1/scale),horizontal=edge[2]/scale;
+        return Math.atan2(Math.max(0,depth),horizontal);
+    }
+
+    private void bookPresentationV063b6(MainActivity screen,String date,boolean reverse)throws Exception {
+        rootTabV063b5(screen,1);final View root=(View)field(screen,"root");
+        final Rect[] coverBounds={null};final Throwable[] failure={null};final float[] reverseAt={-1};
+        final JSONArray frames=new JSONArray();final float[] firstPeel={-1},firstHalf={-1};final int[] samples={0};
+        final Runnable afterDraw=()->{
+            try{
+                Object opening=field(screen,"bookOpeningOverlay");if(opening==null||ownField(opening,"pageImage")==null)return;
+                float progress=((Number)ownField(opening,"progress")).floatValue();
+                boolean closing=Boolean.TRUE.equals(ownField(opening,"closing"));
+                double angle=drawnCoverAngleV063b6(opening);samples[0]++;
+                frames.put(new JSONObject().put("wallNs",System.nanoTime()).put("progress",progress).put("angleRadians",angle).put("closing",closing));
+                if(!closing){
+                    if(firstPeel[0]<0&&angle>.12)firstPeel[0]=progress;
+                    if(firstHalf[0]<0&&angle>Math.PI/2)firstHalf[0]=progress;
+                    if(reverse&&reverseAt[0]<0&&progress>=.28f&&progress<=.55f)reverseAt[0]=progress;
+                }
+            }catch(Throwable error){failure[0]=error;}
+        };
+        android.view.ViewTreeObserver.OnDrawListener observer=()->root.post(afterDraw);
+        uiAssert(()->{
+            View cover=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},(View)field(screen,"content"),date);
+            if(cover==null)throw new Exception("Synthetic cover missing for presentation check");
+            coverBounds[0]=screenRect(cover);root.getViewTreeObserver().addOnDrawListener(observer);
+        });
+        boolean sentBack=false;long deadline=android.os.SystemClock.uptimeMillis()+12000;
+        try{
+            tapPointV21(coverBounds[0].exactCenterX(),coverBounds[0].exactCenterY());
+            final boolean[] ended={false};
+            do{
+                if(reverse&&!sentBack&&reverseAt[0]>=0){sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);sentBack=true;}
+                uiAssert(()->ended[0]=field(screen,"bookOpeningOverlay")==null
+                        &&Boolean.TRUE.equals(field(screen,"inBookDetail"))!=reverse);
+                if(ended[0])break;
+                if(failure[0]!=null)throw new Exception("Book presentation sampling failed",failure[0]);
+                Thread.sleep(20);
+            }while(android.os.SystemClock.uptimeMillis()<deadline);
+            if(!ended[0])throw new Exception("Book presentation did not settle, reverse="+reverse);
+            if(samples[0]<3)throw new Exception("Book presentation had too few actual draw samples");
+            if(firstPeel[0]<0||firstPeel[0]>.25f)throw new Exception("Cover still dwells flat too long: "+firstPeel[0]);
+            if(!reverse&&(firstHalf[0]<0||firstHalf[0]>.50f))throw new Exception("Cover still obscures the page past halfway: "+firstHalf[0]);
+            if(reverse&&!sentBack)throw new Exception("Mid-opening Back was not exercised");
+            writeJsonV063b5(reverse?"v063b6-opening-back.json":"v063b6-cover-presentation.json",new JSONObject()
+                    .put("firstVisiblePeelProgress",firstPeel[0]).put("firstHalfTurnProgress",firstHalf[0])
+                    .put("actualDrawSamples",samples[0]).put("midOpeningBackSent",sentBack).put("frames",frames));
+            screenshot(reverse?"v063b6-opening-back-shelf":"v063b6-open-page");
+        }finally{
+            uiAssert(()->{if(root.getViewTreeObserver().isAlive())root.getViewTreeObserver().removeOnDrawListener(observer);root.removeCallbacks(afterDraw);});
+        }
+    }
+
+    private View injectNativeBlackV063b6(MainActivity screen,JSONObject recovery)throws Exception {
+        JSONArray attempts=new JSONArray();
+        for(int attempt=0;attempt<3;attempt++){
+            final View[] target={null};final JSONObject observed=new JSONObject();
+            uiAssert(()->{
+                ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+                target[0]=(View)ownField(dock,"compose");
+                Paint black=new Paint();black.setColorFilter(new PorterDuffColorFilter(Color.BLACK,PorterDuff.Mode.SRC_IN));
+                target[0].setLayerType(View.LAYER_TYPE_HARDWARE,black);
+                target[0].setLayerPaint(black);target[0].invalidate();
+                observed.put("targetIdentity",System.identityHashCode(target[0]));
+            });
+            waitForIdleSync();Thread.sleep(250);int luma=dockLumaV063b5(screen);
+            final boolean[] stable={false};
+            uiAssert(()->{
+                ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+                View current=(View)ownField(dock,"compose");
+                stable[0]=current==target[0]&&target[0].getParent()==dock&&target[0].isShown();
+                observed.put("currentIdentity",System.identityHashCode(current)).put("identityChanged",current!=target[0])
+                        .put("hasParent",target[0].getParent()!=null).put("parentIsDock",target[0].getParent()==dock)
+                        .put("shown",target[0].isShown()).put("layerType",target[0].getLayerType());
+            });
+            observed.put("attempt",attempt+1).put("luma",luma).put("stableTarget",stable[0]);attempts.put(observed);
+            recovery.put("faultAttempts",attempts);writeJsonV063b5("v063b6-native-fault-attempts.json",recovery);
+            if(stable[0]&&luma<=10){
+                recovery.put("faultedHardwareLuma",luma).put("syntheticNativeLayerFault",true);
+                return target[0];
+            }
+        }
+        screenshot("v063b6-native-fault-not-established");
+        throw new Exception("Native-surface fault was not established on a stable live surface: "+attempts);
+    }
+
+    private void revisionV063b6(Context context,android.content.SharedPreferences prefs)throws Exception {
+        getUiAutomation();
+        FoodAnalysisJobService.cancelAll(context);FoodDraftStore.discard(context,FoodDraftStore.pendingSources(context));
+        java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();
+        String date=HomeCalendarDates.key(Calendar.getInstance());
+        String before=new JSONObject().put(date,new JSONObject()
+                .put("lunch",fixtureMealV063b4(context,"lunch",Color.rgb(219,149,55)))
+                .put("dinner",fixtureMealV063b4(context,"dinner",Color.rgb(194,103,69)))).toString();
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false)
+                .put("autoCloudSync",false).put("aiAnalysisEnabled",false).put("mealNotificationsEnabled",false)
+                .put("foodRecognitionOnboardingSeen",true).put("nightMode",false).put("decoration","yellow")
+                .put("seenAnnouncementVersion",context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit())
+            throw new Exception("Cannot prepare independent Beta6 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        settleV15();JSONArray icons=new JSONArray();
+        for(int tab:new int[]{0,1,3}){
+            rootTabV063b5(screen,tab);icons.put(checkIconDockV063b6(screen,"v063b6-icons-tab-"+tab));
+        }
+        JSONArray themes=new JSONArray();final View[] faultedSurface={null};final JSONObject recovery=new JSONObject();
+        int preFaultNightLuma=0;
+        for(int cycle=0;cycle<6;cycle++){
+            final int currentCycle=cycle;
+            int old=cycle==1&&faultedSurface[0]!=null?preFaultNightLuma:dockLumaV063b5(screen);
+            final Rect[] toggle={null};
+            uiAssert(()->toggle[0]=screenRect(screen.getWindow().getDecorView().findViewWithTag("theme_mode_toggle")));
+            tapPointV21(toggle[0].exactCenterX(),toggle[0].exactCenterY());Thread.sleep(100);
+            if(android.animation.ValueAnimator.areAnimatorsEnabled()){
+                int early=dockLumaV063b5(screen);
+                if(Math.abs(early-old)>45)throw new Exception("Theme cover lost the old dock before the reveal reached it: cycle="+cycle+" expected="+old+" actual="+early);
+            }
+            long deadline=android.os.SystemClock.uptimeMillis()+10000;final boolean[] ended={false};
+            do{uiAssert(()->ended[0]=field(screen,"circularThemeReveal")==null);if(ended[0])break;Thread.sleep(35);}
+            while(android.os.SystemClock.uptimeMillis()<deadline);
+            if(!ended[0])throw new Exception("Beta6 theme reveal did not finish");
+            Thread.sleep(200);int settled=dockLumaV063b5(screen);boolean night=cycle%2==0;
+            if(night?settled>125:settled<180)throw new Exception("Live dock retained wrong theme after cycle "+cycle+": "+settled);
+            uiAssert(()->{
+                if(screen.isDestroyed()||screen.isFinishing())throw new Exception("Theme cycle restarted Activity");
+                if(currentCycle==1&&faultedSurface[0]!=null){
+                    View current=(View)ownField(field(screen,"composeBottomBar"),"compose");
+                    if(current==faultedSurface[0]||faultedSurface[0].getParent()!=null||faultedSurface[0].isShown())
+                        throw new Exception("Day return retained the faulted native Compose surface");
+                    recovery.put("newSurfaceInstalled",true).put("oldSurfaceDetached",true).put("sameActivity",true);
+                }
+                assertRenderPure(screen,prefs,before);
+            });
+            themes.put(new JSONObject().put("cycle",cycle).put("night",night).put("settledLuma",settled));
+            icons.put(checkIconDockV063b6(screen,"v063b6-theme-"+cycle));
+            if(cycle==0){
+                preFaultNightLuma=settled;
+                faultedSurface[0]=injectNativeBlackV063b6(screen,recovery);
+                screenshot("v063b6-native-black-fault");
+            }
+        }
+        writeJsonV063b5("v063b6-icon-centering.json",new JSONObject().put("states",icons));
+        writeJsonV063b5("v063b6-live-theme-cycles.json",new JSONObject().put("cycles",themes).put("sameActivity",true));
+        writeJsonV063b5("v063b6-native-surface-recovery.json",recovery);
+        final Object[] previousOwner={null};final ComposeBottomBar[] previousHost={null};
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            ViewGroup parent=(ViewGroup)dock.getParent();int index=parent.indexOfChild(dock);
+            ViewGroup.LayoutParams params=dock.getLayoutParams();previousOwner[0]=ownField(dock,"owner");previousHost[0]=dock;
+            parent.removeView(dock);parent.addView(dock,index,params);
+        });
+        settleV15();
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            if(dock!=previousHost[0]||!dock.isAttachedToWindow()||ownField(dock,"owner")==null||ownField(dock,"owner")==previousOwner[0])
+                throw new Exception("Reattached bottom dock did not install a fresh lifecycle owner");
+        });
+        JSONObject reattached=checkIconDockV063b6(screen,"v063b6-reattached-dock");
+        tapComposeDescriptionV063b4("今日");waitOuterNavigationV063b5(screen);settleV15();
+        uiAssert(()->{
+            if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Reattached dock no longer accepts navigation");
+            assertRenderPure(screen,prefs,before);
+        });
+        writeJsonV063b5("v063b6-reattach.json",new JSONObject().put("freshOwner",true)
+                .put("sameOuterHost",true).put("nextTabUsable",true).put("pixels",reattached));
+        bookPresentationV063b6(screen,date,true);
+        bookPresentationV063b6(screen,date,false);
+        uiAssert(()->assertRenderPure(screen,prefs,before));
+        if(requests.get()!=0)throw new Exception("Beta6 synthetic UI fixture attempted HTTP(S)");
+        Bundle result=new Bundle();result.putString("stream","PASS Beta6 independent synthetic fixture: icon-only centering and empty label bands in software/live pixels, six physical theme cycles without Activity restart, earlier actual cover peel and page exposure, mid-opening Back, unchanged diary and HTTP(S)=0. Phone-specific dark-mode behavior remains device acceptance.\n");
+        finish(Activity.RESULT_OK,result);
+    }
+
+    private Rect composeBoundsV063b7(String label)throws Exception {
+        long deadline=android.os.SystemClock.uptimeMillis()+4000;
+        do{
+            android.view.accessibility.AccessibilityNodeInfo node=descriptionNode(label);
+            if(node!=null&&node.isEnabled()&&node.isVisibleToUser()){
+                Rect bounds=new Rect();node.getBoundsInScreen(bounds);if(!bounds.isEmpty())return bounds;
+            }
+            Thread.sleep(40);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        screenshotNowV15("v063b7-missing-"+label);
+        throw new Exception("Missing visible Compose control "+label);
+    }
+
+    private float dockFloatV063b7(MainActivity screen,String name)throws Exception {
+        final float[] value={0};
+        uiAssert(()->value[0]=((Number)ownField(field(screen,"composeBottomBar"),name)).floatValue());
+        return value[0];
+    }
+
+    private void waitDockRestV063b7(MainActivity screen)throws Exception {
+        long deadline=android.os.SystemClock.uptimeMillis()+5000;
+        do{
+            final boolean[] settled={false};
+            uiAssert(()->{
+                ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+                RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+                settled[0]=pager!=null&&!pager.isInteracting()&&!Boolean.TRUE.equals(field(screen,"navPageTransition"))
+                        &&((Number)ownField(dock,"drawnSwell")).floatValue()<.025f
+                        &&((Number)ownField(dock,"drawnMainSwell")).floatValue()<.025f;
+            });
+            if(settled[0])return;
+            Thread.sleep(30);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        throw new Exception("Bottom feedback did not settle");
+    }
+
+    private float heldPressureV063b7(MainActivity screen,String field)throws Exception {
+        long deadline=android.os.SystemClock.uptimeMillis()+2500;
+        float pressure=0;
+        do{
+            pressure=dockFloatV063b7(screen,field);
+            if(pressure>=.80f)return pressure;
+            Thread.sleep(25);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        throw new Exception("DOWN did not inflate feedback before release: "+field+"="+pressure);
+    }
+
+    private int mainDiameterV063b7(MainActivity screen)throws Exception {
+        final int[] result={0};
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            RectF main=(RectF)ownField(dock,"hitMain");float density=screen.getResources().getDisplayMetrics().density;
+            Bitmap image=Bitmap.createBitmap(dock.getWidth(),dock.getHeight(),Bitmap.Config.ARGB_8888);
+            try{
+                dock.drawCurrentFrame(new Canvas(image));
+                int x=Math.round(main.centerX()),top=Math.max(0,Math.round(main.centerY()-40*density));
+                int bottom=Math.min(image.getHeight()-1,Math.round(main.centerY()+40*density)),first=-1,last=-1;
+                for(int y=top;y<=bottom;y++)if(Color.alpha(image.getPixel(x,y))>230){if(first<0)first=y;last=y;}
+                if(first<0)throw new Exception("Main action has no opaque rendered body");
+                result[0]=last-first+1;
+            }finally{image.recycle();}
+        });
+        return result[0];
+    }
+
+    private void tapDockTabV063b7(MainActivity screen,int index)throws Exception {
+        final float[] point={0,0};
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            float density=screen.getResources().getDisplayMetrics().density;
+            RectF bar=new RectF((RectF)ownField(dock,"hitBar"));bar.inset(9*density,12*density);
+            int[] origin=new int[2];dock.getLocationOnScreen(origin);
+            point[0]=origin[0]+bar.left+bar.width()*(index+.5f)/3;
+            point[1]=origin[1]+bar.centerY();
+        });
+        tapPointV21(point[0],point[1]);
+    }
+
+    private JSONObject pressFeedbackV063b7(MainActivity screen)throws Exception {
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);
+        Rect tab=composeBoundsV063b7("足迹");long down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,tab.exactCenterX(),tab.exactCenterY());
+        float tabPressure;
+        try{
+            Thread.sleep(140);tabPressure=heldPressureV063b7(screen,"drawnSwell");
+            uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Tab committed on DOWN");});
+            screenshotNowV15("v063b7-tab-down-held");
+        }finally{pointerV15(down,MotionEvent.ACTION_CANCEL,tab.exactCenterX(),tab.exactCenterY());}
+        waitDockRestV063b7(screen);
+        uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Cancelled Tab press navigated");});
+
+        down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,tab.exactCenterX(),tab.exactCenterY());Thread.sleep(140);
+        pointerV15(down,MotionEvent.ACTION_UP,tab.exactCenterX(),tab.exactCenterY());
+        waitDockRestV063b7(screen);
+        uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=1)throw new Exception("Released Tab did not commit");});
+
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);
+        Rect main=composeBoundsV063b7("添加餐食");int idle=mainDiameterV063b7(screen);
+        down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,main.exactCenterX(),main.exactCenterY());
+        float mainPressure;int held;
+        try{
+            Thread.sleep(140);mainPressure=heldPressureV063b7(screen,"drawnMainSwell");held=mainDiameterV063b7(screen);
+            uiAssert(()->{if(((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded())throw new Exception("Main action opened on DOWN");});
+            if(dockFloatV063b7(screen,"drawnSwell")>.10f)throw new Exception("Main press inflated the selected Tab");
+            if(held<idle*1.10f)throw new Exception("Main press enlargement remains too weak: "+idle+" -> "+held);
+            screenshotNowV15("v063b7-main-down-held");
+        }finally{pointerV15(down,MotionEvent.ACTION_CANCEL,main.exactCenterX(),main.exactCenterY());}
+        waitDockRestV063b7(screen);
+        uiAssert(()->{if(((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded())throw new Exception("Cancelled main press opened its menu");});
+
+        down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,main.exactCenterX(),main.exactCenterY());Thread.sleep(120);
+        movesV15(down,main.exactCenterX(),main.exactCenterY(),main.exactCenterX(),main.top-80,4);
+        pointerV15(down,MotionEvent.ACTION_UP,main.exactCenterX(),main.top-80);
+        waitDockRestV063b7(screen);
+        uiAssert(()->{if(((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded())throw new Exception("Dragged-out main action opened its menu");});
+
+        down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,main.exactCenterX(),main.exactCenterY());Thread.sleep(120);
+        pointerV15(down,MotionEvent.ACTION_UP,main.exactCenterX(),main.exactCenterY());Thread.sleep(700);
+        uiAssert(()->{if(!((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded())throw new Exception("Main release did not open exactly one menu");});
+        android.view.accessibility.AccessibilityNodeInfo accessible=descriptionNode("添加餐食");
+        if(accessible==null)throw new Exception("Main action lost accessibility click");
+        boolean accessibleResult=accessible.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK);
+        long deadline=android.os.SystemClock.uptimeMillis()+3000;final boolean[] closed={false};
+        do{uiAssert(()->closed[0]=!((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded());if(closed[0])break;Thread.sleep(25);}
+        while(android.os.SystemClock.uptimeMillis()<deadline);
+        if(!closed[0])throw new Exception("Accessibility click did not close the main menu");
+        waitDockRestV063b7(screen);
+
+        JSONObject result=new JSONObject().put("tabPressureBeforeRelease",tabPressure).put("mainPressureBeforeRelease",mainPressure)
+                .put("idleMainDiameterPx",idle).put("heldMainDiameterPx",held).put("mainDiameterRatio",held/(double)idle)
+                .put("downDoesNotCommit",true).put("cancelDoesNotCommit",true).put("dragOutDoesNotCommit",true)
+                .put("releaseCommitsOnce",true).put("mainFeedbackIndependent",true).put("accessibilityClickStateCorrect",true)
+                .put("accessibilityActionReturn",accessibleResult);
+        writeJsonV063b5("v063b7-press-feedback.json",result);
+
+        tapDockTabV063b7(screen,1);Thread.sleep(65);tapDockTabV063b7(screen,2);Thread.sleep(65);tapDockTabV063b7(screen,0);
+        waitDockRestV063b7(screen);
+        uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Quick Tab retarget lost the final target");});
+        result.put("quickRetargetFinalTarget",true);writeJsonV063b5("v063b7-press-feedback.json",result);
+        rootTabV063b5(screen,1);waitDockRestV063b7(screen);
+        // The widened capsule legitimately occupies the old action's center.
+        // Its outer edge still lies beyond the capsule and inside the retired circle.
+        float hiddenX=main.right-2;
+        down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,hiddenX,main.exactCenterY());
+        pointerV15(down,MotionEvent.ACTION_UP,hiddenX,main.exactCenterY());Thread.sleep(180);
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            if(dock.isMenuExpanded()||((Number)field(screen,"currentTab")).intValue()!=1)throw new Exception("Hidden main action intercepted a tap");
+        });
+        result.put("hiddenMainPassThrough",true);
+        writeJsonV063b5("v063b7-press-feedback.json",result);return result;
+    }
+
+    private void bookCloseTimelineV063b7(MainActivity screen,String date,boolean reverse)throws Exception {
+        rootTabV063b5(screen,1);final View root=(View)field(screen,"root");final Rect[] cover={null};
+        uiAssert(()->{
+            View source=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},(View)field(screen,"content"),date);
+            if(source==null)throw new Exception("Book fixture is missing");cover[0]=screenRect(source);
+        });
+        // A slow renderer can keep the UI queue busy for the entire opening.
+        // Begin observing immediately after input so the mid-opening boundary stays observable.
+        long openDown=android.os.SystemClock.uptimeMillis();
+        pointerV15(openDown,MotionEvent.ACTION_DOWN,cover[0].exactCenterX(),cover[0].exactCenterY());
+        pointerV15(openDown,MotionEvent.ACTION_UP,cover[0].exactCenterX(),cover[0].exactCenterY());
+        long deadline=android.os.SystemClock.uptimeMillis()+12000;final boolean[] ready={false};
+        do{
+            uiAssert(()->{
+                Object overlay=field(screen,"bookOpeningOverlay");
+                ready[0]=reverse?overlay!=null&&((Number)ownField(overlay,"progress")).floatValue()>=.34f
+                        &&((Number)ownField(overlay,"progress")).floatValue()<.75f
+                        :overlay==null&&Boolean.TRUE.equals(field(screen,"inBookDetail"));
+            });
+            if(ready[0])break;Thread.sleep(15);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        if(!ready[0]){
+            final String[] state={""};
+            uiAssert(()->{Object overlay=field(screen,"bookOpeningOverlay");state[0]="book="+field(screen,"inBookDetail")+" overlay="+(overlay!=null)+" progress="+(overlay==null?"none":ownField(overlay,"progress"));});
+            throw new Exception("Opening did not reach the selected close boundary: "+state[0]);
+        }
+
+        final JSONArray frames=new JSONArray();final Throwable[] failure={null};final Object[] textures={null,null};
+        final long[] firstDraw={0},firstMotion={0};final float[] lastWidth={Float.NaN},maxStep={0},firstShrinkRemaining={-1};
+        final int[] moving={0};
+        final Runnable sample=()->{
+            try{
+                Object overlay=field(screen,"bookOpeningOverlay");
+                if(overlay==null||!Boolean.TRUE.equals(ownField(overlay,"closing")))return;
+                if(ownField(overlay,"outgoingScreen")!=null)throw new Exception("Closing still uses a full-window backdrop bitmap");
+                RectF shown=(RectF)ownField(overlay,"current"),start=(RectF)ownField(overlay,"start"),from=(RectF)ownField(overlay,"closingFrom");
+                if(shown.isEmpty()||from.width()-start.width()<1)return;
+                long now=System.nanoTime();if(firstDraw[0]==0)firstDraw[0]=now;
+                float progress=((Number)ownField(overlay,"progress")).floatValue();
+                float initial=((Number)ownField(overlay,"closingStartProgress")).floatValue();
+                float remaining=initial<=0?0:progress/initial;
+                float width=(shown.width()-start.width())/(from.width()-start.width());
+                Object page=ownField(overlay,"pageImage"),image=ownField(overlay,"coverImage");
+                if(textures[0]==null&&page!=null&&image!=null){textures[0]=page;textures[1]=image;}
+                else if(textures[0]!=null&&(textures[0]!=page||textures[1]!=image))throw new Exception("Closing recreated a texture during motion");
+                if(width<.985f&&firstMotion[0]==0){firstMotion[0]=now;firstShrinkRemaining[0]=remaining;}
+                if(width>.01f&&width<.99f)moving[0]++;
+                if(!Float.isNaN(lastWidth[0])){
+                    if(width>lastWidth[0]+.01f)throw new Exception("Closing rectangle moved back away from the shelf");
+                    maxStep[0]=Math.max(maxStep[0],lastWidth[0]-width);
+                }
+                lastWidth[0]=width;
+                frames.put(new JSONObject().put("wallNs",now).put("remaining",remaining).put("widthFraction",width));
+            }catch(Throwable error){failure[0]=error;}
+        };
+        android.view.ViewTreeObserver.OnDrawListener listener=()->root.post(sample);
+        uiAssert(()->root.getViewTreeObserver().addOnDrawListener(listener));
+        long request=System.nanoTime();
+        try{
+            if(reverse){sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);}
+            else{
+                final Rect[] close={null};uiAssert(()->close[0]=screenRect(((View)field(screen,"content")).findViewWithTag("book_detail_close")));
+                tapPointV21(close[0].exactCenterX(),close[0].exactCenterY());
+            }
+            deadline=android.os.SystemClock.uptimeMillis()+12000;final boolean[] finished={false};
+            do{
+                uiAssert(()->finished[0]=field(screen,"bookOpeningOverlay")==null&&!Boolean.TRUE.equals(field(screen,"inBookDetail"))
+                        &&!Boolean.TRUE.equals(field(screen,"bookClosePending")));
+                if(failure[0]!=null)throw new Exception("Close draw sampling failed",failure[0]);
+                if(finished[0])break;Thread.sleep(20);
+            }while(android.os.SystemClock.uptimeMillis()<deadline);
+            if(!finished[0])throw new Exception("Book close did not restore its shelf");
+            if(moving[0]<4||firstShrinkRemaining[0]<.65f)throw new Exception("Book remained still until a late shrink: samples="+moving[0]+" firstRemaining="+firstShrinkRemaining[0]);
+            float allowed=reverse?.30f:.16f;
+            if(maxStep[0]>allowed)throw new Exception("Book shrink caught up in a large step: "+maxStep[0]);
+            uiAssert(()->{
+                if(((Number)field(screen,"currentTab")).intValue()!=1||((View)field(screen,"content")).findViewWithTag("v2_week_report")==null)
+                    throw new Exception("Closing did not return to Footprints");
+            });
+            JSONObject result=new JSONObject().put("midOpeningReverse",reverse).put("requestToFirstCloseDrawMs",(firstDraw[0]-request)/1_000_000d)
+                    .put("requestToFirstVisibleShrinkMs",(firstMotion[0]-request)/1_000_000d).put("firstShrinkRemaining",firstShrinkRemaining[0])
+                    .put("movingDrawSamples",moving[0]).put("maximumWidthFractionStep",maxStep[0])
+                    .put("texturesRetained",textures[0]!=null).put("fullWindowBackdropUsedDuringClosing",false)
+                    .put("returnedToFootprints",true).put("frames",frames);
+            writeJsonV063b5(reverse?"v063b7-midopen-close.json":"v063b7-full-close.json",result);
+            screenshot(reverse?"v063b7-midopen-returned":"v063b7-close-returned");
+        }finally{
+            uiAssert(()->{if(root.getViewTreeObserver().isAlive())root.getViewTreeObserver().removeOnDrawListener(listener);root.removeCallbacks(sample);});
+        }
+    }
+
+    private void revisionV063b7(Context context,android.content.SharedPreferences prefs)throws Exception {
+        getUiAutomation();FoodAnalysisJobService.cancelAll(context);FoodDraftStore.discard(context,FoodDraftStore.pendingSources(context));
+        java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();String date=HomeCalendarDates.key(Calendar.getInstance());
+        String before=new JSONObject().put(date,new JSONObject().put("lunch",fixtureMealV063b4(context,"lunch",Color.rgb(219,149,55)))
+                .put("dinner",fixtureMealV063b4(context,"dinner",Color.rgb(194,103,69)))).toString();
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false)
+                .put("autoCloudSync",false).put("aiAnalysisEnabled",false).put("mealNotificationsEnabled",false)
+                .put("foodRecognitionOnboardingSeen",true).put("nightMode",false).put("decoration","yellow")
+                .put("seenAnnouncementVersion",context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit())throw new Exception("Cannot prepare Beta7 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();
+        pressFeedbackV063b7(screen);uiAssert(()->assertRenderPure(screen,prefs,before));
+        bookCloseTimelineV063b7(screen,date,false);bookCloseTimelineV063b7(screen,date,true);
+        uiAssert(()->assertRenderPure(screen,prefs,before));
+        if(requests.get()!=0)throw new Exception("Beta7 synthetic fixture attempted HTTP(S)");
+        Bundle result=new Bundle();result.putString("stream","PASS Beta7 independent synthetic fixture: visible feedback on held DOWN before UP, stronger independent main-button scale, cancellation and release ownership, accessibility and rapid targets, continuous early book shrink with retained textures, mid-opening/rapid Back, unchanged diary and HTTP(S)=0. Emulator measurements require phone visual acceptance.\n");finish(Activity.RESULT_OK,result);
+    }
+
+    private float[] dockPointV063b8(MainActivity screen,float position)throws Exception {
+        final float[] point={0,0};
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            float density=screen.getResources().getDisplayMetrics().density;
+            RectF bar=new RectF((RectF)ownField(dock,"hitBar"));bar.inset(9*density,12*density);
+            int[] at=new int[2];dock.getLocationOnScreen(at);
+            point[0]=at[0]+bar.left+bar.width()*(position+.5f)/3;
+            point[1]=at[1]+bar.centerY();
+        });
+        return point;
+    }
+
+    private void tapDockV063b8(MainActivity screen,int slot)throws Exception {
+        float[] point=dockPointV063b8(screen,slot);long down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,point[0],point[1]);
+        pointerV15(down,MotionEvent.ACTION_UP,point[0],point[1]);
+    }
+
+    private JSONObject shortFeedbackV063b8(MainActivity screen,boolean main)throws Exception {
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);
+        float[] point=main?new float[2]:dockPointV063b8(screen,1);
+        if(main){Rect bounds=composeBoundsV063b7("添加餐食");point[0]=bounds.exactCenterX();point[1]=bounds.exactCenterY();}
+        int idleDiameter=main?mainDiameterV063b7(screen):0;
+        long down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,point[0],point[1]);
+        uiAssert(()->{
+            if(((Number)field(screen,"currentTab")).intValue()!=0||((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded())
+                throw new Exception("Short press committed business before release");
+        });
+        long remaining=down+40-android.os.SystemClock.uptimeMillis();if(remaining>0)Thread.sleep(remaining);
+        long held=android.os.SystemClock.uptimeMillis()-down;
+        if(held>=80){pointerV15(down,MotionEvent.ACTION_CANCEL,point[0],point[1]);throw new Exception("QA short-tap injection exceeded its 80ms budget: "+held);}
+        pointerV15(down,MotionEvent.ACTION_UP,point[0],point[1]);
+        long released=android.os.SystemClock.uptimeMillis(),deadline=released+3000,peakTime=released;
+        float peak=0;int peakDiameter=idleDiameter;
+        do{
+            float value=dockFloatV063b7(screen,main?"drawnMainSwell":"drawnSwell");
+            if(value>peak){peak=value;peakTime=android.os.SystemClock.uptimeMillis();if(main&&value>.80f)peakDiameter=Math.max(peakDiameter,mainDiameterV063b7(screen));}
+            if(peak>=.85f&&value<.15f)break;
+            Thread.sleep(15);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        if(peak<.85f)throw new Exception("A short tap cannot reach a full feedback peak: "+main+" / "+peak);
+        if(main&&peakDiameter<idleDiameter*1.18f)throw new Exception("Independent add feedback is still weak: "+idleDiameter+" -> "+peakDiameter);
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            if(main){if(!dock.isMenuExpanded()||((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Short main tap did not open one menu");}
+            else if(((Number)field(screen,"currentTab")).intValue()!=1)throw new Exception("Short Tab tap lost its release target");
+        });
+        if(main){
+            if(dockFloatV063b7(screen,"drawnSwell")>.10f)throw new Exception("Short add tap coupled into Tab feedback");
+            screenshot("v063b8-menu-expanded");
+            uiAssert(()->((ComposeBottomBar)field(screen,"composeBottomBar")).closeMenu());
+        }
+        waitDockRestV063b7(screen);
+        return new JSONObject().put("main",main).put("physicalHoldMs",held).put("peak",peak)
+                .put("peakAfterReleaseMs",peakTime-released).put("sampledDurationMs",android.os.SystemClock.uptimeMillis()-released)
+                .put("idleMainDiameterPx",idleDiameter).put("peakMainDiameterPx",peakDiameter).put("releaseCommittedOnce",true);
+    }
+
+    private JSONObject dragDockV063b8(MainActivity screen)throws Exception {
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);
+        float[] start=dockPointV063b8(screen,0);long down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,start[0],start[1]);Thread.sleep(240);
+        JSONArray samples=new JSONArray();float minimum=Float.POSITIVE_INFINITY,maximum=Float.NEGATIVE_INFINITY;
+        try{
+            for(float requested:new float[]{.35f,1.15f,1.8f,.7f}){
+                float[] point=dockPointV063b8(screen,requested);
+                pointerV15(down,MotionEvent.ACTION_MOVE,point[0],point[1]);Thread.sleep(80);
+                float actual=dockFloatV063b7(screen,"drawnPosition");
+                minimum=Math.min(minimum,actual);maximum=Math.max(maximum,actual);
+                if(Math.abs(actual-requested)>.35f)throw new Exception("Held capsule drag does not follow the pointer: "+requested+" / "+actual);
+                uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Held drag navigated before release");});
+                samples.put(new JSONObject().put("requested",requested).put("drawn",actual));
+            }
+            float[] end=dockPointV063b8(screen,.7f);pointerV15(down,MotionEvent.ACTION_UP,end[0],end[1]);
+        }catch(Throwable failure){pointerV15(down,MotionEvent.ACTION_CANCEL,start[0],start[1]);throw failure;}
+        waitDockRestV063b7(screen);
+        uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=1)throw new Exception("Held drag did not commit its release slot");});
+        if(maximum-minimum<1.0f)throw new Exception("Drag sampling did not traverse enough of the capsule");
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);start=dockPointV063b8(screen,0);down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,start[0],start[1]);Thread.sleep(220);
+        float[] cancelled=dockPointV063b8(screen,1.7f);pointerV15(down,MotionEvent.ACTION_MOVE,cancelled[0],cancelled[1]);Thread.sleep(100);
+        pointerV15(down,MotionEvent.ACTION_CANCEL,cancelled[0],cancelled[1]);waitDockRestV063b7(screen);
+        uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Cancelled capsule drag changed business Tab");});
+        if(Math.abs(dockFloatV063b7(screen,"drawnPosition"))>.05f)throw new Exception("Cancelled capsule drag did not restore its indicator");
+        tapDockV063b8(screen,1);Thread.sleep(50);tapDockV063b8(screen,2);Thread.sleep(50);tapDockV063b8(screen,0);waitDockRestV063b7(screen);
+        uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Quick reverse taps lost the latest Tab");});
+        return new JSONObject().put("samples",samples).put("releaseTarget",1).put("cancelRestoresPriorTab",true).put("quickReverseEndsAtLatestTarget",true);
+    }
+
+    private JSONObject menuDepartureV063b8(MainActivity screen)throws Exception {
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);Rect main=composeBoundsV063b7("添加餐食");
+        long down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,main.exactCenterX(),main.exactCenterY());
+        pointerV15(down,MotionEvent.ACTION_UP,main.exactCenterX(),main.exactCenterY());Thread.sleep(40);
+        tapDockV063b8(screen,1);waitDockRestV063b7(screen);
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            if(dock.isMenuExpanded()||((Number)field(screen,"currentTab")).intValue()!=1
+                    ||((Number)ownField(dock,"drawnMenu")).floatValue()>.025f)
+                throw new Exception("Leaving Today during menu expansion retained action buttons");
+        });
+        float hiddenX=main.right-2;down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,hiddenX,main.exactCenterY());
+        pointerV15(down,MotionEvent.ACTION_UP,hiddenX,main.exactCenterY());Thread.sleep(150);
+        uiAssert(()->{
+            if(((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded()||((Number)field(screen,"currentTab")).intValue()!=1)
+                throw new Exception("Hidden main button intercepted a pointer");
+        });
+        if(descriptionNode("添加餐食")!=null||descriptionNode("拍照或相册添加食物")!=null||descriptionNode("手写记录餐食")!=null)
+            throw new Exception("Hidden actions retained accessibility semantics");
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);composeBoundsV063b7("添加餐食");
+        android.view.accessibility.AccessibilityNodeInfo action=descriptionNode("添加餐食");
+        if(action==null)throw new Exception("Main action lost accessibility click");
+        boolean actionResult=action.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK);
+        long deadline=android.os.SystemClock.uptimeMillis()+3000;final boolean[] expanded={false};
+        do{uiAssert(()->expanded[0]=((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded());if(expanded[0])break;Thread.sleep(25);}
+        while(android.os.SystemClock.uptimeMillis()<deadline);
+        if(!expanded[0])throw new Exception("Accessibility click did not open main actions");
+        uiAssert(()->((ComposeBottomBar)field(screen,"composeBottomBar")).closeMenu());waitDockRestV063b7(screen);
+        return new JSONObject().put("leftDuringExpansion",true).put("hiddenActionsPassThrough",true).put("hiddenSemanticsRemoved",true)
+                .put("accessibilityClick",true).put("accessibilityActionReturn",actionResult);
+    }
+
+    private int alphaCountV063b8(Bitmap image,float left,float top,float right,float bottom){
+        int count=0;float size=Math.min(image.getWidth(),image.getHeight())*.78f,scale=size/24f;
+        float dx=(image.getWidth()-size)/2f,dy=(image.getHeight()-size)/2f;
+        for(int y=Math.max(0,(int)(dy+top*scale));y<Math.min(image.getHeight(),Math.ceil(dy+bottom*scale));y++)
+            for(int x=Math.max(0,(int)(dx+left*scale));x<Math.min(image.getWidth(),Math.ceil(dx+right*scale));x++)
+                if(Color.alpha(image.getPixel(x,y))>20)count++;
+        return count;
+    }
+
+    private JSONObject adornmentsV063b8(MainActivity screen)throws Exception {
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);tapComposeDescriptionV063b4("添加餐食");Thread.sleep(850);
+        final int[] starLuma={255},lowDot={0},plus={0};
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");float density=screen.getResources().getDisplayMetrics().density;
+            RectF capture=(RectF)ownField(dock,"hitCapture");Bitmap image=Bitmap.createBitmap(dock.getWidth(),dock.getHeight(),Bitmap.Config.ARGB_8888);
+            try{
+                dock.drawCurrentFrame(new Canvas(image));int cx=Math.round(capture.centerX()+9.9f*density),cy=Math.round(capture.centerY()-9.35f*density);
+                for(int y=cy-Math.round(2*density);y<=cy+Math.round(2*density);y++)for(int x=cx-Math.round(2*density);x<=cx+Math.round(2*density);x++){
+                    int color=image.getPixel(x,y);starLuma[0]=Math.min(starLuma[0],(Color.red(color)*3+Color.green(color)*6+Color.blue(color))/10);
+                }
+            }finally{image.recycle();}
+            ProfileSettingIcon smart=new ProfileSettingIcon(screen,"smart",Color.BLACK,false,true);smart.layout(0,0,192,192);
+            Bitmap glyph=Bitmap.createBitmap(192,192,Bitmap.Config.ARGB_8888);
+            try{smart.draw(new Canvas(glyph));lowDot[0]=alphaCountV063b8(glyph,0,17,7,24);plus[0]=alphaCountV063b8(glyph,18,0,24,7);}
+            finally{glyph.recycle();}
+            dock.closeMenu();
+        });
+        if(starLuma[0]<180||lowDot[0]!=0||plus[0]!=0)throw new Exception("Decorative sparkle adornments remain: "+starLuma[0]+" / "+lowDot[0]+" / "+plus[0]);
+        return new JSONObject().put("imageStarDotPatchMinimumLuma",starLuma[0]).put("smartLowerLeftInk",lowDot[0]).put("smartUpperRightInk",plus[0]);
+    }
+
+    private void awaitBookStageV063b8(MainActivity screen,boolean moving)throws Exception {
+        long deadline=android.os.SystemClock.uptimeMillis()+12000;
+        do{
+            final boolean[] ready={false};
+            uiAssert(()->{
+                Object overlay=field(screen,"bookOpeningOverlay");
+                if(moving)ready[0]=overlay!=null&&((Number)ownField(overlay,"progress")).floatValue()>=.18f&&((Number)ownField(overlay,"progress")).floatValue()<.85f;
+                else ready[0]=overlay==null&&Boolean.TRUE.equals(field(screen,"inBookDetail"));
+            });
+            if(ready[0])return;Thread.sleep(15);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        throw new Exception("Compose book did not reach requested stage: moving="+moving);
+    }
+
+    private JSONObject composeBookV063b8(MainActivity screen,String date,boolean reverse,boolean favorites,boolean noAnchor)throws Exception {
+        rootTabV063b5(screen,1);final View[] source={null};final Rect[] bounds={null};
+        if(favorites){uiAssert(()->invoke(screen,"renderFavoriteRecordsPage",new Class[]{}));settleV15();}
+        uiAssert(()->{
+            source[0]=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},(View)field(screen,"content"),date);
+            if(source[0]==null)throw new Exception("Compose book source cover is missing");bounds[0]=screenRect(source[0]);
+        });
+        long down=android.os.SystemClock.uptimeMillis();pointerV15(down,MotionEvent.ACTION_DOWN,bounds[0].exactCenterX(),bounds[0].exactCenterY());pointerV15(down,MotionEvent.ACTION_UP,bounds[0].exactCenterX(),bounds[0].exactCenterY());
+        awaitBookStageV063b8(screen,reverse);
+        uiAssert(()->{
+            Object opening=field(screen,"bookOpeningOverlay");
+            if(opening!=null&&!Class.forName("com.eatrecord.app.ComposeBookTransition").isInstance(opening))throw new Exception("Book motion is not hosted by Compose");
+            if(noAnchor)source[0].setTag("qa-temporarily-missing-book-anchor");
+        });
+        final View root=(View)field(screen,"root");final JSONArray frames=new JSONArray();final Throwable[] failure={null};
+        final Object[] textures={null,null};final float[] last={Float.NaN},maximumStep={0};final int[] moving={0};final boolean[] composeVerified={false};
+        Runnable sample=()->{
+            try{
+                Object opening=field(screen,"bookOpeningOverlay");if(opening==null||!Boolean.TRUE.equals(ownField(opening,"closing")))return;
+                if(!Class.forName("com.eatrecord.app.ComposeBookTransition").isInstance(opening))throw new Exception("Closing used the Java animation host");
+                if(!composeVerified[0]){
+                    if(!(opening instanceof ViewGroup)||((ViewGroup)opening).getChildCount()==0
+                            ||!(((ViewGroup)opening).getChildAt(0) instanceof androidx.compose.ui.platform.ComposeView))
+                        throw new Exception("Compose book has no live Compose surface");
+                    for(java.lang.reflect.Field legacy:opening.getClass().getDeclaredFields()){
+                        if(android.view.Choreographer.FrameCallback.class.isAssignableFrom(legacy.getType())){
+                            legacy.setAccessible(true);if(legacy.get(opening)!=null)throw new Exception("Java book frame driver is still active");
+                        }
+                    }
+                    composeVerified[0]=true;
+                }
+                if(noAnchor&&ownField(opening,"shelfCover")!=null)throw new Exception("Missing-anchor recovery probe still found an anchor");
+                RectF current=(RectF)ownField(opening,"current"),start=(RectF)ownField(opening,"start"),from=(RectF)ownField(opening,"closingFrom");
+                if(from.width()-start.width()<1)return;float width=(current.width()-start.width())/(from.width()-start.width());
+                Object page=ownField(opening,"pageImage"),cover=ownField(opening,"coverImage");
+                if(textures[0]==null){textures[0]=page;textures[1]=cover;}
+                else if(textures[0]!=page||textures[1]!=cover)throw new Exception("Compose book replaced texture objects during closing");
+                if(!Float.isNaN(last[0]))maximumStep[0]=Math.max(maximumStep[0],Math.abs(width-last[0]));last[0]=width;
+                if(width>.01f&&width<.99f)moving[0]++;
+                frames.put(new JSONObject().put("wallNs",System.nanoTime()).put("progress",ownField(opening,"progress")).put("widthFraction",width));
+            }catch(Throwable error){failure[0]=error;}
+        };
+        // Sample this draw's published pose directly. A queued read can observe a later
+        // animation callback and incorrectly merge two rendered steps into one jump.
+        android.view.ViewTreeObserver.OnDrawListener listener=sample::run;
+        uiAssert(()->root.getViewTreeObserver().addOnDrawListener(listener));
+        try{
+            sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);if(reverse)sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+            long deadline=android.os.SystemClock.uptimeMillis()+12000;final boolean[] finished={false};
+            do{
+                uiAssert(()->finished[0]=field(screen,"bookOpeningOverlay")==null&&!Boolean.TRUE.equals(field(screen,"inBookDetail"))&&!Boolean.TRUE.equals(field(screen,"bookClosePending")));
+                if(failure[0]!=null)throw new Exception("Compose draw sampling failed",failure[0]);
+                if(finished[0])break;Thread.sleep(20);
+            }while(android.os.SystemClock.uptimeMillis()<deadline);
+            if(!finished[0]||moving[0]<3||maximumStep[0]>.30f){
+                writeJsonV063b5("v063b10-close-sampling-failure-"+reverse+"-"+favorites+"-"+noAnchor+".json",new JSONObject().put("frames",frames).put("maximumStep",maximumStep[0]));
+                throw new Exception("Compose closing lacks continuous frames: "+moving[0]+" / "+maximumStep[0]);
+            }
+            uiAssert(()->{
+                if(favorites){if(!Boolean.TRUE.equals(field(screen,"inFavoriteRecordsPage")))throw new Exception("Compose book lost favorite return origin");}
+                else if(((Number)field(screen,"currentTab")).intValue()!=1)throw new Exception("Compose book lost Footprints return");
+            });
+            return new JSONObject().put("reverse",reverse).put("favoritesOrigin",favorites).put("missingAnchorVisualInjection",noAnchor)
+                    .put("movingDrawSamples",moving[0]).put("maximumWidthFractionStep",maximumStep[0]).put("texturesRetained",textures[0]!=null).put("frames",frames);
+        }finally{
+            uiAssert(()->{if(root.getViewTreeObserver().isAlive())root.getViewTreeObserver().removeOnDrawListener(listener);root.removeCallbacks(sample);if(noAnchor)source[0].setTag("footprint_plain_cover");});
+        }
+    }
+
+    private void revisionV063b8(Context context,android.content.SharedPreferences prefs)throws Exception {
+        getUiAutomation();FoodAnalysisJobService.cancelAll(context);FoodDraftStore.discard(context,FoodDraftStore.pendingSources(context));
+        java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();String date=HomeCalendarDates.key(Calendar.getInstance());
+        String before=new JSONObject().put(date,new JSONObject().put("favorite",true)
+                .put("lunch",fixtureMealV063b4(context,"lunch",Color.rgb(219,149,55))).put("dinner",fixtureMealV063b4(context,"dinner",Color.rgb(194,103,69)))).toString();
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false)
+                .put("autoCloudSync",false).put("aiAnalysisEnabled",false).put("mealNotificationsEnabled",false).put("foodRecognitionOnboardingSeen",true)
+                .put("nightMode",false).put("decoration","yellow").put("seenAnnouncementVersion",context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit())throw new Exception("Cannot prepare Beta8 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();
+        JSONArray feedback=new JSONArray();feedback.put(shortFeedbackV063b8(screen,false));feedback.put(shortFeedbackV063b8(screen,true));
+        writeJsonV063b5("v063b8-short-feedback.json",new JSONObject().put("samples",feedback));
+        writeJsonV063b5("v063b8-drag.json",dragDockV063b8(screen));
+        writeJsonV063b5("v063b8-menu-departure.json",menuDepartureV063b8(screen));
+        writeJsonV063b5("v063b8-adornments.json",adornmentsV063b8(screen));
+        uiAssert(()->assertRenderPure(screen,prefs,before));
+        JSONArray books=new JSONArray();
+        for(int kind=0;kind<4;kind++){
+            books.put(composeBookV063b8(screen,date,kind==1,kind==2,kind==3));
+            writeJsonV063b5("v063b8-compose-books.json",new JSONObject().put("cases",books));
+        }
+        uiAssert(()->assertRenderPure(screen,prefs,before));
+        if(requests.get()!=0)throw new Exception("Beta8 synthetic fixture attempted HTTP(S)");
+        Bundle result=new Bundle();result.putString("stream","PASS Beta8 independent synthetic fixture: short-tap complete feedback, held capsule drag and cancellation, stronger independent add feedback, removed sparkle adornments, Compose book opening/closing and reversal with retained textures, favorite and missing-anchor return, unchanged diary and HTTP(S)=0. Emulator samples require phone visual acceptance.\n");finish(Activity.RESULT_OK,result);
+    }
+
+    /** Actual draw and FrameMetrics observations are diagnostics, with no device-speed threshold. */
+    private final class FrameDiagnosticsV063b9 implements android.view.ViewTreeObserver.OnDrawListener {
+        final MainActivity screen;
+        final View root;
+        final ComposeBottomBar dock;
+        final java.lang.reflect.Field swellField,mainField,positionField,rendererField;
+        Object sampledBook,sampledRenderer;
+        final android.os.HandlerThread thread=new android.os.HandlerThread("qa-beta9-frame-metrics");
+        final ArrayList<long[]> metrics=new ArrayList<>();
+        final ArrayList<String> metricPhases=new ArrayList<>();
+        final long[] times=new long[4096];
+        final float[] swells=new float[4096],mainSwells=new float[4096],positions=new float[4096],bookProgress=new float[4096];
+        final boolean[] closing=new boolean[4096];
+        final String[] phases=new String[4096];
+        volatile String phase="";
+        int count;
+        boolean queued;
+        String queuedPhase;
+        long queuedTime;
+        Throwable failure;
+        final Runnable sample;
+        final Window.OnFrameMetricsAvailableListener listener;
+        FrameDiagnosticsV063b9(MainActivity screen)throws Exception {
+            this.screen=screen;root=(View)field(screen,"root");dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            swellField=dock.getClass().getDeclaredField("drawnSwell");swellField.setAccessible(true);
+            mainField=dock.getClass().getDeclaredField("drawnMainSwell");mainField.setAccessible(true);
+            positionField=dock.getClass().getDeclaredField("drawnPosition");positionField.setAccessible(true);
+            rendererField=ComposeBookTransition.class.getDeclaredField("renderer");rendererField.setAccessible(true);
+            sample=()->{
+                queued=false;
+                if(count>=times.length)return;
+                try{
+                    times[count]=queuedTime;phases[count]=queuedPhase;
+                    swells[count]=swellField.getFloat(dock);mainSwells[count]=mainField.getFloat(dock);positions[count]=positionField.getFloat(dock);
+                    Object book=field(screen,"bookOpeningOverlay");
+                    if(book!=null){
+                        Object renderer=rendererField.get(book);
+                        if(renderer==null)throw new Exception("Compose book lost its reusable renderer");
+                        if(book==sampledBook&&renderer!=sampledRenderer)throw new Exception("Compose book replaced its renderer during motion");
+                        sampledBook=book;sampledRenderer=renderer;
+                    }
+                    bookProgress[count]=book==null?-1:((Number)ownField(book,"progress")).floatValue();
+                    closing[count]=book!=null&&Boolean.TRUE.equals(ownField(book,"closing"));count++;
+                }catch(Throwable error){failure=error;}
+            };
+            listener=(window,frame,dropped)->{
+                String active=phase;if(active.isEmpty())return;
+                synchronized(metrics){
+                    metrics.add(new long[]{frame.getMetric(android.view.FrameMetrics.TOTAL_DURATION),
+                            frame.getMetric(android.view.FrameMetrics.DRAW_DURATION),frame.getMetric(android.view.FrameMetrics.LAYOUT_MEASURE_DURATION),
+                            frame.getMetric(android.view.FrameMetrics.ANIMATION_DURATION),dropped});metricPhases.add(active);
+                }
+            };
+            thread.start();
+            uiAssert(()->{root.getViewTreeObserver().addOnDrawListener(this);screen.getWindow().addOnFrameMetricsAvailableListener(listener,new android.os.Handler(thread.getLooper()));});
+        }
+        @Override public void onDraw(){
+            if(phase.isEmpty()||queued)return;
+            queued=true;queuedPhase=phase;queuedTime=System.nanoTime();root.post(sample);
+        }
+        void begin(String value)throws Exception {uiAssert(()->{phase=value;root.invalidate();});}
+        void pause()throws Exception {uiAssert(()->phase="");if(failure!=null)throw new Exception("Beta9 draw sampling failed",failure);}
+        JSONObject finish()throws Exception {
+            uiAssert(()->{phase="";if(root.getViewTreeObserver().isAlive())root.getViewTreeObserver().removeOnDrawListener(this);root.removeCallbacks(sample);screen.getWindow().removeOnFrameMetricsAvailableListener(listener);});
+            thread.quitSafely();thread.join(3000);
+            if(failure!=null)throw new Exception("Beta9 draw sampling failed",failure);
+            JSONArray draws=new JSONArray(),frameMetrics=new JSONArray();long maximumGap=0;
+            for(int i=0;i<count;i++){
+                long gap=i>0&&phases[i].equals(phases[i-1])?times[i]-times[i-1]:0;maximumGap=Math.max(maximumGap,gap);
+                draws.put(new JSONObject().put("phase",phases[i]).put("drawNs",times[i]).put("drawGapNs",gap)
+                        .put("tabPressure",swells[i]).put("mainPressure",mainSwells[i]).put("position",positions[i])
+                        .put("bookProgress",bookProgress[i]).put("closing",closing[i]));
+            }
+            synchronized(metrics){for(int i=0;i<metrics.size();i++){long[] row=metrics.get(i);frameMetrics.put(new JSONArray().put(metricPhases.get(i)).put(row[0]).put(row[1]).put(row[2]).put(row[3]).put(row[4]));}}
+            return new JSONObject().put("diagnosticOnly",true).put("maximumDrawGapMs",maximumGap/1_000_000d).put("draws",draws)
+                    .put("frameMetricFields",new JSONArray().put("phase").put("totalNs").put("drawNs").put("layoutMeasureNs").put("animationNs").put("listenerDropped"))
+                    .put("frameMetrics",frameMetrics);
+        }
+    }
+
+    private JSONObject shortFeedbackV063b9(MainActivity screen,boolean main,FrameDiagnosticsV063b9 trace)throws Exception {
+        rootTabV063b5(screen,0);waitDockRestV063b7(screen);
+        float[] point=main?new float[2]:dockPointV063b8(screen,1);
+        if(main){Rect bounds=composeBoundsV063b7("添加餐食");point[0]=bounds.exactCenterX();point[1]=bounds.exactCenterY();}
+        String phase=main?"short-main":"short-tab";trace.begin(phase);
+        long down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,point[0],point[1]);
+        long remaining=down+40-android.os.SystemClock.uptimeMillis();if(remaining>0)Thread.sleep(remaining);
+        long held=android.os.SystemClock.uptimeMillis()-down;
+        pointerV15(down,MotionEvent.ACTION_UP,point[0],point[1]);long released=System.nanoTime();
+        long deadline=android.os.SystemClock.uptimeMillis()+4000;float observedPeak=0;
+        do{
+            float value=dockFloatV063b7(screen,main?"drawnMainSwell":"drawnSwell");observedPeak=Math.max(observedPeak,value);
+            if(observedPeak>=.85f&&value<.08f)break;Thread.sleep(12);
+        }while(android.os.SystemClock.uptimeMillis()<deadline);
+        waitDockRestV063b7(screen);trace.pause();
+        float peak=0;int peakIndex=-1,fallingFrames=0;long firstHigh=0,lastHigh=0,firstBelowHigh=0,lastIntermediate=0;
+        JSONArray samples=new JSONArray();
+        for(int i=0;i<trace.count;i++)if(phase.equals(trace.phases[i])){
+            float value=main?trace.mainSwells[i]:trace.swells[i];
+            if(value>peak){peak=value;peakIndex=i;}
+            if(value>=.8f){if(firstHigh==0)firstHigh=trace.times[i];lastHigh=trace.times[i];}
+            samples.put(new JSONObject().put("drawNs",trace.times[i]).put("pressure",value));
+        }
+        for(int i=peakIndex+1;peakIndex>=0&&i<trace.count;i++)if(phase.equals(trace.phases[i])){
+            float value=main?trace.mainSwells[i]:trace.swells[i];
+            if(value<.8f&&firstBelowHigh==0)firstBelowHigh=trace.times[i];
+            if(value>.12f&&value<.78f){fallingFrames++;lastIntermediate=trace.times[i];}
+        }
+        if(peak<.85f)throw new Exception("Beta9 short tap lacks a visible drawn peak: "+main+" / "+peak);
+        if(fallingFrames<1)throw new Exception("Beta9 feedback returned without a drawn intermediate state: "+main);
+        uiAssert(()->{
+            ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+            if(main){if(!dock.isMenuExpanded()||((Number)field(screen,"currentTab")).intValue()!=0)throw new Exception("Short add tap did not open one menu");}
+            else if(((Number)field(screen,"currentTab")).intValue()!=1)throw new Exception("Short Tab tap lost its release target");
+        });
+        if(main){
+            if(dockFloatV063b7(screen,"drawnSwell")>.10f)throw new Exception("Short add tap inflated Tab feedback");
+            screenshot("v063b9-expanded-combined-icon");uiAssert(()->((ComposeBottomBar)field(screen,"composeBottomBar")).closeMenu());waitDockRestV063b7(screen);
+        }
+        return new JSONObject().put("main",main).put("requestedHoldMs",40).put("physicalHoldMs",held).put("peak",peak)
+                .put("peakAfterReleaseMs",(trace.times[peakIndex]-released)/1_000_000d)
+                .put("highBandSpanMs",firstHigh==0?0:(lastHigh-firstHigh)/1_000_000d)
+                .put("peakToBelowHighMs",firstBelowHigh==0?0:(firstBelowHigh-trace.times[peakIndex])/1_000_000d)
+                .put("intermediateFallFrames",fallingFrames).put("lastIntermediateAfterReleaseMs",(lastIntermediate-released)/1_000_000d)
+                .put("releaseCommittedOnce",true).put("draws",samples);
+    }
+
+    private JSONObject heldFeedbackV063b9(MainActivity screen)throws Exception {
+        JSONArray cases=new JSONArray();
+        for(boolean main:new boolean[]{false,true}){
+            rootTabV063b5(screen,0);waitDockRestV063b7(screen);
+            float[] point=main?new float[2]:dockPointV063b8(screen,1);
+            if(main){Rect bounds=composeBoundsV063b7("添加餐食");point[0]=bounds.exactCenterX();point[1]=bounds.exactCenterY();}
+            long down=android.os.SystemClock.uptimeMillis();pointerV15(down,MotionEvent.ACTION_DOWN,point[0],point[1]);
+            float first,retained;
+            try{
+                first=heldPressureV063b7(screen,main?"drawnMainSwell":"drawnSwell");Thread.sleep(160);
+                retained=dockFloatV063b7(screen,main?"drawnMainSwell":"drawnSwell");
+                if(retained<.8f)throw new Exception("Held feedback fell before release: "+main+" / "+retained);
+                uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0||((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded())throw new Exception("Held feedback committed business on DOWN");});
+                if(main&&dockFloatV063b7(screen,"drawnSwell")>.1f)throw new Exception("Held add feedback inflated Tab");
+            }finally{pointerV15(down,MotionEvent.ACTION_CANCEL,point[0],point[1]);}
+            waitDockRestV063b7(screen);
+            uiAssert(()->{if(((Number)field(screen,"currentTab")).intValue()!=0||((ComposeBottomBar)field(screen,"composeBottomBar")).isMenuExpanded())throw new Exception("Cancel committed held action");});
+            cases.put(new JSONObject().put("main",main).put("firstHeldPressure",first).put("retainedHeldPressure",retained).put("cancelPreservesBusiness",true));
+        }
+        return new JSONObject().put("cases",cases);
+    }
+
+    /** QA boundary injection exercises the no-distance request on an already prepared real overlay. */
+    private JSONObject zeroProgressV063b9(MainActivity screen,String date)throws Exception {
+        rootTabV063b5(screen,1);final Rect[] source={null};
+        uiAssert(()->{
+            View cover=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},(View)field(screen,"content"),date);
+            if(cover==null)throw new Exception("Zero-progress probe has no source cover");source[0]=screenRect(cover);
+        });
+        long down=android.os.SystemClock.uptimeMillis();
+        pointerV15(down,MotionEvent.ACTION_DOWN,source[0].exactCenterX(),source[0].exactCenterY());
+        pointerV15(down,MotionEvent.ACTION_UP,source[0].exactCenterX(),source[0].exactCenterY());
+        awaitBookStageV063b8(screen,true);final float[] observed={0};
+        uiAssert(()->{
+            Object overlay=field(screen,"bookOpeningOverlay");
+            if(overlay==null||!Boolean.TRUE.equals(ownField(overlay,"paperHidden")))throw new Exception("Zero-progress injection missed prepared overlay");
+            observed[0]=((Number)ownField(overlay,"progress")).floatValue();
+            View paper=(View)ownField(overlay,"paper");
+            float alpha=((Number)ownField(overlay,"paperAlpha")).floatValue();
+            float elevation=((Number)ownField(overlay,"paperElevation")).floatValue(),z=((Number)ownField(overlay,"paperTranslationZ")).floatValue();
+            Bitmap page=(Bitmap)ownField(overlay,"pageImage"),cover=(Bitmap)ownField(overlay,"coverImage");
+            java.lang.reflect.Method request=overlay.getClass().getDeclaredMethod("startProgressAnimation",float.class,float.class,long.class);request.setAccessible(true);
+            request.invoke(overlay,0f,0f,300L);
+            if(field(screen,"bookOpeningOverlay")!=null||((View)overlay).getParent()!=null||((View)overlay).isClickable()
+                    ||!Boolean.TRUE.equals(ownField(overlay,"finished"))||Boolean.TRUE.equals(ownField(overlay,"paperHidden")))
+                throw new Exception("Zero-distance request retained an overlay or touch owner");
+            if(Math.abs(paper.getAlpha()-alpha)>.001f||Math.abs(paper.getElevation()-elevation)>.001f||Math.abs(paper.getTranslationZ()-z)>.001f)
+                throw new Exception("Zero-distance finish did not restore paper alpha/elevation/Z");
+            if(!page.isRecycled()||!cover.isRecycled())throw new Exception("Zero-distance finish retained textures");
+        });
+        rootTabV063b5(screen,1);
+        return new JSONObject().put("qaInjection","prepared-opening startProgressAnimation(0,0,300)")
+                .put("actualOpeningProgressBeforeInjection",observed[0]).put("completedSynchronously",true)
+                .put("overlayAndTouchOwnerRemoved",true).put("paperAlphaAndZRestored",true).put("texturesReleased",true);
+    }
+
+    private void revisionV063b9(Context context,android.content.SharedPreferences prefs)throws Exception {
+        getUiAutomation();FoodAnalysisJobService.cancelAll(context);FoodDraftStore.discard(context,FoodDraftStore.pendingSources(context));
+        java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();String date=HomeCalendarDates.key(Calendar.getInstance());
+        JSONObject fixtureDay=new JSONObject().put("lunch",fixtureMealV063b4(context,"lunch",Color.rgb(219,149,55)))
+                .put("dinner",fixtureMealV063b4(context,"dinner",Color.rgb(194,103,69)));
+        JSONObject fixtureDays=new JSONObject();Calendar fixtureDate=Calendar.getInstance();
+        for(int i=0;i<14;i++){
+            JSONObject day=new JSONObject(fixtureDay.toString());day.put("favorite",i==0);
+            fixtureDays.put(HomeCalendarDates.key(fixtureDate),day);fixtureDate.add(Calendar.DAY_OF_MONTH,-1);
+        }
+        String before=fixtureDays.toString();
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false)
+                .put("autoCloudSync",false).put("aiAnalysisEnabled",false).put("mealNotificationsEnabled",false).put("foodRecognitionOnboardingSeen",true)
+                .put("nightMode",false).put("decoration","yellow").put("footprintDateSections",true).put("footprintLayout","expanded").put("seenAnnouncementVersion",context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before).putString(NutritionStore.PROFILE,profile.toString()).commit())throw new Exception("Cannot prepare Beta9 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();
+        screenshot("v063b9-main-combined-glyph");
+        FrameDiagnosticsV063b9 trace=new FrameDiagnosticsV063b9(screen);
+        try{
+            JSONArray feedback=new JSONArray();feedback.put(shortFeedbackV063b9(screen,false,trace));feedback.put(shortFeedbackV063b9(screen,true,trace));
+            writeJsonV063b5("v063b9-short-feedback.json",new JSONObject().put("samples",feedback));
+            trace.begin("held-feedback");writeJsonV063b5("v063b9-held-feedback.json",heldFeedbackV063b9(screen));trace.pause();
+            trace.begin("drag-reverse");writeJsonV063b5("v063b9-drag.json",dragDockV063b8(screen));trace.pause();
+            trace.begin("menu-departure");writeJsonV063b5("v063b9-menu-departure.json",menuDepartureV063b8(screen));trace.pause();
+            writeJsonV063b5("v063b9-adornments.json",adornmentsV063b8(screen));
+            uiAssert(()->assertRenderPure(screen,prefs,before));
+            JSONArray books=new JSONArray();
+            for(int kind=0;kind<4;kind++){
+                trace.begin("book-"+kind);long started=android.os.SystemClock.elapsedRealtime();
+                JSONObject result=composeBookV063b8(screen,date,kind==1,kind==2,kind==3);
+                trace.pause();result.put("actualElapsedMs",android.os.SystemClock.elapsedRealtime()-started);
+                books.put(result);writeJsonV063b5("v063b9-compose-books.json",new JSONObject().put("cases",books));
+            }
+            trace.begin("book-zero-progress-injection");
+            writeJsonV063b5("v063b9-zero-progress-injection.json",zeroProgressV063b9(screen,date));trace.pause();
+            uiAssert(()->assertRenderPure(screen,prefs,before));
+        }finally{writeJsonV063b5("v063b9-frame-diagnostics.json",trace.finish());}
+        if(requests.get()!=0)throw new Exception("Beta9 synthetic fixture attempted HTTP(S)");
+        Bundle result=new Bundle();result.putString("stream","PASS Beta9 independent synthetic fixture: drawn short-tap peak and intermediate return, held feedback, continuous drag/cancel/reverse, independent combined main action, hidden menu/accessibility and adornments, Compose book complete/partial/favorite/missing-anchor returns and texture ownership, unchanged diary and HTTP(S)=0. Frame timing is diagnostic and requires phone visual acceptance.\n");finish(Activity.RESULT_OK,result);
+    }
+
+    private void waitMealEditorClosedV063b10(AlertDialog dialog)throws Exception {
+        long end=android.os.SystemClock.uptimeMillis()+8000;final boolean[] closed={false};
+        do{uiAssert(()->closed[0]=!dialog.isShowing());if(closed[0])return;Thread.sleep(20);}while(android.os.SystemClock.uptimeMillis()<end);
+        throw new Exception("Asynchronous meal editor did not finish");
+    }
+
+    private JSONObject mealSavingV063b10(MainActivity screen,android.content.SharedPreferences prefs,String date)throws Exception {
+        final AlertDialog[] dialog={null};final android.widget.EditText[] input={null};final boolean[] uiPulse={false};
+        // Hold the real store lock while dispatching UI input. A UI-thread transaction would deadlock here.
+        synchronized(NutritionStore.LOCK){
+            uiAssert(()->{
+                dialog[0]=(AlertDialog)invoke(screen,"showMealRecordEditor",new Class[]{String.class,String.class},date,"lunch");
+                View decor=dialog[0].getWindow().getDecorView();input[0]=(android.widget.EditText)decor.findViewWithTag("meal_record_text");
+                input[0].setText("异步保存的午餐");decor.findViewWithTag("meal_record_done").performClick();
+                if(!dialog[0].isShowing()||input[0].isEnabled())throw new Exception("Save did not retain its pending editor");
+            });
+            JSONObject latest=NutritionStore.read(prefs,NutritionStore.DAYS);
+            latest.getJSONObject(date).getJSONObject("lunch").put("workerRevision",17);
+            if(!prefs.edit().putString(NutritionStore.DAYS,latest.toString()).commit())throw new Exception("Cannot prepare concurrent worker merge");
+            uiAssert(()->uiPulse[0]=true);
+            if(!uiPulse[0])throw new Exception("UI did not remain available while persistence waited");
+        }
+        waitMealEditorClosedV063b10(dialog[0]);
+        JSONObject saved=NutritionStore.meal(NutritionStore.read(prefs,NutritionStore.DAYS),date,"lunch");
+        if(!"异步保存的午餐".equals(saved.optString("text"))||saved.optInt("workerRevision")!=17
+                ||saved.optJSONArray("foodItems")==null||saved.optJSONArray("foodItems").length()!=1)
+            throw new Exception("Async save lost text or latest worker/media fields");
+        String before=prefs.getString(NutritionStore.DAYS,"{}");
+        uiAssert(()->{
+            dialog[0]=(AlertDialog)invoke(screen,"showMealRecordEditor",new Class[]{String.class,String.class},date,"lunch");
+            dialog[0].dismiss();
+        });waitMealEditorClosedV063b10(dialog[0]);
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("Unchanged inline editor rewrote diary");
+        final java.util.concurrent.atomic.AtomicBoolean failOnce=new java.util.concurrent.atomic.AtomicBoolean(true);
+        android.content.SharedPreferences failing=(android.content.SharedPreferences)java.lang.reflect.Proxy.newProxyInstance(
+                android.content.SharedPreferences.class.getClassLoader(),new Class[]{android.content.SharedPreferences.class},(proxy,method,args)->{
+                    if(!"edit".equals(method.getName()))return method.invoke(prefs,args);
+                    final android.content.SharedPreferences.Editor editor=prefs.edit();
+                    return java.lang.reflect.Proxy.newProxyInstance(android.content.SharedPreferences.Editor.class.getClassLoader(),
+                            new Class[]{android.content.SharedPreferences.Editor.class},(editorProxy,editorMethod,editorArgs)->{
+                                if("commit".equals(editorMethod.getName())&&failOnce.compareAndSet(true,false))return false;
+                                Object result=editorMethod.invoke(editor,editorArgs);return result==editor?editorProxy:result;
+                            });
+                });
+        java.lang.reflect.Field preferences=MainActivity.class.getDeclaredField("prefs");preferences.setAccessible(true);
+        try{
+            uiAssert(()->{
+                preferences.set(screen,failing);
+                dialog[0]=(AlertDialog)invoke(screen,"showMealRecordEditor",new Class[]{String.class,String.class},date,"lunch");
+                View decor=dialog[0].getWindow().getDecorView();input[0]=(android.widget.EditText)decor.findViewWithTag("meal_record_text");
+                input[0].setText("重试后保存");decor.findViewWithTag("meal_record_done").performClick();
+            });
+            long end=android.os.SystemClock.uptimeMillis()+8000;final boolean[] retryReady={false};
+            do{
+                uiAssert(()->{
+                    View decor=dialog[0].getWindow().getDecorView();android.widget.TextView status=(android.widget.TextView)decor.findViewWithTag("meal_text_save_status");
+                    retryReady[0]=dialog[0].isShowing()&&input[0].isEnabled()&&status.getText().toString().contains("保存失败");
+                });if(retryReady[0])break;Thread.sleep(20);
+            }while(android.os.SystemClock.uptimeMillis()<end);
+            if(!retryReady[0]||failOnce.get())throw new Exception("Injected commit failure did not preserve retryable editor");
+            uiAssert(()->{preferences.set(screen,prefs);dialog[0].getWindow().getDecorView().findViewWithTag("meal_record_done").performClick();});
+            waitMealEditorClosedV063b10(dialog[0]);
+        }finally{uiAssert(()->preferences.set(screen,prefs));}
+        saved=NutritionStore.meal(NutritionStore.read(prefs,NutritionStore.DAYS),date,"lunch");
+        if(!"重试后保存".equals(saved.optString("text"))||saved.optInt("workerRevision")!=17)throw new Exception("Retry lost its intended text or concurrent metadata");
+        uiAssert(()->{
+            dialog[0]=(AlertDialog)invoke(screen,"showMealRecordEditor",new Class[]{String.class,String.class},date,"snack");
+            ((android.widget.EditText)dialog[0].getWindow().getDecorView().findViewWithTag("meal_record_text")).setText("返回保存夜宵");
+            dialog[0].cancel();
+        });waitMealEditorClosedV063b10(dialog[0]);
+        if(!"返回保存夜宵".equals(NutritionStore.meal(NutritionStore.read(prefs,NutritionStore.DAYS),date,"snack").optString("text")))
+            throw new Exception("Inline Back/cancel lost its text");
+        uiAssert(()->{
+            dialog[0]=(AlertDialog)invoke(screen,"showManualMealTextEditor",new Class[]{String.class,String.class},date,"breakfast");
+            ((android.widget.EditText)dialog[0].getWindow().getDecorView().findViewWithTag("manual_food_text")).setText("后台保存早餐");
+        });
+        // Let AlertDialog deliver OnShow and bind the real Save action before injecting a click.
+        uiAssert(()->dialog[0].getButton(AlertDialog.BUTTON_POSITIVE).performClick());waitMealEditorClosedV063b10(dialog[0]);
+        if(!"后台保存早餐".equals(NutritionStore.meal(NutritionStore.read(prefs,NutritionStore.DAYS),date,"breakfast").optString("text")))
+            throw new Exception("Manual editor did not persist on its normal entry");
+        before=prefs.getString(NutritionStore.DAYS,"{}");
+        uiAssert(()->{
+            dialog[0]=(AlertDialog)invoke(screen,"showManualMealTextEditor",new Class[]{String.class,String.class},date,"breakfast");
+            ((android.widget.EditText)dialog[0].getWindow().getDecorView().findViewWithTag("manual_food_text")).setText("取消的新文字");dialog[0].cancel();
+        });waitMealEditorClosedV063b10(dialog[0]);
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("Manual cancel saved unconfirmed input");
+        final java.util.concurrent.atomic.AtomicBoolean lateOnce=new java.util.concurrent.atomic.AtomicBoolean(true);
+        final java.util.concurrent.atomic.AtomicReference<Throwable> lateFailure=new java.util.concurrent.atomic.AtomicReference<>();
+        android.content.SharedPreferences later=(android.content.SharedPreferences)java.lang.reflect.Proxy.newProxyInstance(
+                android.content.SharedPreferences.class.getClassLoader(),new Class[]{android.content.SharedPreferences.class},(proxy,method,args)->{
+                    if(!"edit".equals(method.getName()))return method.invoke(prefs,args);
+                    final android.content.SharedPreferences.Editor editor=prefs.edit();
+                    return java.lang.reflect.Proxy.newProxyInstance(android.content.SharedPreferences.Editor.class.getClassLoader(),new Class[]{android.content.SharedPreferences.Editor.class},
+                            (editorProxy,editorMethod,editorArgs)->{
+                                if("commit".equals(editorMethod.getName())){
+                                    boolean committed=editor.commit();
+                                    if(committed&&lateOnce.compareAndSet(true,false))new android.os.Handler(android.os.Looper.getMainLooper()).post(()->{
+                                        try{synchronized(NutritionStore.LOCK){
+                                            JSONObject latest=NutritionStore.read(prefs,NutritionStore.DAYS);latest.getJSONObject(date).getJSONObject("lunch").put("lateSnapshotRevision",27);
+                                            if(!prefs.edit().putString(NutritionStore.DAYS,latest.toString()).commit())throw new Exception("Late fixture write failed");
+                                        }}catch(Throwable error){lateFailure.set(error);}
+                                    });
+                                    return committed;
+                                }
+                                Object result=editorMethod.invoke(editor,editorArgs);return result==editor?editorProxy:result;
+                            });
+                });
+        try{
+            uiAssert(()->{
+                preferences.set(screen,later);dialog[0]=(AlertDialog)invoke(screen,"showManualMealTextEditor",new Class[]{String.class,String.class},date,"breakfast");
+                ((android.widget.EditText)dialog[0].getWindow().getDecorView().findViewWithTag("manual_food_text")).setText("最新快照的早餐");
+            });
+            uiAssert(()->dialog[0].getButton(AlertDialog.BUTTON_POSITIVE).performClick());waitMealEditorClosedV063b10(dialog[0]);
+            if(lateFailure.get()!=null)throw new Exception("Late metadata injection failed",lateFailure.get());
+            uiAssert(()->{
+                JSONObject live=(JSONObject)field(screen,"days");
+                if(!"最新快照的早餐".equals(live.getJSONObject(date).getJSONObject("breakfast").optString("text"))
+                        ||live.getJSONObject(date).getJSONObject("lunch").optInt("lateSnapshotRevision")!=27)
+                    throw new Exception("Save continuation rendered a stale diary after a newer commit");
+            });
+        }finally{uiAssert(()->preferences.set(screen,prefs));}
+        final java.util.concurrent.atomic.AtomicBoolean exhaustOnce=new java.util.concurrent.atomic.AtomicBoolean(true);
+        android.content.SharedPreferences exhausted=(android.content.SharedPreferences)java.lang.reflect.Proxy.newProxyInstance(
+                android.content.SharedPreferences.class.getClassLoader(),new Class[]{android.content.SharedPreferences.class},(proxy,method,args)->{
+                    if("getString".equals(method.getName())&&NutritionStore.DAYS.equals(args[0])&&exhaustOnce.compareAndSet(true,false))throw new OutOfMemoryError("synthetic store read");
+                    return method.invoke(prefs,args);
+                });
+        try{
+            uiAssert(()->{
+                preferences.set(screen,exhausted);dialog[0]=(AlertDialog)invoke(screen,"showMealRecordEditor",new Class[]{String.class,String.class},date,"lunch");
+                input[0]=(android.widget.EditText)dialog[0].getWindow().getDecorView().findViewWithTag("meal_record_text");input[0].setText("内存失败后重试");
+                dialog[0].getWindow().getDecorView().findViewWithTag("meal_record_done").performClick();
+            });
+            long end=android.os.SystemClock.uptimeMillis()+8000;final boolean[] retry={false};
+            do{uiAssert(()->retry[0]=dialog[0].isShowing()&&input[0].isEnabled());if(retry[0])break;Thread.sleep(20);}while(android.os.SystemClock.uptimeMillis()<end);
+            if(!retry[0]||exhaustOnce.get())throw new Exception("Injected allocation failure left editor disabled");
+            uiAssert(()->{preferences.set(screen,prefs);dialog[0].getWindow().getDecorView().findViewWithTag("meal_record_done").performClick();});waitMealEditorClosedV063b10(dialog[0]);
+        }finally{uiAssert(()->preferences.set(screen,prefs));}
+        try{
+            synchronized(NutritionStore.LOCK){
+                uiAssert(()->{
+                    dialog[0]=(AlertDialog)invoke(screen,"showMealRecordEditor",new Class[]{String.class,String.class},date,"lunch");
+                    input[0]=(android.widget.EditText)dialog[0].getWindow().getDecorView().findViewWithTag("meal_record_text");input[0].setText("后台完成仍保留输入");
+                    dialog[0].getWindow().getDecorView().findViewWithTag("meal_record_done").performClick();setMainField(screen,"rootStopped",true);
+                });
+            }
+            long end=android.os.SystemClock.uptimeMillis()+8000;final boolean[] acknowledged={false};
+            do{uiAssert(()->{
+                android.widget.TextView status=(android.widget.TextView)dialog[0].getWindow().getDecorView().findViewWithTag("meal_text_save_status");
+                acknowledged[0]=dialog[0].isShowing()&&input[0].isEnabled()&&"已保存".contentEquals(status.getText());
+            });if(acknowledged[0])break;Thread.sleep(20);}while(android.os.SystemClock.uptimeMillis()<end);
+            if(!acknowledged[0])throw new Exception("Stopped owner ran a late editor continuation or lost save acknowledgement");
+            uiAssert(()->{setMainField(screen,"rootStopped",false);dialog[0].getWindow().getDecorView().findViewWithTag("meal_record_done").performClick();});waitMealEditorClosedV063b10(dialog[0]);
+        }finally{uiAssert(()->setMainField(screen,"rootStopped",false));}
+        return new JSONObject().put("uiResponsiveUnderStoreLock",true).put("latestWorkerFieldsPreserved",true)
+                .put("injectedCommitFailureRetry",true).put("inlineBackSave",true).put("manualSaveAndCancel",true)
+                .put("injectedLaterCommitRefresh",true).put("injectedAllocationFailureRetry",true).put("injectedStoppedOwnerDefersUiAction",true);
+    }
+
+    private JSONObject detailLoadingV063b10(MainActivity screen,android.content.SharedPreferences prefs,String date)throws Exception {
+        JSONObject item=NutritionStore.meal(NutritionStore.read(prefs,NutritionStore.DAYS),date,"lunch").getJSONArray("foodItems").getJSONObject(0);
+        String before=prefs.getString(NutritionStore.DAYS,"{}");
+        Class<?> imageClass=Class.forName("com.eatrecord.app.FoodUi$DetailImage");
+        java.lang.reflect.Field loaders=imageClass.getDeclaredField("LOADERS");loaders.setAccessible(true);
+        java.util.concurrent.ThreadPoolExecutor pool=(java.util.concurrent.ThreadPoolExecutor)loaders.get(null);
+        int originalCore=pool.getCorePoolSize(),workers=pool.getMaximumPoolSize();pool.setCorePoolSize(workers);
+        java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(workers),release=new java.util.concurrent.CountDownLatch(1);
+        final AlertDialog[] first={null},second={null};final android.widget.ImageView[] stale={null},current={null};
+        try{
+            for(int i=0;i<workers;i++)pool.execute(()->{entered.countDown();try{release.await();}catch(InterruptedException stopped){Thread.currentThread().interrupt();}});
+            if(!entered.await(5,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("Cannot prepare deterministic detail loader delay");
+            uiAssert(()->{
+                FoodUi food=(FoodUi)invoke(screen,"foodUi",new Class[]{});
+                first[0]=food.details(date,"lunch",item);View decor=first[0].getWindow().getDecorView();
+                stale[0]=(android.widget.ImageView)decor.findViewWithTag("food_detail_image");
+                if(!first[0].isShowing()||stale[0].getDrawable()!=null||decor.findViewWithTag("food_detail_loading").getVisibility()!=View.VISIBLE)
+                    throw new Exception("Detail did not present its loading frame before decoding");
+            });
+            final boolean[] pulse={false};uiAssert(()->pulse[0]=true);
+            if(!pulse[0])throw new Exception("Detail decoder blocked UI callbacks");
+            uiAssert(()->{
+                first[0].dismiss();second[0]=((FoodUi)invoke(screen,"foodUi",new Class[]{})).details(date,"lunch",item);
+                current[0]=(android.widget.ImageView)second[0].getWindow().getDecorView().findViewWithTag("food_detail_image");
+            });
+            release.countDown();long end=android.os.SystemClock.uptimeMillis()+10000;final boolean[] loaded={false};
+            do{uiAssert(()->loaded[0]=current[0].getDrawable()!=null);if(loaded[0])break;Thread.sleep(30);}while(android.os.SystemClock.uptimeMillis()<end);
+            if(!loaded[0])throw new Exception("Current detail image did not complete after loader release");
+            uiAssert(()->{
+                if(first[0].isShowing()||stale[0].getDrawable()!=null)throw new Exception("Closed detail received a late image");
+                if(second[0].getWindow().getDecorView().findViewWithTag("food_detail_loading").getVisibility()==View.VISIBLE)
+                    throw new Exception("Completed detail kept its loading message");
+            });
+            screenshot("v063b10-async-detail");
+        }finally{
+            release.countDown();pool.setCorePoolSize(originalCore);
+            uiAssert(()->{if(first[0]!=null)first[0].dismiss();if(second[0]!=null)second[0].dismiss();});
+        }
+        if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("Detail image preparation changed diary");
+        return new JSONObject().put("qaInjection","temporarily blocked loader workers").put("immediateLoadingFrame",true)
+                .put("uiResponsiveWhileDecodeBlocked",true).put("dismissAndReopenRejectsLateImage",true).put("diaryUnchanged",true);
+    }
+
+    /** Cache probes mutate only private files on the independent QA device and restore their bytes/mtime. */
+    private final class PreservedCacheFileV063b10 {
+        final File target,backup;
+        final long modified;
+        final String digest;
+        PreservedCacheFileV063b10(Context context,File target)throws Exception {
+            this.target=target;modified=target.lastModified();
+            if(target.isFile()){
+                digest=fileDigest(target);
+                backup=File.createTempFile("v063b10-cache-backup-",".bin",context.getCacheDir());
+                java.nio.file.Files.copy(target.toPath(),backup.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }else{backup=null;digest=null;}
+        }
+        void restore()throws Exception {
+            if(backup==null){
+                if(target.exists()&&!target.delete())throw new Exception("Cannot remove private QA cache fixture");
+                return;
+            }
+            java.nio.file.Files.copy(backup.toPath(),target.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            if(!target.setLastModified(modified)||!digest.equals(fileDigest(target)))
+                throw new Exception("Private cache file bytes/mtime were not restored; retained backup");
+            if(!backup.delete())throw new Exception("Cannot remove completed private cache backup");
+        }
+    }
+
+    private boolean fontDirtyV063b10()throws Exception {
+        synchronized(AppTypography.class){
+            java.lang.reflect.Field dirty=AppTypography.class.getDeclaredField("sourceDirty");dirty.setAccessible(true);
+            return dirty.getBoolean(null);
+        }
+    }
+
+    private void waitFontDirtyV063b10(Typeface previous)throws Exception {
+        long end=android.os.SystemClock.uptimeMillis()+8000;
+        do{
+            synchronized(AppTypography.class){
+                java.lang.reflect.Field selected=AppTypography.class.getDeclaredField("selected");selected.setAccessible(true);
+                // A visible paper can consume the dirty bit before this sampler runs. Its rebuilt
+                // selected face is the same successful invalidation, observed without a new lookup.
+                if(fontDirtyV063b10()||selected.get(null)!=previous)return;
+            }
+            Thread.sleep(15);
+        }while(android.os.SystemClock.uptimeMillis()<end);
+        throw new Exception("Selected font file event did not invalidate its cached pair");
+    }
+
+    private void writeFontFixtureV063b10(Context context,File target,boolean changedGeneration)throws Exception {
+        File parent=target.getParentFile();
+        if(!parent.isDirectory()&&!parent.mkdirs())throw new Exception("Cannot create private QA font directory");
+        File temporary=File.createTempFile("v063b10-font-",".tmp",parent);
+        try{
+            try(InputStream source=context.getResources().openRawResource(R.font.xiaolai_regular);OutputStream output=new FileOutputStream(temporary)){
+                byte[] buffer=new byte[8192];int count;
+                while((count=source.read(buffer))!=-1)output.write(buffer,0,count);
+                if(changedGeneration)output.write(0); // Valid trailing data distinguishes the replacement file generation.
+            }
+            java.nio.file.Files.move(temporary.toPath(),target.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }finally{if(temporary.exists()&&!temporary.delete())throw new Exception("Cannot remove QA font staging file");}
+    }
+
+    private JSONObject fontCacheV063b10(MainActivity screen,android.content.SharedPreferences prefs)throws Exception {
+        final String originalProfile=prefs.getString(NutritionStore.PROFILE,"{}");
+        File directory=new File(screen.getFilesDir(),"downloaded_fonts");boolean hadDirectory=directory.isDirectory();
+        File font=new File(directory,"Yozai-Regular.ttf");PreservedCacheFileV063b10 preserved=new PreservedCacheFileV063b10(screen,font);
+        final Typeface[] originalPair=new Typeface[2],downloadedPair=new Typeface[2];
+        final View fontRoot=(View)field(screen,"root");
+        final android.view.ViewTreeObserver.OnPreDrawListener holdFontDrawing=()->false;
+        android.content.SharedPreferences.OnSharedPreferenceChangeListener rootListener=
+                (android.content.SharedPreferences.OnSharedPreferenceChangeListener)field(screen,"rootDataListener");
+        uiAssert(()->{
+            // Keep automatic root-page rebuilding from consuming the font-file dirty bit before this probe observes it.
+            prefs.unregisterOnSharedPreferenceChangeListener(rootListener);
+            ((View)field(screen,"root")).removeCallbacks((Runnable)field(screen,"refreshRootPages"));
+            fontRoot.getViewTreeObserver().addOnPreDrawListener(holdFontDrawing);
+        });
+        try{
+            JSONObject profile=new JSONObject(originalProfile).put("bookFont","xiaolai").put("font",100);
+            if(!prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).commit())throw new Exception("Cannot seed font cache profile");
+            uiAssert(()->{originalPair[0]=AppTypography.typeface(screen,false);originalPair[1]=AppTypography.typeface(screen,true);});
+            profile.put("name","QA字体缓存资料变更").put("signature","QA profile-only change");
+            if(!prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).commit())throw new Exception("Cannot update unrelated QA profile fields");
+            uiAssert(()->{
+                if(AppTypography.typeface(screen,false)!=originalPair[0]||AppTypography.typeface(screen,true)!=originalPair[1])
+                    throw new Exception("Unrelated profile change recreated cached font faces");
+            });
+            profile.put("font",120);
+            if(!prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).commit())throw new Exception("Cannot update QA font scale");
+            uiAssert(()->{
+                if(AppTypography.typeface(screen,false)!=originalPair[0]||AppTypography.typeface(screen,true)!=originalPair[1]
+                        ||Math.abs(AppTypography.sp(screen,20)-24f)>.001f)
+                    throw new Exception("Font scaling recreated faces or lost its size projection");
+            });
+            writeFontFixtureV063b10(screen,font,false);
+            profile.put("bookFont","yozai");
+            if(!prefs.edit().putString(NutritionStore.PROFILE,profile.toString()).commit())throw new Exception("Cannot select QA downloaded font");
+            uiAssert(()->{
+                downloadedPair[0]=AppTypography.typeface(screen,false);downloadedPair[1]=AppTypography.typeface(screen,true);
+                if(downloadedPair[0]==AppTypography.defaultTypeface(screen,false))throw new Exception("Selected QA font did not load from its private file");
+                if(AppTypography.typeface(screen,false)!=downloadedPair[0]||AppTypography.typeface(screen,true)!=downloadedPair[1])
+                    throw new Exception("Downloaded normal/bold faces were not reused");
+            });
+            // Actual rename/delete events exercise the process font observer without a UI-level invalidate call.
+            writeFontFixtureV063b10(screen,font,true);waitFontDirtyV063b10(downloadedPair[0]);
+            uiAssert(()->{
+                downloadedPair[0]=AppTypography.typeface(screen,false);AppTypography.typeface(screen,true);
+                if(fontDirtyV063b10())throw new Exception("Font replacement was not consumed by its next lookup");
+            });
+            if(!font.delete())throw new Exception("Cannot remove selected QA font fixture");
+            waitFontDirtyV063b10(downloadedPair[0]);
+            uiAssert(()->{
+                if(AppTypography.typeface(screen,false)!=AppTypography.defaultTypeface(screen,false)
+                        ||AppTypography.typeface(screen,true)!=AppTypography.defaultTypeface(screen,true))
+                    throw new Exception("Deleted selected font did not recover the bundled pair");
+            });
+            return new JSONObject().put("unrelatedProfileRetainsFaces",true).put("sizeRetainsFacesAndScalesText",true)
+                    .put("downloadedPairReused",true).put("realFileReplacementInvalidation",true).put("realFileDeletionFallback",true)
+                    .put("fixture","bundled font copied to selected private download filename");
+        }finally{
+            uiAssert(()->{if(fontRoot.getViewTreeObserver().isAlive())fontRoot.getViewTreeObserver().removeOnPreDrawListener(holdFontDrawing);fontRoot.invalidate();});
+            try{preserved.restore();}
+            finally{
+                try{
+                    if(!prefs.edit().putString(NutritionStore.PROFILE,originalProfile).commit())throw new Exception("Cannot restore font QA profile");
+                    uiAssert(()->{AppTypography.invalidate();AppTypography.typeface(screen,false);AppTypography.typeface(screen,true);});
+                    if(!hadDirectory&&directory.isDirectory()){
+                        String[] remaining=directory.list();
+                        if(remaining!=null&&remaining.length==0&&!directory.delete())throw new Exception("Cannot remove empty QA font directory");
+                    }
+                }finally{uiAssert(()->{prefs.registerOnSharedPreferenceChangeListener(rootListener);invoke(screen,"invalidateRootPages",new Class[]{});});}
+            }
+        }
+    }
+
+    private java.util.concurrent.CountDownLatch blockAvatarWorkersV063b10(java.util.concurrent.ExecutorService workers,
+            List<java.util.concurrent.CountDownLatch> releases)throws Exception {
+        java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(3);
+        java.util.concurrent.CountDownLatch release=new java.util.concurrent.CountDownLatch(1);releases.add(release);
+        for(int i=0;i<3;i++)workers.execute(()->{
+            entered.countDown();try{release.await();}catch(InterruptedException stopped){Thread.currentThread().interrupt();}
+        });
+        if(!entered.await(10,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("Cannot occupy the three thumbnail workers for deterministic cache QA");
+        return release;
+    }
+
+    private void writeAvatarFixtureV063b10(File target,int color)throws Exception {
+        File staged=File.createTempFile("v063b10-avatar-",".tmp",target.getParentFile());
+        Bitmap image=Bitmap.createBitmap(384,384,Bitmap.Config.ARGB_8888);image.eraseColor(color);
+        try{
+            try(OutputStream output=new FileOutputStream(staged)){
+                if(!image.compress(Bitmap.CompressFormat.PNG,100,output))throw new Exception("Cannot encode QA avatar");
+            }
+            java.nio.file.Files.move(staged.toPath(),target.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }finally{image.recycle();if(staged.exists()&&!staged.delete())throw new Exception("Cannot remove QA avatar staging file");}
+    }
+
+    private Bitmap avatarBitmapV063b10(android.widget.ImageView image){
+        android.graphics.drawable.Drawable drawable=image.getDrawable();
+        return drawable instanceof android.graphics.drawable.BitmapDrawable?((android.graphics.drawable.BitmapDrawable)drawable).getBitmap():null;
+    }
+
+    private Bitmap waitAvatarColorV063b10(android.widget.ImageView image,int color)throws Exception {
+        final Bitmap[] result={null};long end=android.os.SystemClock.uptimeMillis()+10000;
+        do{
+            uiAssert(()->{
+                Bitmap current=avatarBitmapV063b10(image);
+                if(current!=null&&!current.isRecycled()&&current.getPixel(current.getWidth()/2,current.getHeight()/2)==color)result[0]=current;
+            });
+            if(result[0]!=null)return result[0];Thread.sleep(15);
+        }while(android.os.SystemClock.uptimeMillis()<end);
+        throw new Exception("Avatar observer/worker did not deliver the expected synthetic image");
+    }
+
+    private JSONObject avatarCacheV063b10(MainActivity screen)throws Exception {
+        File avatar=new File(screen.getFilesDir(),"avatar.bin");PreservedCacheFileV063b10 preserved=new PreservedCacheFileV063b10(screen,avatar);
+        java.util.concurrent.ExecutorService workers=(java.util.concurrent.ExecutorService)field(screen,"mediaThumbnailExecutor");
+        List<java.util.concurrent.CountDownLatch> releases=new ArrayList<>();
+        final FrameLayout[] host={null};final android.widget.ImageView[] probes=new android.widget.ImageView[3];
+        final AvatarLoader[] loader={null};
+        final int first=Color.rgb(217,63,54),replacement=Color.rgb(44,169,94),late=Color.rgb(48,107,209);
+        try{
+            java.util.concurrent.CountDownLatch coldRelease=blockAvatarWorkersV063b10(workers,releases);
+            writeAvatarFixtureV063b10(avatar,first);
+            uiAssert(()->{
+                host[0]=new FrameLayout(screen);host[0].setTag("qa_avatar_cache_host");
+                ((android.view.ViewGroup)field(screen,"root")).addView(host[0],new FrameLayout.LayoutParams(192,192,Gravity.CENTER));
+                for(int i=0;i<probes.length;i++){
+                    probes[i]=new android.widget.ImageView(screen);host[0].addView(probes[i],new FrameLayout.LayoutParams(96,96));
+                }
+                invoke(screen,"loadAvatar",new Class[]{android.widget.ImageView.class,View.class},probes[0],null);
+                loader[0]=(AvatarLoader)field(screen,"avatarLoader");loader[0].invalidate();
+                if(avatarBitmapV063b10(probes[0])!=null)throw new Exception("Cold avatar decoded on the UI thread while all workers were occupied");
+            });
+            final boolean[] uiPulse={false};uiAssert(()->uiPulse[0]=true);
+            if(!uiPulse[0])throw new Exception("Cold avatar preparation blocked the UI callback");
+            coldRelease.countDown();Bitmap original=waitAvatarColorV063b10(probes[0],first);
+            uiAssert(()->{
+                invoke(screen,"loadAvatar",new Class[]{android.widget.ImageView.class,View.class},probes[1],null);
+                if(avatarBitmapV063b10(probes[1])!=original)throw new Exception("Warm avatar did not reuse its bitmap synchronously");
+            });
+            writeAvatarFixtureV063b10(avatar,replacement);
+            Bitmap next=waitAvatarColorV063b10(probes[0],replacement);waitAvatarColorV063b10(probes[1],replacement);
+            uiAssert(()->{
+                if(avatarBitmapV063b10(probes[1])!=next||next==original||original.isRecycled())
+                    throw new Exception("Avatar replacement lost request merging or recycled a previously displayed bitmap");
+            });
+            if(!avatar.delete())throw new Exception("Cannot delete QA avatar fixture");
+            long end=android.os.SystemClock.uptimeMillis()+8000;final boolean[] cleared={false};
+            do{
+                uiAssert(()->cleared[0]=avatarBitmapV063b10(probes[0])==null&&avatarBitmapV063b10(probes[1])==null);
+                if(cleared[0])break;Thread.sleep(15);
+            }while(android.os.SystemClock.uptimeMillis()<end);
+            if(!cleared[0])throw new Exception("Deleted avatar retained stale pixels");
+            java.util.concurrent.CountDownLatch lateRelease=blockAvatarWorkersV063b10(workers,releases);
+            writeAvatarFixtureV063b10(avatar,late);
+            uiAssert(()->{
+                loader[0].invalidate();
+                invoke(screen,"loadAvatar",new Class[]{android.widget.ImageView.class,View.class},probes[2],null);
+                host[0].removeView(probes[2]);
+            });
+            lateRelease.countDown();waitAvatarColorV063b10(probes[0],late);
+            uiAssert(()->{
+                if(avatarBitmapV063b10(probes[2])!=null)throw new Exception("Detached avatar accepted a late worker result");
+                host[0].addView(probes[2],new FrameLayout.LayoutParams(96,96));
+            });
+            waitAvatarColorV063b10(probes[2],late);
+            return new JSONObject().put("workersBlockedDeterministically",true).put("coldLoadYieldsUi",true)
+                    .put("hotBitmapIdentityReused",true).put("replacementAndDeletionInvalidate",true)
+                    .put("displayedOldBitmapSurvivesEviction",true).put("detachedLateResultIgnored",true).put("reattachLoadsCurrentVersion",true)
+                    .put("fixture","private avatar.bin synthetic PNG replacement with exact restore");
+        }finally{
+            for(java.util.concurrent.CountDownLatch release:releases)release.countDown();
+            try{uiAssert(()->{if(host[0]!=null&&host[0].getParent() instanceof android.view.ViewGroup)((android.view.ViewGroup)host[0].getParent()).removeView(host[0]);});}
+            finally{try{preserved.restore();}finally{uiAssert(()->{if(loader[0]!=null)loader[0].invalidate();});}}
+        }
+    }
+
+    private Set<Long> shareRowsV063b10(Context context,String date)throws Exception {
+        Set<Long> rows=new HashSet<>();
+        String prefix="eat_record_"+date.replace("-","")+"_%";
+        try(android.database.Cursor cursor=context.getContentResolver().query(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                new String[]{android.provider.MediaStore.Images.Media._ID},
+                android.provider.MediaStore.Images.Media.DISPLAY_NAME+" LIKE ?",new String[]{prefix},null)){
+            if(cursor==null)throw new Exception("Cannot query isolated QA share rows");
+            while(cursor.moveToNext())rows.add(cursor.getLong(0));
+        }
+        return rows;
+    }
+
+    private void openShareBookV063b10(MainActivity screen,String date)throws Exception {
+        rootTabV063b5(screen,1);
+        uiAssert(()->{
+            View cover=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},(View)field(screen,"content"),date);
+            if(cover==null)throw new Exception("Share fixture cover is missing");
+            invoke(screen,"openBookDetail",new Class[]{String.class,View.class},date,cover);
+        });
+        waitBookRestV31(screen,true);
+        uiAssert(()->{if(!screen.hasWindowFocus())throw new Exception("Share fixture is behind another window");});
+    }
+
+    private JSONObject shareExportV063b10(MainActivity screen,android.content.SharedPreferences prefs,String date)throws Exception {
+        String before=prefs.getString(NutritionStore.DAYS,"{}");
+        Set<Long> baseline=shareRowsV063b10(screen,date);
+        java.lang.reflect.Field queueField=NotebookShareExport.class.getDeclaredField("WORKER");queueField.setAccessible(true);
+        java.util.concurrent.ExecutorService queue=(java.util.concurrent.ExecutorService)queueField.get(null);
+        List<java.util.concurrent.CountDownLatch> releases=new ArrayList<>();
+        java.util.concurrent.atomic.AtomicInteger chooserCount=new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<android.net.Uri> sharedImage=new java.util.concurrent.atomic.AtomicReference<>();
+        ActivityMonitor monitor=new ActivityMonitor(){
+            @Override public ActivityResult onStartActivity(Intent intent){
+                if(intent==null||!Intent.ACTION_CHOOSER.equals(intent.getAction()))return null;
+                Intent send=intent.getParcelableExtra(Intent.EXTRA_INTENT);
+                if(send==null||!Intent.ACTION_SEND.equals(send.getAction()))return null;
+                chooserCount.incrementAndGet();sharedImage.set(send.getParcelableExtra(Intent.EXTRA_STREAM));
+                return new ActivityResult(Activity.RESULT_CANCELED,null);
+            }
+        };
+        addMonitor(monitor);
+        Bitmap owned=null;
+        try{
+            openShareBookV063b10(screen,date);
+            java.util.concurrent.CountDownLatch entered=new java.util.concurrent.CountDownLatch(1),release=new java.util.concurrent.CountDownLatch(1);
+            releases.add(release);queue.execute(()->{entered.countDown();try{release.await();}catch(InterruptedException stopped){Thread.currentThread().interrupt();}});
+            if(!entered.await(5,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("Cannot delay isolated share worker");
+            final Object[] request={null};
+            uiAssert(()->{
+                android.widget.TextView button=(android.widget.TextView)field(screen,"bookDetailShareView");
+                if(!button.performClick())throw new Exception("Normal notebook share button is not clickable");
+                request[0]=field(screen,"notebookShareTask");
+                if(request[0]==null)throw new Exception("Share click did not create a background request");
+                invoke(screen,"shareDayImage",new Class[]{String.class},date);
+                if(field(screen,"notebookShareTask")!=request[0])throw new Exception("Repeated share click created a second request");
+            });
+            final boolean[] uiPulse={false};uiAssert(()->uiPulse[0]=true);
+            if(!uiPulse[0]||chooserCount.get()!=0)throw new Exception("Blocked share worker failed to yield UI or launched early");
+            release.countDown();long deadline=android.os.SystemClock.uptimeMillis()+15000;
+            while(chooserCount.get()==0&&android.os.SystemClock.uptimeMillis()<deadline)Thread.sleep(25);
+            if(chooserCount.get()!=1||sharedImage.get()==null)throw new Exception("Normal share did not deliver exactly one intercepted chooser");
+            uiAssert(()->{
+                if(field(screen,"notebookShareTask")!=null||!((View)field(screen,"bookDetailShareView")).isEnabled())
+                    throw new Exception("Successful share retained busy ownership");
+            });
+            android.net.Uri image=sharedImage.get();
+            String[] projection=android.os.Build.VERSION.SDK_INT>=29
+                    ?new String[]{android.provider.MediaStore.Images.Media.IS_PENDING,android.provider.MediaStore.Images.Media.MIME_TYPE}
+                    :new String[]{android.provider.MediaStore.Images.Media.MIME_TYPE};
+            try(android.database.Cursor cursor=screen.getContentResolver().query(image,projection,null,null,null)){
+                if(cursor==null||!cursor.moveToFirst())throw new Exception("Shared image row disappeared");
+                if(android.os.Build.VERSION.SDK_INT>=29&&cursor.getInt(cursor.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media.IS_PENDING))!=0)
+                    throw new Exception("Successful PNG remained pending");
+                if(!"image/png".equals(cursor.getString(cursor.getColumnIndexOrThrow(android.provider.MediaStore.Images.Media.MIME_TYPE))))
+                    throw new Exception("Shared image has the wrong MIME type");
+            }
+            BitmapFactory.Options bounds=new BitmapFactory.Options();bounds.inJustDecodeBounds=true;
+            try(InputStream source=screen.getContentResolver().openInputStream(image)){BitmapFactory.decodeStream(source,null,bounds);}
+            if(bounds.outWidth<1000||bounds.outHeight<1000||!"image/png".equals(bounds.outMimeType))throw new Exception("Published share PNG is unreadable");
+
+            // The bridge borrows its input. Its producer remains responsible for recycling it.
+            owned=Bitmap.createBitmap(2,2,Bitmap.Config.ARGB_8888);owned.eraseColor(Color.rgb(55,123,83));
+            NotebookShareExport.write(screen.getApplicationContext().getContentResolver(),owned,date,()->false);
+            if(owned.isRecycled()||owned.getPixel(0,0)!=Color.rgb(55,123,83))throw new Exception("Share writer consumed or changed its borrowed bitmap");
+            owned.recycle();owned=null;
+            Set<Long> accepted=shareRowsV063b10(screen,date);accepted.removeAll(baseline);
+            if(accepted.size()!=2)throw new Exception("Share fixtures did not publish exactly the two owned images");
+
+            java.util.concurrent.CountDownLatch cancelEntered=new java.util.concurrent.CountDownLatch(1),cancelRelease=new java.util.concurrent.CountDownLatch(1);
+            releases.add(cancelRelease);queue.execute(()->{cancelEntered.countDown();try{cancelRelease.await();}catch(InterruptedException stopped){Thread.currentThread().interrupt();}});
+            if(!cancelEntered.await(5,java.util.concurrent.TimeUnit.SECONDS))throw new Exception("Cannot delay share cancellation fixture");
+            uiAssert(()->{
+                ((View)field(screen,"bookDetailShareView")).performClick();
+                if(field(screen,"notebookShareTask")==null)throw new Exception("Cancellation fixture did not queue a share");
+                if(!Boolean.TRUE.equals(invoke(screen,"handleBackNavigation",new Class[]{})))throw new Exception("Book Back was not handled");
+                if(field(screen,"notebookShareTask")!=null)throw new Exception("Book departure kept its share request");
+            });
+            cancelRelease.countDown();queue.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);
+            waitBookRestV31(screen,false);waitForIdleSync();queue.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);
+            Set<Long> remaining=shareRowsV063b10(screen,date);remaining.removeAll(baseline);
+            if(chooserCount.get()!=1||!remaining.equals(accepted))throw new Exception("Cancelled share launched late or left another image row");
+            if(!before.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("Sharing changed diary records");
+            return new JSONObject().put("qaInjection","share queue latch; ACTION_CHOOSER monitor blocks external launch")
+                    .put("normalEntryUsesWorker",true).put("repeatedClickKeepsSingleRequest",true).put("uiResponsiveWhileWorkerBlocked",true)
+                    .put("realPngPublishedAndReadable",true).put("publishedWidth",bounds.outWidth).put("publishedHeight",bounds.outHeight)
+                    .put("borrowedBitmapOwnershipPreserved",true).put("backCancelsQueuedShare",true)
+                    .put("noLateChooserOrNewRowAfterCancel",true).put("createdFixtureRows",accepted.size()).put("diaryUnchanged",true);
+        }finally{
+            for(java.util.concurrent.CountDownLatch release:releases)release.countDown();
+            if(owned!=null&&!owned.isRecycled())owned.recycle();
+            try{
+                uiAssert(()->invoke(screen,"cancelNotebookShare",new Class[]{}));
+                queue.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);waitForIdleSync();queue.submit(()->{}).get(10,java.util.concurrent.TimeUnit.SECONDS);
+            }finally{
+                try{
+                    Set<Long> created=shareRowsV063b10(screen,date);created.removeAll(baseline);
+                    for(long id:created)screen.getContentResolver().delete(android.content.ContentUris.withAppendedId(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,id),null,null);
+                }finally{removeMonitor(monitor);}
+            }
+        }
+    }
+
+    private BookShelfWindow shelfWindowV063b10(MainActivity screen,boolean horizontal)throws Exception {
+        RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+        View scope=pager==null?null:pager.page(1);
+        View found=scope==null?null:scope.findViewWithTag(horizontal?"virtual_book_carousel":"virtual_book_grid");
+        if(!(found instanceof BookShelfWindow))throw new Exception("Missing bounded "+(horizontal?"horizontal":"grid")+" shelf");
+        return (BookShelfWindow)found;
+    }
+
+    private JSONObject shelfWindowSampleV063b10(MainActivity screen,boolean horizontal,String location)throws Exception {
+        final JSONObject[] sample={null};
+        uiAssert(()->{
+            BookShelfWindow window=shelfWindowV063b10(screen,horizontal);
+            Map<?,?> positions=(Map<?,?>)ownField(window,"datePositions");
+            int count=window.materializedCount();
+            if(positions.size()!=1460||count<=0||count>=40||window.getChildCount()!=count)
+                throw new Exception("Shelf window is incomplete or unbounded: "+positions.size()+" / "+count+" / "+window.getChildCount());
+            int extent=horizontal?window.getMeasuredWidth():window.getMeasuredHeight();
+            int viewport=horizontal?screen.getResources().getDisplayMetrics().widthPixels:screen.getResources().getDisplayMetrics().heightPixels;
+            if(extent<viewport*20)throw new Exception("Shelf lost its full logical scroll extent");
+            sample[0]=new JSONObject().put("layout",horizontal?"horizontal":"grid").put("location",location)
+                    .put("dateCount",positions.size()).put("materializedRowsOrCards",count).put("logicalExtentPx",extent);
+        });
+        return sample[0];
+    }
+
+    private void saveBookPixelsV063b10(String name,Rect bounds)throws Exception {
+        Bitmap frame=getUiAutomation().takeScreenshot();if(frame==null)throw new Exception("Book hardware screenshot unavailable");
+        File directory=new File(getTargetContext().getExternalFilesDir(null),"qa");directory.mkdirs();
+        try{
+            try(OutputStream output=new FileOutputStream(new File(directory,name+".png"))){frame.compress(Bitmap.CompressFormat.PNG,100,output);}
+            int half=Math.max(8,PaperComponents.dp(getTargetContext(),16));
+            int[] xs={bounds.left,bounds.right,bounds.left,bounds.right};
+            int[] ys={bounds.top,bounds.top,bounds.bottom,bounds.bottom};String[] corners={"tl","tr","bl","br"};
+            for(int i=0;i<corners.length;i++){
+                int left=Math.max(0,xs[i]-half),top=Math.max(0,ys[i]-half);
+                int right=Math.min(frame.getWidth(),xs[i]+half),bottom=Math.min(frame.getHeight(),ys[i]+half);
+                if(right<=left||bottom<=top)continue;
+                Bitmap crop=Bitmap.createBitmap(frame,left,top,right-left,bottom-top);
+                try(OutputStream output=new FileOutputStream(new File(directory,name+"-"+corners[i]+".png"))){crop.compress(Bitmap.CompressFormat.PNG,100,output);}
+                finally{crop.recycle();}
+            }
+        }finally{frame.recycle();}
+    }
+
+    private JSONObject captureMovingBookV063b10(MainActivity screen,String name,boolean closing)throws Exception {
+        final Rect[] bounds={null};final float[] progress={-1};long end=android.os.SystemClock.uptimeMillis()+8000;
+        do{
+            uiAssert(()->{
+                Object overlay=field(screen,"bookOpeningOverlay");
+                if(overlay==null||Boolean.TRUE.equals(ownField(overlay,"closing"))!=closing)return;
+                float value=((Number)ownField(overlay,"progress")).floatValue();
+                if(value>.08f&&value<.9f){
+                    RectF current=(RectF)ownField(overlay,"current");int[] at=new int[2];((View)overlay).getLocationOnScreen(at);
+                    bounds[0]=new Rect((int)current.left+at[0],(int)current.top+at[1],(int)Math.ceil(current.right)+at[0],(int)Math.ceil(current.bottom)+at[1]);
+                    progress[0]=value;
+                }
+            });
+            if(bounds[0]!=null)break;Thread.sleep(5);
+        }while(android.os.SystemClock.uptimeMillis()<end);
+        if(bounds[0]==null)throw new Exception("Book transition never exposed a moving screenshot opportunity: "+name);
+        saveBookPixelsV063b10(name,bounds[0]);
+        return new JSONObject().put("closing",closing).put("progressObservedBeforeCapture",progress[0])
+                .put("visualReviewRequired",true).put("coordinatesSampledBeforeScreenshot",true);
+    }
+
+    private void waitBookStateV063b10(MainActivity screen,boolean detail)throws Exception {
+        long end=android.os.SystemClock.uptimeMillis()+12000;final boolean[] settled={false};
+        do{
+            uiAssert(()->settled[0]=field(screen,"pendingBookOpen")==null&&field(screen,"bookOpeningOverlay")==null
+                    &&!Boolean.TRUE.equals(field(screen,"bookClosePending"))&&Boolean.TRUE.equals(field(screen,"inBookDetail"))==detail);
+            if(settled[0])return;Thread.sleep(15);
+        }while(android.os.SystemClock.uptimeMillis()<end);
+        throw new Exception("Beta10 book did not settle: detail="+detail);
+    }
+
+    private JSONObject booksV063b10(MainActivity screen,android.content.SharedPreferences prefs,String date)throws Exception {
+        if(!android.animation.ValueAnimator.areAnimatorsEnabled())throw new Exception("Animated book probe requires enabled system animations");
+        String originalData=prefs.getString(NutritionStore.DAYS,"{}"),originalProfile=prefs.getString(NutritionStore.PROFILE,"{}");
+        final Object[] originalUi={null,null};final int[] originalTab={0};
+        uiAssert(()->{originalUi[0]=field(screen,"days");originalUi[1]=field(screen,"profile");originalTab[0]=((Number)field(screen,"currentTab")).intValue();});
+        JSONObject originalDays=new JSONObject(originalData),seedMeal=NutritionStore.meal(originalDays,date,"lunch");
+        if(seedMeal==null)throw new Exception("Large shelf fixture has no source lunch");
+        String mealRaw=seedMeal.toString();JSONObject fixture=new JSONObject();Calendar cursor=Calendar.getInstance();
+        SimpleDateFormat format=new SimpleDateFormat("yyyy-MM-dd",Locale.US);format.setLenient(false);cursor.setTime(format.parse(date));
+        String oldest=date;
+        for(int i=0;i<1460;i++){
+            oldest=HomeCalendarDates.key(cursor);fixture.put(oldest,new JSONObject().put("lunch",new JSONObject(mealRaw)));
+            cursor.add(Calendar.DAY_OF_MONTH,-1);
+        }
+        final String targetDate=oldest,fixtureRaw=fixture.toString();
+        final boolean night=args!=null&&"true".equals(args.getString("night","false"));
+        final String evidence="v063b10-books-"+(night?"night":"day");
+        final JSONObject fixtureProfile=new JSONObject(originalProfile).put("footprintLayout","expanded").put("footprintColumns",4)
+                .put("footprintDateSections",true).put("font",100).put("nightMode",night);
+        JSONArray windows=new JSONArray(),captures=new JSONArray();final Rect[] sourceBounds={null};final int[] entryScroll={0},recordedEntryScroll={0};
+        final boolean[] entryWithinSafeViewport={false};
+        try{
+            if(!prefs.edit().putString(NutritionStore.DAYS,fixtureRaw).putString(NutritionStore.PROFILE,fixtureProfile.toString()).commit())
+                throw new Exception("Cannot prepare large synthetic bookshelf");
+            uiAssert(()->{
+                setMainField(screen,"days",fixture);setMainField(screen,"profile",fixtureProfile);
+                invoke(screen,"applyDecoration",new Class[]{});invoke(screen,"invalidateRootPages",new Class[]{});
+            });rootTabV063b5(screen,1);
+            uiAssert(()->{if(((List<?>)invoke(screen,"recordedDates",new Class[]{})).size()!=1460)throw new Exception("Large fixture date index is incomplete");});
+            for(int step=0;step<3;step++){
+                final int position=step;
+                uiAssert(()->{
+                    RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+                    android.widget.ScrollView scroll=(android.widget.ScrollView)invoke(screen,"findFirstScrollView",new Class[]{View.class},pager.page(1));
+                    if(scroll==null||scroll.getChildCount()!=1)throw new Exception("Grid has no owning ScrollView");
+                    int range=Math.max(0,scroll.getChildAt(0).getHeight()-scroll.getHeight());scroll.scrollTo(0,range*position/2);
+                });Thread.sleep(180);waitForIdleSync();windows.put(shelfWindowSampleV063b10(screen,false,new String[]{"head","middle","tail"}[step]));
+            }
+            uiAssert(()->{
+                RootPagePager pager=(RootPagePager)field(screen,"rootPager");View scope=pager.page(1);
+                View cover=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},scope,targetDate);
+                if(cover==null)throw new Exception("Oldest virtualized date did not materialize");
+                cover.requestRectangleOnScreen(new Rect(0,0,cover.getWidth(),cover.getHeight()),true);
+            });Thread.sleep(200);waitForIdleSync();
+            uiAssert(()->{
+                RootPagePager pager=(RootPagePager)field(screen,"rootPager");View scope=pager.page(1);
+                View cover=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},scope,targetDate);
+                Rect visible=new Rect();if(cover==null||!cover.getGlobalVisibleRect(visible)||visible.height()<cover.getHeight()/2)
+                    throw new Exception("Oldest source is outside the actual viewport");
+                sourceBounds[0]=screenRect(cover);
+                android.widget.ScrollView scroll=(android.widget.ScrollView)invoke(screen,"findFirstScrollView",new Class[]{View.class},scope);
+                entryScroll[0]=scroll.getScrollY();
+                int[] rootAt=new int[2];((View)field(screen,"root")).getLocationOnScreen(rootAt);
+                ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+                entryWithinSafeViewport[0]=sourceBounds[0].top>=rootAt[1]+PaperComponents.dp(screen,UiTokens.HEADER_CORE+12)
+                        &&sourceBounds[0].bottom<=dock.contentTopOnScreen()-PaperComponents.dp(screen,12);
+            });
+            saveBookPixelsV063b10(evidence+"-grid-before",sourceBounds[0]);
+            uiAssert(()->{if(!screen.hasWindowFocus())throw new Exception("Book fixture is behind another window");});
+            long down=android.os.SystemClock.uptimeMillis();
+            // Queue actual input before sampling, without a synchronous injection wait consuming
+            // the short transition interval on a slow instrumentation connection.
+            for(int action:new int[]{MotionEvent.ACTION_DOWN,MotionEvent.ACTION_UP}){
+                MotionEvent event=MotionEvent.obtain(down,android.os.SystemClock.uptimeMillis(),action,sourceBounds[0].exactCenterX(),sourceBounds[0].exactCenterY(),0);
+                event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+                try{if(!getUiAutomation().injectInputEvent(event,false))throw new Exception("Oldest book input was rejected");}finally{event.recycle();}
+            }
+            captures.put(captureMovingBookV063b10(screen,evidence+"-opening",false));waitBookStateV063b10(screen,true);
+            uiAssert(()->{
+                if(!targetDate.equals(field(screen,"bookDetailDate")))throw new Exception("Oldest physical cover opened a different date");
+                recordedEntryScroll[0]=((Number)field(screen,"bookShelfScrollY")).intValue();
+                View paper=((View)field(screen,"bookDetailSwipeFrame")).findViewWithTag("book_detail_notebook_page");
+                Rect expected=new Rect(0,0,paper.getWidth(),paper.getHeight());
+                if(paper.getBackground()==null||!expected.equals(paper.getBackground().getBounds()))
+                    throw new Exception("First capture left invalid live paper background bounds");
+                android.graphics.Outline outline=new android.graphics.Outline();paper.getOutlineProvider().getOutline(paper,outline);Rect round=new Rect();
+                if(!outline.getRect(round)||!expected.equals(round)||!paper.getClipToOutline())
+                    throw new Exception("Live paper lost its native rounded outline after opening");
+            });
+            screenshot(evidence+"-oldest-opened");sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+            captures.put(captureMovingBookV063b10(screen,evidence+"-closing",true));waitBookStateV063b10(screen,false);
+            uiAssert(()->{
+                RootPagePager pager=(RootPagePager)field(screen,"rootPager");View scope=pager.page(1);
+                View cover=(View)invoke(screen,"findBookCover",new Class[]{View.class,String.class},scope,targetDate);Rect visible=new Rect();
+                if(cover==null||!cover.getGlobalVisibleRect(visible)||cover.getAlpha()<.99f||cover.getElevation()<=0)
+                    throw new Exception("Book return did not restore its actual oldest shelf anchor");
+                sourceBounds[0]=screenRect(cover);
+                android.widget.ScrollView scroll=(android.widget.ScrollView)invoke(screen,"findFirstScrollView",new Class[]{View.class},scope);
+                int returned=scroll.getScrollY();
+                windows.put(new JSONObject().put("location","return-anchor").put("preTapScrollY",entryScroll[0])
+                        .put("recordedEntryScrollY",recordedEntryScroll[0]).put("returnedScrollY",returned)
+                        .put("entryWithinSafeViewport",entryWithinSafeViewport[0]));
+                // The application deliberately reveals a cover that was under the floating dock.
+                // An unobscured entry retains its scroll, while an obscured one must return visibly.
+                if(entryWithinSafeViewport[0]&&Math.abs(returned-recordedEntryScroll[0])>PaperComponents.dp(screen,24))
+                    throw new Exception("Oldest return lost safe entry scroll: "+recordedEntryScroll[0]+" -> "+returned);
+                int[] rootAt=new int[2];((View)field(screen,"root")).getLocationOnScreen(rootAt);
+                ComposeBottomBar dock=(ComposeBottomBar)field(screen,"composeBottomBar");
+                if(sourceBounds[0].top<rootAt[1]+PaperComponents.dp(screen,UiTokens.HEADER_CORE-12)
+                        ||sourceBounds[0].bottom>dock.contentTopOnScreen()+PaperComponents.dp(screen,12))
+                    throw new Exception("Returned oldest anchor is hidden by header or dock");
+            });saveBookPixelsV063b10(evidence+"-grid-returned",sourceBounds[0]);
+            fixtureProfile.put("footprintLayout","original");
+            if(!prefs.edit().putString(NutritionStore.PROFILE,fixtureProfile.toString()).commit())throw new Exception("Cannot prepare horizontal fixture");
+            uiAssert(()->{setMainField(screen,"profile",fixtureProfile);invoke(screen,"invalidateRootPages",new Class[]{});});rootTabV063b5(screen,1);
+            for(int step=0;step<3;step++){
+                final int position=step;
+                uiAssert(()->{
+                    RootPagePager pager=(RootPagePager)field(screen,"rootPager");
+                    android.widget.HorizontalScrollView scroll=(android.widget.HorizontalScrollView)pager.page(1).findViewWithTag("footprints_book_carousel");
+                    if(scroll==null||scroll.getChildCount()!=1)throw new Exception("Horizontal shelf has no owning ScrollView");
+                    int range=Math.max(0,scroll.getChildAt(0).getWidth()-scroll.getWidth());scroll.scrollTo(range*position/2,0);
+                });Thread.sleep(180);waitForIdleSync();windows.put(shelfWindowSampleV063b10(screen,true,new String[]{"head","middle","tail"}[step]));
+            }
+            screenshot(evidence+"-horizontal-tail");
+            if(!fixtureRaw.equals(prefs.getString(NutritionStore.DAYS,"{}")))throw new Exception("Shelf preparation or open/close changed diary");
+            return new JSONObject().put("syntheticHistoryDays",1460).put("nightMode",night).put("evidencePrefix",evidence).put("windows",windows).put("oldestDate",targetDate)
+                    .put("oldestPhysicalOpenAndBackAnchor",true).put("entryScrollRestored",true).put("diaryUnchanged",true)
+                    .put("hardwareTransitionCaptures",captures).put("cornerCropsAreVisualEvidenceOnly",true);
+        }finally{
+            uiAssert(()->{
+                invoke(screen,"cancelPendingBookOpen",new Class[]{});invoke(screen,"cancelPendingBookClose",new Class[]{});
+                Object overlay=field(screen,"bookOpeningOverlay");if(overlay!=null)invokeAnyV20(overlay,"finish",new Class[]{});
+            });
+            if(!prefs.edit().putString(NutritionStore.DAYS,originalData).putString(NutritionStore.PROFILE,originalProfile).commit())
+                throw new Exception("Cannot restore isolated QA diary/profile");
+            uiAssert(()->{
+                setMainField(screen,"days",originalUi[0]);setMainField(screen,"profile",originalUi[1]);
+                invoke(screen,"applyDecoration",new Class[]{});invoke(screen,"invalidateRootPages",new Class[]{});
+            });rootTabV063b5(screen,originalTab[0]);
+            if(!originalData.equals(prefs.getString(NutritionStore.DAYS,"{}"))||!originalProfile.equals(prefs.getString(NutritionStore.PROFILE,"{}")))
+                throw new Exception("Large shelf fixture did not restore exact data/profile");
+        }
+    }
+
+    private void revisionV063b10(Context context,android.content.SharedPreferences prefs)throws Exception {
+        getUiAutomation();FoodAnalysisJobService.cancelAll(context);FoodDraftStore.discard(context,FoodDraftStore.pendingSources(context));
+        java.util.concurrent.atomic.AtomicInteger requests=denyNetworkV22();String date=HomeCalendarDates.key(Calendar.getInstance());
+        JSONObject before=new JSONObject().put(date,new JSONObject().put("favorite",true)
+                .put("lunch",fixtureMealV063b4(context,"lunch",Color.rgb(219,149,55))));
+        JSONObject profile=new JSONObject().put("apiEnabled",false).put("foodAutoAnalyze",false).put("foodPhotoConsent",false)
+                .put("autoCloudSync",false).put("aiAnalysisEnabled",false).put("mealNotificationsEnabled",false).put("foodRecognitionOnboardingSeen",true)
+                .put("nightMode",false).put("decoration","yellow").put("footprintLayout","expanded")
+                .put("seenAnnouncementVersion",context.getPackageManager().getPackageInfo(context.getPackageName(),0).versionName);
+        if(!prefs.edit().putString(NutritionStore.DAYS,before.toString()).putString(NutritionStore.PROFILE,profile.toString()).commit())throw new Exception("Cannot seed Beta10 fixture");
+        MainActivity screen=(MainActivity)startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));settleV15();
+        String phase=args==null?"saving":args.getString("phase","saving");
+        if("saving".equals(phase))writeJsonV063b5("v063b10-saving.json",mealSavingV063b10(screen,prefs,date));
+        else if("detail".equals(phase))writeJsonV063b5("v063b10-detail.json",detailLoadingV063b10(screen,prefs,date));
+        else if("share".equals(phase))writeJsonV063b5("v063b10-share.json",shareExportV063b10(screen,prefs,date));
+        else if("books".equals(phase))writeJsonV063b5("v063b10-books-"+((args!=null&&"true".equals(args.getString("night")))?"night":"day")+".json",booksV063b10(screen,prefs,date));
+        else if("caches".equals(phase)){
+            writeJsonV063b5("v063b10-font-cache.json",fontCacheV063b10(screen,prefs));
+            writeJsonV063b5("v063b10-avatar-cache.json",avatarCacheV063b10(screen));
+            screenshot("v063b10-horizontal-combined-glyph");
+        }else throw new Exception("Beta10 phase is not implemented: "+phase);
+        if(requests.get()!=0)throw new Exception("Beta10 attempted HTTP(S)");
+        Bundle result=new Bundle();result.putString("stream","PASS Beta10 phase="+phase+": targeted independent synthetic-fixture checks completed; private cache file bytes/mtime and font profile restored in caches phase, HTTP(S)=0.\n");finish(Activity.RESULT_OK,result);
+    }
+
     @Override public void onStart(){
         Bundle result=new Bundle();
         try{
@@ -6476,6 +8935,14 @@ public final class UpgradeSmoke extends Instrumentation {
             // override that new fixture or permit a real service request.
             if(!c.getSharedPreferences(PrivateProfileStore.PRIVATE_PREFS,0).edit().clear().commit())throw new Exception("Cannot reset isolated QA private settings fixture");
             if(args!=null&&Arrays.asList("offline-v22","prepare-offline-v22","download-online-v22").contains(args.getString("scenario")))throw new IllegalArgumentException("Retired recognition QA scenario");
+            if(args!=null&&"revision-v063b10".equals(args.getString("scenario"))){revisionV063b10(c,p);return;}
+            if(args!=null&&"revision-v063b9".equals(args.getString("scenario"))){revisionV063b9(c,p);return;}
+            if(args!=null&&"revision-v063b8".equals(args.getString("scenario"))){revisionV063b8(c,p);return;}
+            if(args!=null&&"revision-v063b7".equals(args.getString("scenario"))){revisionV063b7(c,p);return;}
+            if(args!=null&&"revision-v063b6".equals(args.getString("scenario"))){revisionV063b6(c,p);return;}
+            if(args!=null&&"revision-v063b5".equals(args.getString("scenario"))){revisionV063b5(c,p);return;}
+            if(args!=null&&"revision-v063b4".equals(args.getString("scenario"))){revisionV063b4(c,p);return;}
+            if(args!=null&&("revision-v063b1".equals(args.getString("scenario"))||"revision-v063b2".equals(args.getString("scenario")))){revisionV063b1(c,p);return;}
             if(args!=null&&"revision-v062".equals(args.getString("scenario"))){revisionV062(c,p);return;}
             if(args!=null&&"revision-v062b3".equals(args.getString("scenario"))){revisionV062b3(c,p);return;}
             if(args!=null&&"revision-v062b8".equals(args.getString("scenario"))){revisionV062b8(c,p);return;}

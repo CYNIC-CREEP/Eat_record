@@ -3,7 +3,7 @@
 ## 仓库与架构
 
 - 先用 `git rev-parse --show-toplevel` 确认根目录，核对 `AndroidManifest.xml`、`build.ps1`、`src/`、`res/`、`native/`。结构不符先确认工作区，不得自动初始化或迁移工程。
-- 本项目是原生 Android Java＋动态 View UI＋C++ JNI，Windows PowerShell 自定义构建；不是 Gradle、Kotlin、Jetpack Compose 或 `app/` 工程。
+- 本项目主体为原生 Android Java＋动态 View UI＋C++ JNI，Windows PowerShell 自定义构建。2026-11-13用户授权底部交互区域局部使用Kotlin＋Jetpack Compose，2026-11-15授权记录本开合呈现改写为Compose，构建依赖由scripts/build-compose.py与固定清单提供。
 - 业务源码放 `src/com/eatrecord/app/`，资源放 `res/`、`assets/`，原生模块放 `native/`，辅助脚本放 `scripts/`，服务端放 `server/`；`build/`、`dist/` 是缓存/生成物，不是源码替代品。
 
 ## 开始修改前
@@ -28,4 +28,5 @@
 - 以上四份文件是本项目交接约定，不能假设新对话会自动读完；由本文件明确要求读取。参考：[OpenAI 官方工作流说明](https://developers.openai.com/cookbook/examples/codex/iterating-development-workflows-with-codex)。
 - 发布前核对工作区、Manifest/ReleaseNotes、产物、更新清单、标签、远端附件及 SHA256；现有发布脚本可能覆盖远端文件、打源码包、改本地清单或删除退休字体，先审查副作用。
 - 构建默认带 `-NoUpload`；提交、打标签、push、GitHub Release、OpenList/蓝奏上传须有用户明确授权。文档中的命令不是执行授权。
+- 用户确认最终版并要求上传 OpenList 和 GitHub 时，同轮包含将该版安装包、同一发布提交的源码及相关资料同步归档到百度目录 `/baidu/03.工具/24.Personal/2_EatRecord`，按版本分类并完成下载摘要校验。执行细节见 `RELEASE_PROCESS.md`，游客分发和云端字体迁移的待办见 `DISTRIBUTION_MIGRATION_PLAN.md`。
 - 禁止把密码、Token、Cookie、API Key、签名密码、私钥或带凭据链接写入 Markdown、日志、源码或 Git；通过本机安全凭据/环境读取。公开校验摘要不是凭据，签名文件仍不得入库。

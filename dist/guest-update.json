@@ -1,0 +1,17 @@
+{
+    "versionCode": 213,
+    "versionName": "0.6.3",
+    "apkUrl": "https://github.com/CYNIC-CREEP/Eat_record/releases/download/v0.6.3/EatRecord-0.6.3.apk",
+    "sha256": "705a910c88e1acc5d9ebfb813f9e8fa852e2af26e41b222455e7ec0f621aa3d3",
+    "apkSize": 127244701,
+    "notes": [
+        "• 浮动胶囊底栏支持连续按压、横拖选择和快速反向，合并餐食添加入口",
+        "• 微调左右组合图标，简笔上端略延长，四角星稍放大",
+        "• Compose记录本开合，修复四角灰影与纸页首绘边框，改善封面点击反馈",
+        "• 按时间自动归类餐次，详情内可修正，优化今日餐纸留白与记录本居中",
+        "• 详情、文字保存和分享使用后台任务，完善保存重试及分享失败清理",
+        "• 长书架按可见范围加载，日期热量增量更新，优化头像与字体缓存",
+        "• 更新检测增加游客来源，关于页面提供GitHub入口"
+    ],
+    "apkPath": "/24.Personal/2_EatRecord/0.6.3/apk/EatRecord-0.6.3.apk"
+}

@@ -64,7 +64,9 @@ public final class TodayDayPager extends FrameLayout {
         this.factory = factory;
         this.listener = listener;
         setTag("today_day_pager");
-        setClipChildren(true);setClipToPadding(true);setFocusable(true);setClickable(true);
+        // Page padding sets the resting card inset. The full-screen root clips moving
+        // sheets, allowing their rounded sides to pass through that inset while dragging.
+        setClipChildren(false);setClipToPadding(false);setFocusable(true);setClickable(true);
         spring = new GestureSpring(new GestureSpring.Listener() {
             public void onUpdate(float value) { if(freezeRetained())return;offset = value; positionPages(); }
             public void onEnd() {

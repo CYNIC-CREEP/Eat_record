@@ -16,6 +16,13 @@ final class FoodSavedPhotoPolicy {
         return null;
     }
 
+    /** A detail owns one food even when older records share the same original photograph. */
+    static JSONObject sourceItem(JSONObject meal, String source, String id) {
+        if (id == null || id.isEmpty()) return sourceItem(meal, source);
+        JSONObject item = NutritionStore.find(meal, id);
+        return item != null && source.equals(item.optString("sourcePhoto")) ? item : null;
+    }
+
     static boolean skip(JSONObject item, String hash, boolean force) {
         if (force || item == null) return false;
         if (item.optBoolean("userEdited")) return true;

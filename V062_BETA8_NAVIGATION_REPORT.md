@@ -1,10 +1,12 @@
 # 0.6.2-beta.8 通用容器导航过渡
 
+> 2026-11-12归档说明：证据链接改为所属ZIP，原路径与包内成员见[归档记录](ARCHIVE_REPORT_20261112.md)。源码归档已剔除生成物，原发布摘要仍为历史记录；中间Beta包按用户选择不保留。
+
 2026-11-12。已将方案A提炼为通用点击来源过渡，并接入适合的同宿主层级页面。本轮交付普通Beta APK，供用户自行安装验收。
 
 ## 安装包
 
-[EatRecord-0.6.2-beta.8-debug.apk](dist/EatRecord-0.6.2-beta.8-debug.apk)，code201，121220209 bytes，约115.605MiB，min26/target37。
+EatRecord-0.6.2-beta.8-debug.apk（历史中间包，按归档策略不保留），code201，121220209 bytes，约115.605MiB，min26/target37。
 
 SHA256为`6ee347157ea3297ae64d4c58b1d508a61c3eafcca8dad4ba279dbece7ddf28a1`。
 
@@ -50,9 +52,9 @@ Session仅在同一入口key与完整父子身份匹配时复用中断纹理。�
 
 ## 验证结果
 
-- `build.ps1 -NoUpload`完整构建通过，日志为[build-final.log](build/v062b8-navigation/build-final.log)。
+- `build.ps1 -NoUpload`完整构建通过，日志为[build-final.log](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 - 完整JVM通过，含新增145项有限来源/嵌套/跳层/多父/循环/失效检查及无来源重新进入失效回归，原容器61678项、A/B52937项、普通设置6219项、底栏365项、根页1160项与其他业务兼容检查通过。
-- 新Android QA场景 `revision-v062b8`覆盖实际点击、长页面、Hint嵌套/系统跳层、收藏双来源、字体来源独立身份、跨入口中断、旧回调及纹理释放。使用最终构建classes编译通过，日志为[qa-compile-final.log](build/v062b8-navigation/qa-compile-final.log)。
+- 新Android QA场景 `revision-v062b8`覆盖实际点击、长页面、Hint嵌套/系统跳层、收藏双来源、字体来源独立身份、跨入口中断、旧回调及纹理释放。使用最终构建classes编译通过，日志为[qa-compile-final.log](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 - `verify-food-apk.py`、apksigner v2/v3、aapt2版本核对及git diff检查通过。
 - 本轮新扩展页面尚未逐项真机视觉验收，Android QA只编译，安装包由用户自行安装验证。此前餐次试点与夜间修复的真机证据仍属于历史版本。
 
@@ -62,6 +64,6 @@ Session仅在同一入口key与完整父子身份匹配时复用中断纹理。�
 
 主要修改MainActivity的视觉来源接入、PageCrossfade通用委托、SettingsContainerTransform元数据与入口身份、NavigationTransitionHistory、资源键值id、版本及相关测试。原主题色token数值、原业务回调、数据格式及仓库接口继续使用原实现。
 
-本轮开始前44份文件及beta.7普通APK保存在[before](build/v062b8-navigation/before)，摘要见[before-manifest.json](build/v062b8-navigation/before-manifest.json)。本轮独立补丁为[this-round.patch](build/v062b8-navigation/this-round.patch)，仅检查反向适用性。最终源文件与包体核对见[final-audit.json](build/v062b8-navigation/final-audit.json)。
+本轮开始前44份文件及beta.7普通APK保存在[before](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，摘要见[before-manifest.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。本轮独立补丁为[this-round.patch](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，仅检查反向适用性。最终源文件与包体核对见[final-audit.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 当前main及本地origin/main仍为8cc26c5，server/dist正式清单仍0.6.1/code193。本地交付保持Beta及未提交工作区。

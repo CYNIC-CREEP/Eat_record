@@ -4,7 +4,7 @@
 
 ## 主要功能
 
-- 今日记录：在统一餐纸中按日期浏览餐食，支持三餐及可选加餐的文字、图片、食物贴纸与手动热量；兼容旧餐次记录。
+- 今日记录：在统一餐纸中按日期浏览餐食，支持三餐、夜宵及历史加餐的文字、图片、食物贴纸与手动热量；兼容旧餐次记录。
 - 图片与贴纸：拍照或相册导入后本地抠图，明确确认才加入日记；支持旋转、删除、修边、重抠图与识别信息。
 - 足迹本子：按日期生成记录本，支持多种封面、纸张、字体、翻页方式和分享水印。
 - 日历与收藏：查看每日餐次、就餐方式和历史记录，收藏重要的一天并切换列表或展开布局。
@@ -14,7 +14,7 @@
 
 ## 构建
 
-需要 JDK 17 和 Android SDK。项目不依赖 Gradle，使用 Android SDK 自带工具直接构建：
+需要JDK17或更高版本及Android SDK。主体Java/JNI与局部Kotlin Compose底栏、记录本开合由PowerShell和Android SDK工具构建，Kotlin及AndroidX版本、摘要固定在scripts/compose-dependencies.lock.json。首次构建会下载对应编译与运行依赖。
 
 ```powershell
 .\build.ps1 -NoUpload
@@ -30,7 +30,7 @@ beta.34起，新导出与云同步均剥离API配置、云会话和上传授权�
 
 ## 版本
 
-当前正式版本为`0.6.1`（versionCode193），已由用户在魅族21人工复查通过，并发布到GitHub、OpenList和应用更新清单。默认三餐、可选夜宵，今日上滑进入已开启的营养师，我页月亮／太阳切换日夜并圆形扩散；记录本各餐热量同步识别值并优先使用手填值。下载与说明见[0.6.1 Release](https://github.com/CYNIC-CREEP/Eat_record/releases/tag/v0.6.1)及[0.6.1 更新说明](RELEASE_NOTES_0.6.1.md)。发布校验见[V061_PUBLISH_REPORT.md](V061_PUBLISH_REPORT.md)；旧版更新接口限制见[V06_PUBLISH_REPORT.md](V06_PUBLISH_REPORT.md)。
+当前正式版本候选为`0.6.3`（versionCode213），用户已授权GitHub、原OpenList分发目录和百度游客目录同步发布。版本说明见[0.6.3更新内容](RELEASE_NOTES_0.6.3.md)，本地验包与本轮进度见CURRENT_TASK.md及[V063_DELIVERY_REPORT.md](V063_DELIVERY_REPORT.md)。新增餐食按本地时间归类，食物详情内可点击餐次字样修正。
 
 0.6.0在既有功能上调整餐次文字上下居中并保留左右对齐，修复图片加载中切后台、恢复后可能跳图的边界问题。正式包审查与设备验收见V06_RELEASE_REPORT.md；沿用既有签名覆盖升级。
 

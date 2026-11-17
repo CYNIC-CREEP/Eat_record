@@ -1,5 +1,7 @@
 # 0.6.2-beta.6 方案A与暗色灰闪修复
 
+> 2026-11-12归档说明：证据链接改为所属ZIP，原路径与包内成员见[归档记录](ARCHIVE_REPORT_20261112.md)。源码归档已剔除生成物，原发布摘要仍为历史记录；中间Beta包按用户选择不保留。
+
 2026-11-07。按用户最新选择，餐次管理试点默认恢复方案A。普通包已安装并完成ADB真机进退回归。
 
 ## 最终行为
@@ -24,11 +26,11 @@
 
 ## 最终包与构建
 
-[EatRecord-0.6.2-beta.6-debug.apk](dist/EatRecord-0.6.2-beta.6-debug.apk)，code199，121216113 bytes，min26/target37。
+EatRecord-0.6.2-beta.6-debug.apk（历史中间包，按归档策略不保留），code199，121216113 bytes，min26/target37。
 
 SHA256为`cc017bb337f6a6273f3f8cd9089e4ca733b93c3f35aaad47dde93813668aca89`。手机base.apk读回摘要与交付包相同。
 
-- `build.ps1 -NoUpload`成功，日志为[build-final.log](build/v062b6-fix/build-final.log)。中断过的签名构建已重新完整执行。
+- `build.ps1 -NoUpload`成功，日志为[build-final.log](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。中断过的签名构建已重新完整执行。
 - 完整JVM通过，含52937项A/B与默认A检查、61678项容器、6219项普通设置、365项底栏和1160项根页检查，其余业务兼容检查通过。
 - 验包通过，4个模型、双ARM共8库、6份固定运行库摘要、字体/许可及QA隔离有效。
 - 普通包无debuggable，v2/v3签名有效，证书SHA256为`7a279f9102fa24c73e03f8cbe94eef79eeb9276a552acf505e8c6abc9d0a71ee`，沿用现有安装证书并保留数据覆盖安装。
@@ -56,23 +58,23 @@ SHA256为`cc017bb337f6a6273f3f8cd9089e4ca733b93c3f35aaad47dde93813668aca89`。�
 
 右缘部分ROI会短暂达到约41，对应容器边缘及填色经过，左缘和标题空白没有同步抬升。该局部几何变化与原整页灰峰分别量化。
 
-人工检查进入与两种返回的六阶段解码帧，来源空间关系、标题正文交接和终态均正常。证据为[final-visual-summary.json](build/v062b6-fix/final-review/final-visual-summary.json)、[device-final.json](build/v062b6-fix/device-final.json)。
+人工检查进入与两种返回的六阶段解码帧，来源空间关系、标题正文交接和终态均正常。证据为[final-visual-summary.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)、[device-final.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 ## 录像与关键帧
 
-- [最终暗色原速录像](build/v062b6-fix/A-final-dark-app.mp4)
-- [最终日间原速录像](build/v062b6-fix/A-final-day-app.mp4)
-- [暗色进入六帧](build/v062b6-fix/final-review/final-dark-push-keyframes.jpg)
-- [暗色顶栏返回六帧](build/v062b6-fix/final-review/final-dark-top-pop-keyframes.jpg)
-- [暗色Back返回六帧](build/v062b6-fix/final-review/final-dark-system-pop-keyframes.jpg)
-- [日间进入六帧](build/v062b6-fix/final-review/final-day-push-keyframes.jpg)
-- [暗色准备态相邻帧](build/v062b6-fix/final-review/final-dark-prep-001-002-003.jpg)
+- [最终暗色原速录像](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [最终日间原速录像](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [暗色进入六帧](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [暗色顶栏返回六帧](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [暗色Back返回六帧](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [日间进入六帧](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [暗色准备态相邻帧](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
 
-六阶段为约0%、10%、25%、50%、75%、100%，由录屏和曲线辅助定位，属于近似进度。录像只裁顶部100px系统栏，保留App标题和底栏。暗色260帧、日间262帧，导出前后逐帧PTS差0，原速保持。摘要见[media-final.json](build/v062b6-fix/media-final.json)。原始系统栏媒体分析完成后清理，保留App画面、解码帧及摘要。
+六阶段为约0%、10%、25%、50%、75%、100%，由录屏和曲线辅助定位，属于近似进度。录像只裁顶部100px系统栏，保留App标题和底栏。暗色260帧、日间262帧，导出前后逐帧PTS差0，原速保持。摘要见[media-final.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。原始系统栏媒体分析完成后清理，保留App画面、解码帧及摘要。
 
 ## 性能和剩余限制
 
-独立于录屏的日间暖态四组往返采样504帧，deadline jank为9次、1.79%，p50/p90/p95/p99为7/12/13/17ms，Missed Vsync为0，slow bitmap uploads为1。该采样仍有慢帧，单轮结果不用于证明所有设备或情境的性能。日志为[gfx-final.txt](build/v062b6-fix/gfx-final.txt)。
+独立于录屏的日间暖态四组往返采样504帧，deadline jank为9次、1.79%，p50/p90/p95/p99为7/12/13/17ms，Missed Vsync为0，slow bitmap uploads为1。该采样仍有慢帧，单轮结果不用于证明所有设备或情境的性能。日志为[gfx-final.txt](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 暗色录像最初两帧的父列表卡片已约63灰，早于本次容器准备画面，随后为正常暖暗色。这是进入“其他设置”后已有的源页面缓存色阶边界，保留为后续检查项。餐次试点的整页灰峰和结束释放跳变已分别验证消除。
 
@@ -87,6 +89,6 @@ API26–28、大字体、RTL、分屏、TalkBack及完整内存峰值仍待专�
 
 `SETTINGS_CONTAINER_MOTION_ENABLED=false`沿原普通设置转场回退。系统动画0直接显示已接受页面，旧临时selector继续支持历史基线。根页与底栏开关继续由原组件拥有。
 
-本轮开始前42份文件及beta.5 APK保存在[before](build/v062b6-fix/before)。MainActivity、PageCrossfade、SettingsContainerMath、根页/底栏及正式更新清单等15份文件摘要与开始前相同，见[protection-final.json](build/v062b6-fix/protection-final.json)。本轮修改补丁为[this-round.patch](build/v062b6-fix/this-round.patch)，仅检查反向适用性。最终源文件与已安装字节、媒体和Git检查见[final-audit.json](build/v062b6-fix/final-audit.json)。
+本轮开始前42份文件及beta.5 APK保存在[before](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。MainActivity、PageCrossfade、SettingsContainerMath、根页/底栏及正式更新清单等15份文件摘要与开始前相同，见[protection-final.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。本轮修改补丁为[this-round.patch](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，仅检查反向适用性。最终源文件与已安装字节、媒体和Git检查见[final-audit.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 当前main与本地origin/main仍为8cc26c5，server/dist正式清单为0.6.1/code193。交付为本地Beta，保留全部已有未提交修改。

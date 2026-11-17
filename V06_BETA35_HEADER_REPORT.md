@@ -1,5 +1,7 @@
 # 0.6.0-beta.35 夜间共享顶栏修复
 
+> 2026-11-12归档说明：证据链接改为所属ZIP，原路径与包内成员见[归档记录](ARCHIVE_REPORT_20261112.md)。源码归档已剔除生成物，原发布摘要仍为历史记录；中间Beta包按用户选择不保留。
+
 日期：2026-10-29（Asia/Shanghai）。`versionName=0.6.0-beta.35`，`versionCode=183`。仍为本地Beta，等待用户最终验收后再决定0.6.0正式版；没有提交、标签、push、上传或线上清单修改。
 
 ## 问题与最终实现
@@ -34,7 +36,7 @@ beta.34隔离设备测试通过后，真实魅族21仍复现迹、个性化等�
 
 ## 普通产物
 
-- [EatRecord-0.6.0-beta.35-debug.apk](dist/EatRecord-0.6.0-beta.35-debug.apk)：121162865 bytes，115.550 MiB。
+- EatRecord-0.6.0-beta.35-debug.apk（历史中间包，按归档策略不保留）：121162865 bytes，115.550 MiB。
 - SHA256：`23a8087d7f2550753fe7e720f799a3d4717b3865ae7761c8552a6ac0c523d8b3`。
 - 证书SHA256：`7a279f9102fa24c73e03f8cbe94eef79eeb9276a552acf505e8c6abc9d0a71ee`，v2／v3通过。
 - minSdk26，targetSdk37；后缀debug为现有构建命名，普通Manifest未启用debuggable，不是QA包。

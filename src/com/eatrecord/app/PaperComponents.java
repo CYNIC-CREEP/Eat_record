@@ -184,7 +184,12 @@ public final class PaperComponents {
         public Paper(Context c,boolean n){this(c,n,0);}
         public Paper(Context c,boolean n,int plainTop){night=n;density=c.getResources().getDisplayMetrics().density;this.plainTop=Math.max(0,plainTop);}
         @Override public void draw(Canvas c){
-            Rect b=getBounds();c.drawColor(UiTokens.paper(night));
+            c.drawColor(UiTokens.paper(night));
+            drawTexture(c);
+        }
+        /** Record decoration separately when a snapshot already owns the exact paper pixels. */
+        public void drawTexture(Canvas c){
+            Rect b=getBounds();
             p.setColor(night?Color.argb(24,177,153,124):Color.argb(38,181,155,120));p.setStrokeWidth(density*.5f);
             for(float y=b.top+28*density;y<b.bottom;y+=32*density)if(y>=b.top+plainTop)c.drawLine(b.left+18*density,y,b.right-18*density,y,p);
             p.setColor(night?Color.argb(15,220,200,170):Color.argb(17,144,113,77));

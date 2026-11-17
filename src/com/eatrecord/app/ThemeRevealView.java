@@ -17,6 +17,8 @@ final class ThemeRevealView extends View {
     private Bitmap snapshot;
     private final Paint image = new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
     private final Paint erase = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final int[] eraseColors = {Color.WHITE,Color.WHITE,Color.TRANSPARENT};
+    private final float[] eraseStops = {0,0,1};
     private final float cx,cy,maximum,feather;
     private float radius;
     private ValueAnimator animator;
@@ -58,8 +60,8 @@ final class ThemeRevealView extends View {
         canvas.drawBitmap(snapshot,0,0,image);
         if(radius>0){
             float inner=Math.max(0,radius-feather);
-            erase.setShader(new RadialGradient(cx,cy,radius,new int[]{Color.WHITE,Color.WHITE,Color.TRANSPARENT},
-                    new float[]{0,inner/radius,1},Shader.TileMode.CLAMP));
+            eraseStops[1]=inner/radius;
+            erase.setShader(new RadialGradient(cx,cy,radius,eraseColors,eraseStops,Shader.TileMode.CLAMP));
             canvas.drawCircle(cx,cy,radius,erase);
         }
         canvas.restoreToCount(layer);

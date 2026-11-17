@@ -110,7 +110,8 @@ final class SettingsContainerTransform {
         }catch(OutOfMemoryError|RuntimeException unavailable){recycle(frame);return null;}
         finally{recycle(pixel);}
     }
-    private static final class CaptureAppearance {
+    /** Shared appearance scope while recording short-lived offscreen textures. */
+    static final class CaptureAppearance {
         final ArrayList<View> changed=new ArrayList<>();
         final ArrayList<PaperBackground> papers=new ArrayList<>();
         void disable(View view){

@@ -13,7 +13,9 @@ final class RootPagePager extends FrameLayout {
     interface Listener {
         void onProgress(float position);
         void onTarget(int index);
+        default void onRelease(int index,float velocityPagesPerSecond){onTarget(index);}
         void onRest(int index);
+        default boolean canOwnInput(){return true;}
     }
     private final View[] pages;
     private final Listener listener;
@@ -51,7 +53,7 @@ final class RootPagePager extends FrameLayout {
     boolean isDragging(){return motion.isDragging();}
     boolean isFrozen(){return frozen;}
     boolean ownsView(View view){
-        if(frozen||isInteracting())return false;
+        if(frozen||isInteracting()||!canOwnInput())return false;
         View node=view;View owner=selectedPage();
         if(view==owner)return true;
         if(owner instanceof AdvisorPager){if(((AdvisorPager)owner).interacting())return false;owner=((AdvisorPager)owner).selectedPage();}
@@ -61,8 +63,9 @@ final class RootPagePager extends FrameLayout {
     void grab(){cancelSprings();motion.grab(Math.round(motion.position()));positionPages();}
     void drag(float dx){motion.drag(-dx/Math.max(1,getWidth()));positionPages();}
     void release(float velocity,boolean cancelled){
-        motion.release(-velocity/Math.max(1,getWidth()),cancelled);
-        if(listener!=null)listener.onTarget(motion.target());start(false,-velocity/Math.max(1,getWidth()));
+        float pagesVelocity=-velocity/Math.max(1,getWidth());
+        motion.release(pagesVelocity,cancelled);
+        if(listener!=null)listener.onRelease(motion.target(),pagesVelocity);start(false,pagesVelocity);
     }
     void select(int index,boolean animated){
         cancelSprings();motion.select(index);frozen=false;
@@ -75,6 +78,8 @@ final class RootPagePager extends FrameLayout {
         frozen=true;cancelSprings();if(motion.isDragging())motion.release(0,true);updateOwnership();
     }
     void resume(){if(!frozen)return;frozen=false;if(listener!=null)listener.onTarget(motion.target());start(false,0);}
+    private boolean canOwnInput(){return listener==null||listener.canOwnInput();}
+    void refreshOwnership(){positionPages();}
     private void start(boolean tap,float velocity){
         cancelSprings();
         if(frozen)return;
@@ -88,7 +93,7 @@ final class RootPagePager extends FrameLayout {
         setTag(logical==0?"main_peer_today":logical==1?"main_peer_footprints":"main_peer_me");
         for(int i=0;i<pages.length;i++){
             View page=pages[i];float x=(i-value)*getWidth();
-            boolean active=!frozen&&!isInteracting()&&i==logical;
+            boolean active=!frozen&&!isInteracting()&&canOwnInput()&&i==logical;
             page.setTranslationX(x);page.setTranslationY(0);page.setScaleX(1);page.setScaleY(1);
             page.setAlpha(1);
             page.setVisibility(Math.abs(i-value)<1.001f?View.VISIBLE:View.INVISIBLE);
@@ -98,7 +103,7 @@ final class RootPagePager extends FrameLayout {
         updateOwnership();if(listener!=null)listener.onProgress(value);invalidate();
     }
     private void updateOwnership(){
-        boolean active=!frozen&&!isInteracting()&&motion.target()==0&&(!(pages[0] instanceof AdvisorPager)||((AdvisorPager)pages[0]).atToday());
+        boolean active=!frozen&&!isInteracting()&&canOwnInput()&&motion.target()==0&&(!(pages[0] instanceof AdvisorPager)||((AdvisorPager)pages[0]).atToday());
         if(ownershipKnown&&active==homeOwned)return;ownershipKnown=true;homeOwned=active;
         View day=pages[0].findViewWithTag("today_day_pager"),calendar=pages[0].findViewWithTag("home_calendar");
         if(day instanceof TodayDayPager)((TodayDayPager)day).setRootActive(active);
@@ -106,7 +111,7 @@ final class RootPagePager extends FrameLayout {
     }
     // While a root sheet is moving, taps cannot activate an outgoing cached page.
     // MainActivity still owns horizontal grab/reverse input before this dispatch.
-    @Override public boolean onInterceptTouchEvent(MotionEvent event){return isInteracting()||super.onInterceptTouchEvent(event);}
+    @Override public boolean onInterceptTouchEvent(MotionEvent event){return !canOwnInput()||isInteracting()||super.onInterceptTouchEvent(event);}
     @Override protected void onLayout(boolean changed,int l,int t,int r,int b){
         super.onLayout(changed,l,t,r,b);positionPages();
     }

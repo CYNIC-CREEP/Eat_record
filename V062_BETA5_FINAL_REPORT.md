@@ -1,5 +1,7 @@
 # 0.6.2-beta.5 餐次管理动效收尾
 
+> 2026-11-12归档说明：证据链接改为所属ZIP，原路径与包内成员见[归档记录](ARCHIVE_REPORT_20261112.md)。源码归档已剔除生成物，原发布摘要仍为历史记录；中间Beta包按用户选择不保留。
+
 2026-11-06收尾时记录。后续用户实测确认局部放大后突切、暗色整页灰闪，本文先前的视觉通过结论已被取代。beta.6正在返修，当前状态以CURRENT_TASK.md为准。
 
 ## 最终实现
@@ -24,23 +26,23 @@
 
 窗口mOwnerUid为10069，package为com.android.systemui，类型NAVIGATION_BAR_PANEL，重力位于屏幕右侧。SurfaceFlinger同期增加其可见Surface。应用B的局部绘制不包含该边缘弧形，出现位置也超出局部卡片Path。证据确认它属于系统返回手势呈现，应用过渡层保持原实现。
 
-- [手势进行中截图](build/v062b5-final/gesture-held-app.png)
-- [手势结束后截图](build/v062b5-final/gesture-after-app.png)
-- [原速手势录屏](build/v062b5-final/gesture-app.mp4)
-- [进行中窗口信息](build/v062b5-final/held-gesture-windows.txt)
-- [手势前窗口信息](build/v062b5-final/before-gesture-windows.txt)
-- [手势后窗口信息](build/v062b5-final/after-gesture-windows.txt)
+- [手势进行中截图](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [手势结束后截图](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [原速手势录屏](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [进行中窗口信息](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [手势前窗口信息](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
+- [手势后窗口信息](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)
 
 旧B录屏也有同形弧面，但仅凭旧录屏的操作段名称不足以判断来源。本轮通过当前真机窗口归属及按住时的实际截图完成定位。
 
 ## 实际构建与安装
 
-普通包为[EatRecord-0.6.2-beta.5-debug.apk](dist/EatRecord-0.6.2-beta.5-debug.apk)，code198，121212017 bytes，min26/target37。
+普通包为EatRecord-0.6.2-beta.5-debug.apk（历史中间包，按归档策略不保留），code198，121212017 bytes，min26/target37。
 
 SHA256为`641e9b0fa3d0dae053dfc769875e38c3ea6f4cc54395081154fe400707b00df2`。
 
-- `build.ps1 -NoUpload`成功，日志为[build.log](build/v062b5-final/build.log)。保留Beta版本标记。
-- 全部JVM通过，包含52937项默认B/A-B合同、61678项原容器、6219项设置、365项底栏及1160项根页检查，其他既有数据兼容回归通过。日志为[jvm.log](build/v062b5-final/jvm.log)。
+- `build.ps1 -NoUpload`成功，日志为[build.log](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。保留Beta版本标记。
+- 全部JVM通过，包含52937项默认B/A-B合同、61678项原容器、6219项设置、365项底栏及1160项根页检查，其他既有数据兼容回归通过。日志为[jvm.log](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 - UpgradeSmoke仅使用本轮普通构建classes编译通过。新增默认B与无extra Intent检查，旧基线oracle显式选择Baseline后恢复默认B。未在日常手机执行写夹具runner。
 - 验包通过，4个模型、双ARM共8库、6份运行库固定摘要、字体/许可及QA隔离通过。普通包无debuggable。
 - v2/v3签名有效，证书SHA256为`7a279f9102fa24c73e03f8cbe94eef79eeb9276a552acf505e8c6abc9d0a71ee`，与原安装相同。
@@ -70,14 +72,14 @@ SHA256为`641e9b0fa3d0dae053dfc769875e38c3ea6f4cc54395081154fe400707b00df2`。
 
 | 媒体 | 文件 |
 | --- | --- |
-| 日间原速进入与两种返回 | [day-app.mp4](build/v062b5-final/day-app.mp4) |
-| 暗色原速进入与两种返回 | [dark-app.mp4](build/v062b5-final/dark-app.mp4) |
-| 日间解码总览 | [day-contact.jpg](build/v062b5-final/day-contact.jpg) |
-| 暗色解码总览 | [dark-contact.jpg](build/v062b5-final/dark-contact.jpg) |
+| 日间原速进入与两种返回 | [day-app.mp4](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| 暗色原速进入与两种返回 | [dark-app.mp4](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| 日间解码总览 | [day-contact.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
+| 暗色解码总览 | [dark-contact.jpg](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip) |
 
-视频只裁顶部100px系统栏，保留App标题和底栏。日间182帧、暗色177帧、手势200帧，各自导出前后PTS逐帧差0，原速保持。摘要在[media.json](build/v062b5-final/media.json)，逐项状态在[regression.json](build/v062b5-final/regression.json)及[device-final.json](build/v062b5-final/device-final.json)。
+视频只裁顶部100px系统栏，保留App标题和底栏。日间182帧、暗色177帧、手势200帧，各自导出前后PTS逐帧差0，原速保持。摘要在[media.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，逐项状态在[regression.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)及[device-final.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
-暗色非录屏四组进入/返回采样327帧，deadline jank为27次、8.26%，p50/p90/p95/p99为8/21/29/46ms，slow bitmap uploads为0。仍有慢帧，见[gfx-dark.txt](build/v062b5-final/gfx-dark.txt)。本轮与之前日间采样条件不同，不能据此推断性能提升或退化，更不能宣称零卡顿。API26–28、大字体、RTL、分屏、TalkBack及精确内存峰值仍待专项验收。
+暗色非录屏四组进入/返回采样327帧，deadline jank为27次、8.26%，p50/p90/p95/p99为8/21/29/46ms，slow bitmap uploads为0。仍有慢帧，见[gfx-dark.txt](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。本轮与之前日间采样条件不同，不能据此推断性能提升或退化，更不能宣称零卡顿。API26–28、大字体、RTL、分屏、TalkBack及精确内存峰值仍待专项验收。
 
 ## 本轮文件及保护
 
@@ -90,7 +92,7 @@ SHA256为`641e9b0fa3d0dae053dfc769875e38c3ea6f4cc54395081154fe400707b00df2`。
 
 根Tab、液态底栏、实际B几何/绘制代码、业务存储/同步/登录/备份及其他设置路由均保留原代码。本轮相对开始快照只有默认选择和版本相关生产改动。server/update.json、dist/update.json继续为0.6.1/code193，未提交、推送、发布或上传。
 
-开始前41份dirty/untracked及保护文件和beta.4 APK已存入[before](build/v062b5-final/before)，摘要为[before-manifest.json](build/v062b5-final/before-manifest.json)。本轮补丁为[this-round.patch](build/v062b5-final/this-round.patch)，只验证反向适用性。最终源码、包和媒体检查见[final-audit.json](build/v062b5-final/final-audit.json)。
+开始前41份dirty/untracked及保护文件和beta.4 APK已存入[before](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，摘要为[before-manifest.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。本轮补丁为[this-round.patch](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)，只验证反向适用性。最终源码、包和媒体检查见[final-audit.json](https://pan.freefeng.icu/baidu/03.%E5%B7%A5%E5%85%B7/24.Personal/2_EatRecord/0.6.2/%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE/%E5%85%B3%E9%94%AE%E9%AA%8C%E6%94%B6%E8%AF%81%E6%8D%AE.zip)。
 
 ## 关闭与回退
 
