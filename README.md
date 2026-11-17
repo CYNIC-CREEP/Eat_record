@@ -30,7 +30,7 @@ beta.34起，新导出与云同步均剥离API配置、云会话和上传授权�
 
 ## 版本
 
-当前正式版本候选为`0.6.3`（versionCode213），用户已授权GitHub、原OpenList分发目录和百度游客目录同步发布。版本说明见[0.6.3更新内容](RELEASE_NOTES_0.6.3.md)，本地验包与本轮进度见CURRENT_TASK.md及[V063_DELIVERY_REPORT.md](V063_DELIVERY_REPORT.md)。新增餐食按本地时间归类，食物详情内可点击餐次字样修正。
+当前正式版本为`0.6.3`（versionCode213），已同步发布至GitHub、原OpenList目录与百度游客目录。新增餐食按本地时间归类，食物详情内可点击餐次字样修正。版本内容与完整下载校验见[更新说明](RELEASE_NOTES_0.6.3.md)及[发布记录](V063_PUBLISH_REPORT.md)。[GitHub下载](https://github.com/CYNIC-CREEP/Eat_record/releases/tag/v0.6.3) · [游客下载](https://pan.freefeng.icu/24.Personal/2_EatRecord/0.6.3)
 
 0.6.0在既有功能上调整餐次文字上下居中并保留左右对齐，修复图片加载中切后台、恢复后可能跳图的边界问题。正式包审查与设备验收见V06_RELEASE_REPORT.md；沿用既有签名覆盖升级。
 

@@ -208,7 +208,7 @@ git archive --format=zip --prefix=EatRecord-<versionName>/ --output=dist/EatReco
 5. 通过游客根`/24.Personal/2_EatRecord`核对对应版本、说明和下载可访问性。游客可读内容按公开资料审查，沿用项目凭据、签名、用户记录与QA包的排除规则。
 6. 游客update.json及fonts准备并启用后，将其同版清单和共享资源校验纳入发布收尾。
 
-2026-11-12已准备游客fonts、许可、教程及根update.json，并完成匿名完整下载校验。server/guest-update.json为游客侧正式清单，apkPath采用`/24.Personal/2_EatRecord`前缀。后续正式发布同时核对server/update.json与server/guest-update.json的版本、APK大小和SHA256，再分别按账号和游客上下文核对路径。当前两个清单对应已发布0.6.2/code202，Beta交付版本为0.6.3-beta.10/code212。旧目录整合与设备验收见[DISTRIBUTION_MIGRATION_PLAN.md](DISTRIBUTION_MIGRATION_PLAN.md)。
+2026-11-12已准备游客fonts、许可、教程及根update.json，并完成匿名完整下载校验。server/guest-update.json为游客侧正式清单，apkPath采用`/24.Personal/2_EatRecord`前缀。后续正式发布同时核对server/update.json与server/guest-update.json的版本、APK大小和SHA256，再分别按账号和游客上下文核对路径。当前两个清单对应已发布0.6.3/code213，GitHub与两个OpenList位置的完整下载校验见[V063_PUBLISH_REPORT.md](V063_PUBLISH_REPORT.md)。旧目录整合与设备验收见[DISTRIBUTION_MIGRATION_PLAN.md](DISTRIBUTION_MIGRATION_PLAN.md)。
 
 ## 8. 维护边界
 

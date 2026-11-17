@@ -128,7 +128,7 @@ FoodUi详情内提供独立餐次字样点击区域，循环午→早→夜→�
 
 0.6.3-beta.1由AppDownloadClient同时支持应用账号相对路径和游客路径，AppUpdateCheck按原位置、游客位置顺序判断versionCode，发现新版本后返回该来源的下载信息。游客读取采用匿名请求，字体优先读取游客fonts并可回退原位置，默认内置字体与已下载字体继续复用。关于该软件提供GitHub仓库入口，检测回调按会话世代及页面身份接收。
 
-百度管理根为`/baidu/03.工具/24.Personal/2_EatRecord`，游客根为`/24.Personal/2_EatRecord`。游客目录已有五种字体、五份许可、教程及正式0.6.2/code202清单，当前Beta为0.6.3-beta.10/code212。云端资料与APK均已通过无登录完整下载校验。实施清单与设备验收状态见[DISTRIBUTION_MIGRATION_PLAN.md](DISTRIBUTION_MIGRATION_PLAN.md)。
+百度管理根为`/baidu/03.工具/24.Personal/2_EatRecord`，游客根为`/24.Personal/2_EatRecord`。游客目录已有五种字体、五份许可、教程及正式0.6.3/code213清单。0.6.3的APK、同发布提交源码及资料已同步归档，应用只读和游客完整下载校验见[V063_PUBLISH_REPORT.md](V063_PUBLISH_REPORT.md)。实施清单与设备验收状态见[DISTRIBUTION_MIGRATION_PLAN.md](DISTRIBUTION_MIGRATION_PLAN.md)。
 
 餐图菜名和营养估算只使用用户配置的HTTPS视觉API，并明确取得上传授权；本地抠图不需要Key。新用户只有配置API或稍后，旧source=offline迁到api且关闭自动识别／照片授权、提升世代并hold旧营养任务，不自动产生API调用。旧营养值及真实来源仍可读，显示为历史基础估算，不冒充API结果。相关模型类、下载器、JNI、参考表、声明及LLM库不再构建或打包。
 

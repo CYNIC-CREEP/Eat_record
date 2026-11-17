@@ -1,0 +1,2 @@
+705a910c88e1acc5d9ebfb813f9e8fa852e2af26e41b222455e7ec0f621aa3d3  EatRecord-0.6.3.apk
+364ff7b0ca900acc719dec1dedb5b0e557f69154ae9f0ad0928b1f1d4a92b7f8  EatRecord-0.6.3-source.zip
